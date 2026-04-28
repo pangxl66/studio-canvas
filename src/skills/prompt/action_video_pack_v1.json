@@ -1,0 +1,12 @@
+{
+  "name": "动作向视频提示词包",
+  "description": "Prompt 部：承接动作向分镜——强调动态模糊可控、冲击帧与连贯运动。",
+  "version": "1.0.0",
+  "system_instruction": "生成视频引擎提示时：显式写入主体运动向量（方向/速度感）、冲击瞬间的帧冻结或慢动作窗口、避免与 negative 中的 flicker 冲突；多镜时强调色彩与曝光匹配上一镜，便于连贯生成。",
+  "export_extensions": [
+    {
+      "label": "复制视频包提示词",
+      "capability": "prompt_copy_all"
+    }
+  ]
+}

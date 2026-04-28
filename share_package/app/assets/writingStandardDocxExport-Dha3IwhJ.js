@@ -1,0 +1,1 @@
+import{f as e}from"./index-Dip2-t2i.js";import{exportStandardScriptDocx as d}from"./writingScriptExport-3w73NGn6.js";async function n(o,t){const r=e(o,{workTitle:t.workTitle},{template:t.template??"standard",includeStoryboardNotes:t.includeStoryboardNotes??!1});await d(r,t.workTitle)}export{n as exportWritingJsonToStandardDocx};

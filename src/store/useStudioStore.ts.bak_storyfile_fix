@@ -1,0 +1,3066 @@
+﻿/**
+ * Studio 鐢诲竷鍏ㄥ眬鐘舵€侊紙Zustand锛?
+ *
+ * 鈶?鑺傜偣 `data` 蹇呭～锛歩d, type, department, status, input, output, review_result, version锛堢被鍨嬶細`StudioNodeData`锛?
+ * 鈶?娴佹按绾跨姸鎬侊細NOT_STARTED 鈫?IN_PROGRESS 鈫?REVIEWED锛堟€荤洃宸查槄锛岃鎯呭弻閫夛級鈫?IN_PROGRESS锛堜紭鍖栬凯浠ｏ級| APPROVED | REJECTED锛涙棫鐢诲竷浠嶅彲鍑虹幇 WAITING_REVIEW
+ *    - 鏍￠獙锛歚canTransitionPipelineStatus`锛?/workflow.ts锛? `patchNodeData` 鍐呭 `status` 鐨勬牎楠?
+ *    - 涓嬫父寮曠敤锛氱紪鍓ц祫浜т粛鐢?`getLatestApprovedWritingBundle`锛涘垎闀滈儴榛樿鐙珛娑堣垂鑺傜偣 `input` 绾枃鏈紙鍙帴 TEXT_NODE锛?
+ */
+import {
+  addEdge,
+  applyEdgeChanges,
+  applyNodeChanges,
+  type Connection,
+  type Edge,
+  type EdgeChange,
+  type NodeChange,
+} from '@xyflow/react';
+import { create } from 'zustand';
+import { runPromptLeaderReview } from '@/agents/promptAgents';
+import {
+  cloneStoryboardOutput,
+  runStoryboardLeaderReview,
+  tryParseStoryboardOutput,
+} from '@/agents/storyboardAgents';
+import { runWritingLeaderReview } from '@/agents/writingAgents';
+import { executeEmployeePhase, executeLeaderPhase } from '@/services/agents/executeTask';
+import { runNodeAssistant } from '@/services/nodeAssistant';
+import { ingestWritingOutputToProjectContext } from '@/services/ProjectContext';
+import { mergeDownstreamSkillsFromChain } from '@/services/skillChain';
+import { getSkillById, normalizeMountedSkillIdsForKind } from '@/services/skillLoader';
+import {
+  buildWorkflowAgentStageHint,
+  buildWorkflowAgentStartMessage,
+  detectWorkflowAgentInputType,
+  detectWorkflowAgentIntent,
+  detectWorkflowAgentMode,
+  resolveWorkflowRoute,
+  routeLabel,
+  stageLabel,
+  type WorkflowAgentSession,
+} from '@/services/workflowAgent';
+import {
+  DEPT_OUTPUT_HANDLE_ID,
+  mergedTextInputForDepartment,
+  mergedUpstreamForTextNode,
+  resolveDepartmentExecutionInput,
+} from '@/services/graphInput';
+import {
+  SHOT_LIST_LINK_HANDLE_ID,
+  SHOT_LIST_PARENT_HANDLE_ID,
+  isShotListItemOutputHandleId,
+  makeShotListItemOutputHandleId,
+  parseShotListItemOutputHandleId,
+} from '@/utils/shotListWire';
+import type { StudioRFNode } from '@/types/reactFlow';
+import {
+  type AssistantHistoryEntry,
+  type ApprovedAsset,
+  type ChatMessage,
+  type Department,
+  type NodeKind,
+  type NodeStatus,
+  type PromptOutput,
+  type StoryboardOutput,
+  type StudioNodeData,
+  type WritingOutput,
+  DEFAULT_AI_REVIEW_PASS_SUMMARY,
+  REVIEW_RESULT_APPROVE_AS_IS,
+  REVIEW_RESULT_MANUAL_PASS,
+} from '@/types/studio';
+import { layoutStudioNodesWithDagre } from '@/utils/dagreLayout';
+import {
+  normalizeRestoredStudioNode,
+  rebindStudioNodeRuntimeHandlers,
+  stripFunctionsDeep,
+} from '@/utils/studioNodePersistence';
+import { formatReviewOptimizationPayload } from '@/utils/pipelineReviewContentPreview';
+import { formatPipelineOutputPreview, typewriterStream } from '@/utils/streamPreview';
+import { canTransitionPipelineStatus, PIPELINE_INITIAL_STATUS } from './workflow';
+
+function uid(prefix: string) {
+  return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+type PipelineKind = Exclude<NodeKind, 'text_node' | 'shot_list_node' | 'storyboard_file_node'>;
+
+function kindToDepartment(kind: PipelineKind): Department {
+  if (kind === 'writing') return 'WRITING';
+  if (kind === 'storyboard') return 'STORYBOARD';
+  return 'PROMPT';
+}
+
+function deptLabel(d: Department): string {
+  if (d === 'WRITING') return '缂栧墽閮?;
+  if (d === 'STORYBOARD') return '鍒嗛暅閮?;
+  if (d === 'TEXT') return '鏂囨湰鍗＄墖';
+  if (d === 'SHOT_LIST') return '闀滃ご琛?;
+  return 'Prompt閮?;
+}
+
+/** 鍛樺伐瀹屾垚鍚庤嚜鍔ㄨЕ鍙戞€荤洃瀹℃牳鍓嶇殑绛夊緟锛堟绉掞級 */
+const LEADER_AUTO_DELAY_MS = 1000;
+const STOP_TASK_MESSAGE = '宸叉墜鍔ㄥ仠姝㈠綋鍓嶄换鍔°€?;
+const SHOT_LIST_DEFAULT_WIDTH = 800;
+const SHOT_LIST_DEFAULT_HEIGHT = 420;
+const UNDO_STACK_LIMIT = 60;
+const activeTaskAbortControllers = new Map<string, AbortController>();
+
+/** 閮ㄩ棬闂村揩閫熸媺绾匡細鍒嗛暅 鈫?Prompt 涓嶅湪姝ら摼鍐咃紙椤荤粡闀滃ご琛ㄥ瓙鑺傜偣 Output锛夈€?*/
+function canDeptChain(upstream: PipelineKind, downstream: PipelineKind): boolean {
+  if (upstream === 'writing' && downstream === 'storyboard') return true;
+  if (upstream === 'writing' && downstream === 'prompt') return true;
+  return false;
+}
+
+function makeTextNodeData(id: string, text = '', positionLabel?: string): StudioNodeData {
+  return {
+    id,
+    type: 'text_node',
+    department: 'TEXT',
+    status: 'APPROVED',
+    input: text,
+    raw_text: text,
+    output: null,
+    review_result: null,
+    version: 0,
+    label: positionLabel ?? '鏂囨湰鍗＄墖',
+    assistant_preferences: '',
+    assistant_task_instruction: '',
+  };
+}
+
+function makeStoryboardFileNodeData(id: string, positionLabel?: string): StudioNodeData {
+  return {
+    id,
+    type: 'storyboard_file_node',
+    department: 'STORYBOARD_FILE',
+    status: 'APPROVED',
+    input: '',
+    output: null,
+    review_result: null,
+    version: 0,
+    label: positionLabel ?? '鍒嗛暅琛ㄦ枃浠?,
+    assistant_preferences: '',
+    assistant_task_instruction: '',
+  };
+}
+
+function makeNodeData(
+  id: string,
+  kind: PipelineKind,
+  input = '',
+  positionLabel?: string,
+): StudioNodeData {
+  const department = kindToDepartment(kind);
+  return {
+    id,
+    type: kind,
+    department,
+    status: PIPELINE_INITIAL_STATUS,
+    input,
+    output: null,
+    review_result: null,
+    version: 0,
+    label: positionLabel ?? `${deptLabel(department)} 路 ${id.slice(-4)}`,
+    mounted_skills: normalizeMountedSkillIdsForKind(kind, []),
+    assistant_preferences: '',
+    assistant_task_instruction: '',
+  };
+}
+
+function makeShotListNodeData(
+  id: string,
+  sourceStoryboardNodeId: string,
+  output: StoryboardOutput | null,
+  snapshot: StoryboardOutput | null,
+  sourceSceneCount?: number,
+): StudioNodeData {
+  return {
+    id,
+    type: 'shot_list_node',
+    department: 'SHOT_LIST',
+    status: 'APPROVED',
+    input: '',
+    output,
+    review_result: null,
+    version: 0,
+    label: `闀滃ご琛?路 ${id.slice(-4)}`,
+    sourceStoryboardNodeId,
+    canvasWidth: SHOT_LIST_DEFAULT_WIDTH,
+    canvasHeight: SHOT_LIST_DEFAULT_HEIGHT,
+    storyboard_ai_snapshot: snapshot,
+    sourceSceneCount,
+    mounted_skills: [],
+    assistant_preferences: '',
+    assistant_task_instruction: '',
+  };
+}
+
+function getNodeAssistantHistory(messages: ChatMessage[], nodeId: string): AssistantHistoryEntry[] {
+  return messages
+    .filter((msg) => msg.nodeId === nodeId && (msg.role === 'user' || msg.role === 'assistant'))
+    .slice(-12)
+    .map((msg) => ({
+      role: msg.role === 'assistant' ? 'assistant' : 'user',
+      content: msg.text,
+    }));
+}
+
+function findStoryboardShotListChild(
+  nodes: StudioRFNode[],
+  edges: Edge[],
+  storyboardNodeId: string,
+): StudioRFNode | null {
+  const edge = edges.find(
+    (e) => e.source === storyboardNodeId && e.sourceHandle === SHOT_LIST_LINK_HANDLE_ID,
+  );
+  if (!edge) return null;
+  return (
+    nodes.find(
+      (n) => n.id === edge.target && n.type === 'shotList' && n.data.type === 'shot_list_node',
+    ) ?? null
+  );
+}
+
+type StudioState = {
+  nodes: StudioRFNode[];
+  edges: Edge[];
+  assets: ApprovedAsset[];
+  messages: ChatMessage[];
+  activeNodeId: string | null;
+  selectedNodeId: string | null;
+  detailOpen: boolean;
+  requestFitNodeId: string | null;
+  shotListSelectedWiresByNodeId: Record<string, string[]>;
+  undoStack: UndoSnapshot[];
+  workflowAgentSession: WorkflowAgentSession | null;
+
+  onNodesChange: (changes: NodeChange<StudioRFNode>[]) => void;
+  onEdgesChange: (changes: EdgeChange<Edge>[]) => void;
+  /** 鎸?id 绉婚櫎杩炵嚎骞跺埛鏂颁笅娓搁儴闂?/ 鏂囨湰鑺傜偣鐨勫悎骞惰緭鍏?*/
+  removeEdges: (edgeIds: string[]) => void;
+  onConnect: (c: Connection) => void;
+  setShotListSelectedWires: (nodeId: string, wireIds: string[]) => void;
+  setSelected: (id: string | null) => void;
+  setDetailOpen: (open: boolean) => void;
+  setActiveNodeId: (id: string | null) => void;
+  consumeFitRequest: () => void;
+  pushMessage: (m: Omit<ChatMessage, 'id' | 'ts'> & { id?: string }) => string;
+  linkChatMessageToNode: (messageId: string, nodeId: string) => void;
+  submitAssistantChat: (text: string, position?: { x: number; y: number }) => Promise<void>;
+  submitWorkflowAgentChat: (text: string, position?: { x: number; y: number }) => Promise<void>;
+  clearWorkflowAgentSession: () => void;
+  registerAsset: (a: ApprovedAsset) => void;
+  patchNodeData: (id: string, patch: Partial<StudioNodeData>, bumpVersion?: boolean) => void;
+  /** 闀滃ご琛ㄨ妭鐐硅〃鏍肩紪杈戯細涓庣埗鍒嗛暅鑺傜偣 `output` 鍚屾骞跺埛鏂颁笅娓?Prompt 绛夊悎骞惰緭鍏?*/
+  patchShotListNodeOutput: (shotListId: string, output: StoryboardOutput, bumpVersion?: boolean) => void;
+  /** 鍒嗛暅鍛樺伐浜у嚭鏈夋晥闀滃ご鍚庯細鑷姩鍦ㄤ笅鏂瑰垱寤洪暅澶磋〃瀛愯妭鐐瑰苟杩炵嚎锛屾垨鍒锋柊宸叉湁瀛愯妭鐐规暟鎹?*/
+  ensureShotListForStoryboard: (storyboardNodeId: string) => void;
+  /** 灏嗗綋鍓嶅垎闀?output 鎺ㄩ€佸埌宸茬粦瀹氱殑闀滃ご琛ㄥ瓙鑺傜偣锛堜笉鍐欏洖鐖惰妭鐐癸級 */
+  syncShotListNodesFromStoryboard: (storyboardNodeId: string) => void;
+  setStatus: (id: string, next: NodeStatus) => boolean;
+  addDepartmentNode: (kind: PipelineKind, position?: { x: number; y: number }) => string;
+  addTextNode: (text?: string, position?: { x: number; y: number }) => string;
+  addStoryboardFileNode: (position?: { x: number; y: number }) => string;
+  /** 鍦ㄦ寚瀹氬潗鏍囧垱寤?TEXT_NODE锛屽苟杩炲埌閮ㄩ棬 Input锛坱argetHandle `in`锛?*/
+  createTextNodeLinkedToDepartment: (deptId: string, position: { x: number; y: number }) => string;
+  /** 浠庡彞鏌勬媺绾块噴鏀惧湪绌虹櫧澶勫悗锛岀敱鑿滃崟閫夋嫨鍒涘缓鑺傜偣骞惰嚜鍔ㄨ繛绾?*/
+  completeConnectionMenuPick: (p: {
+    fromNodeId: string;
+    fromHandleId: string | null;
+    fromHandleType: 'source' | 'target' | null;
+    pick: 'text_node' | 'storyboard_file_node' | 'writing' | 'storyboard' | 'prompt';
+    flowPosition: { x: number; y: number };
+  }) => string | undefined;
+  startWritingPipeline: (text: string, position?: { x: number; y: number }) => string;
+  startStoryboardPipeline: (position?: { x: number; y: number }) => string;
+  /** 鍒嗛暅鐙珛妯″紡锛氬熀浜庡綋鍓?`input` 鍓ф湰鏂囨湰鎷嗚В闀滃ご锛屽畬鎴愬悗杩涘叆 REVIEWED锛堟垨鏃ф€?WAITING_REVIEW锛?*/
+  runStoryboardFromInput: (id: string) => void;
+  /** 鐢诲竷銆屾墽琛屻€嶏細鍏堝悎骞?Input 杩炲叆鍐嶈窇缂栧墽鍛樺伐 鈫?REVIEWED */
+  runWritingFromInput: (id: string) => void;
+  startPromptPipeline: (brief: string, position?: { x: number; y: number }) => string;
+  /** 鐢诲竷銆屾墽琛屻€嶏細鍏堝悎骞?Input 杩炲叆鍐嶈窇 Prompt 鍛樺伐 鈫?REVIEWED */
+  runPromptFromInput: (id: string) => void;
+  /**
+   * 鏍稿績鎵ц鍏ュ彛锛氬悎骞?Input 鈫?IN_PROGRESS 鈫?鍛樺伐 + 鑷姩鎬荤洃 鈫?REVIEWED锛堝惈 ai_review_feedback锛夈€?
+   * `optimizeFromReviewed`锛氫粎宸查槄鎬佹寜鎰忚杩唬銆傝法閮ㄩ棬杈撳叆浠嶄緷璧栦笂娓?APPROVED 璧勪骇銆?
+   */
+  executeNodeTask: (nodeId: string, opts?: { optimizeFromReviewed?: boolean }) => Promise<void>;
+  stopNodeTask: (nodeId?: string | null) => void;
+  /** 宸查槄锛氬皢銆屾墽琛?AI 浼樺寲銆嶅啓鍏ュ巻鍙插苟閲嶆柊璺戝憳宸?+ 鎬荤洃 */
+  runReviewedOptimization: (nodeId?: string | null) => void;
+  /** 宸查槄锛氱淮鎸佺幇鐘剁粓瀹￠€氳繃锛堢瓑鍚岄€夐」 B锛?*/
+  approveReviewedAsIs: (nodeId?: string | null) => string | undefined;
+  /** 杩斿洖鏈灏濊瘯瀹℃牳鐨勭洰鏍囪妭鐐?id锛堜究浜庤亰澶╂寚浠ゅ叧鑱斿畾浣嶏級锛涙湭鍙戣捣瀹℃牳鏃?undefined */
+  triggerLeaderReview: (nodeId?: string | null) => Promise<string | undefined>;
+  /**
+   * REVIEWED锛氱瓑鍚屻€岀淮鎸佺幇鐘堕€氳繃銆嶏紙閫夐」 B锛屽巻鍙茶涓轰汉宸ラ€氳繃锛夈€?
+   * WAITING_REVIEW锛堟棫鐢诲竷锛夛細璺宠繃浜屾 AI 鎬荤洃锛岀洿鎺?APPROVED锛宍review_result` 涓?REVIEW_RESULT_MANUAL_PASS銆?
+   */
+  manualPassLeaderReview: (nodeId?: string | null) => string | undefined;
+  focusNode: (id: string, opts?: { openDetail?: boolean }) => void;
+  retryPipeline: (id: string) => void;
+  /** 鍙栨秷鎵嬪姩瑕嗙洊锛屼粠杩炵嚎閲嶆柊鍚堝苟 input */
+  syncDepartmentInputFromGraph: (deptId: string) => void;
+  /** 鎵归噺鍒犻櫎鑺傜偣锛堝彸閿垨绋嬪簭鍖栵級 */
+  removeNodesByIds: (ids: string[]) => void;
+  /** Dagre 鑷姩灞傜骇鎺掑竷 */
+  layoutCanvasWithDagre: () => void;
+  undo: () => void;
+  /** 浠?.json / 鑷姩瀛樻。杞藉叆锛氭浛鎹?nodes銆乪dges锛屾竻绌鸿祫浜х櫥璁板苟鍒锋柊鍥惧悎骞惰緭鍏?*/
+  hydrateProject: (
+    nodes: StudioRFNode[],
+    edges: Edge[],
+    opts?: { broadcastText?: string },
+  ) => void;
+  /** 椤甸潰鍔犺浇鎴栨寔涔呭寲閲嶈浇鍚庯細涓鸿妭鐐?data 閲嶆柊鎸傝浇 onExecute / onDelete锛圝SON 鏃犳硶淇濆瓨鍑芥暟锛?*/
+  ensureRuntimeBindingsOnNodes: () => void;
+  /**
+   * 鍒锋柊/杞藉叆鍚庯細鎸夈€屽垎闀滃簳渚?鈫?闀滃ご琛ㄩ《渚с€嶈繛绾块噸鍐?sourceStoryboardNodeId锛屽苟瀵归綈鐖跺瓙 output锛?
+   * 鏈熬鍒锋柊閮ㄩ棬鍚堝苟杈撳叆锛堝惈 Prompt 鎺ラ暅澶磋〃锛夛紝淇濊瘉涓庡綋鍓嶅浘涓€鑷淬€?
+   */
+  reconcileShotListGraphBindings: () => void;
+};
+
+const PIPELINE_DECISION_FLASH_MS = 1900;
+
+function schedulePipelineFlashClear(get: () => StudioState, nodeId: string, until: number) {
+  window.setTimeout(() => {
+    const cur = get().nodes.find((n) => n.id === nodeId)?.data.pipeline_decision_flash;
+    if (cur?.until === until) {
+      get().patchNodeData(nodeId, { pipeline_decision_flash: null }, false);
+    }
+  }, PIPELINE_DECISION_FLASH_MS + 120);
+}
+
+/** 鎵嬪姩杈撳叆浼樺厛锛氳嫢鐢ㄦ埛宸插湪鍙充晶闈㈡澘绮樿创锛屼笉瑕嗙洊绔彛鍚堝苟缁撴灉 */
+function shouldPreferManualInput(nodeData: StudioNodeData | undefined): boolean {
+  if (!nodeData) return false;
+  return nodeData.inputSource === 'manual' && Boolean((nodeData.input ?? '').trim());
+}
+
+/** 鍒嗛暅鑺傜偣搴曚晶鍙ユ焺 鈫?闀滃ご琛ㄩ《渚у彞鏌勶細涓€鏉¤竟瀵瑰簲涓€涓埗鍒嗛暅 id */
+function buildStoryboardParentByShotListId(
+  nodes: StudioRFNode[],
+  edges: Edge[],
+): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const e of edges) {
+    if (e.sourceHandle !== SHOT_LIST_LINK_HANDLE_ID) continue;
+    if (e.targetHandle != null && e.targetHandle !== SHOT_LIST_PARENT_HANDLE_ID) continue;
+    const src = nodes.find((n) => n.id === e.source);
+    const tgt = nodes.find((n) => n.id === e.target);
+    if (!src || !tgt || tgt.type !== 'shotList' || tgt.data.type !== 'shot_list_node') continue;
+    if (src.type !== 'department' || src.data.type !== 'storyboard') continue;
+    map.set(e.target, e.source);
+  }
+  return map;
+}
+
+function storyboardOutputFingerprint(parsed: ReturnType<typeof tryParseStoryboardOutput>): string {
+  if (!parsed) return '';
+  try {
+    return JSON.stringify({
+      shots: parsed.shots,
+      beats: parsed.narrativeBeats ?? [],
+    });
+  } catch {
+    return `err:${String(parsed.shots?.length ?? 0)}`;
+  }
+}
+
+function patchChangesNodeData(
+  data: StudioNodeData,
+  patch: Partial<StudioNodeData>,
+  bumpVersion: boolean,
+): boolean {
+  if (bumpVersion) return true;
+  for (const key of Object.keys(patch) as Array<keyof StudioNodeData>) {
+    if (!Object.is(data[key], patch[key])) return true;
+  }
+  return false;
+}
+
+function resyncConsumersAfterEdgeMutation(get: () => StudioState) {
+  const { nodes, edges } = get();
+  for (const n of nodes) {
+    if (n.type === 'department') {
+      if (shouldPreferManualInput(n.data)) continue;
+      const merged = mergedTextInputForDepartment(n.id, nodes, edges);
+      if (merged !== null) {
+        get().patchNodeData(n.id, { input: merged, inputSource: 'graph' }, false);
+      }
+    }
+    if (n.type === 'textNode') {
+      const m = mergedUpstreamForTextNode(n.id, nodes, edges);
+      if (m !== null) {
+        get().patchNodeData(n.id, { raw_text: m, input: m }, false);
+      }
+    }
+  }
+}
+
+/** 鍒嗛暅 output 鍙樻洿鍚庡埛鏂拌繛鍦ㄥ彸渚?Output 涓婄殑涓嬫父閮ㄩ棬 / TEXT 鍚堝苟杈撳叆 */
+function refreshDownstreamAfterDepartmentOutputChange(
+  get: () => StudioState,
+  departmentId: string,
+  options?: { ignoreManualInput?: boolean },
+) {
+  const { nodes, edges } = get();
+  const outgoing = edges.filter(
+    (e) =>
+      e.source === departmentId &&
+      (e.sourceHandle === DEPT_OUTPUT_HANDLE_ID || e.sourceHandle == null),
+  );
+  const seen = new Set<string>();
+  for (const e of outgoing) {
+    if (seen.has(e.target)) continue;
+    seen.add(e.target);
+    const tn = nodes.find((n) => n.id === e.target);
+    if (tn?.type === 'department') {
+      if (!options?.ignoreManualInput && shouldPreferManualInput(tn.data)) continue;
+      const merged = mergedTextInputForDepartment(e.target, nodes, edges);
+      if (merged !== null) {
+        get().patchNodeData(e.target, { input: merged, inputSource: 'graph' }, false);
+      }
+    } else if (tn?.type === 'textNode') {
+      const m = mergedUpstreamForTextNode(e.target, nodes, edges);
+      if (m !== null) {
+        get().patchNodeData(e.target, { raw_text: m, input: m }, false);
+      }
+    }
+  }
+}
+
+function edgeIdentity(edge: Pick<Edge, 'source' | 'target' | 'sourceHandle' | 'targetHandle'>): string {
+  return [edge.source, edge.target, edge.sourceHandle ?? '', edge.targetHandle ?? ''].join('::');
+}
+
+function addUniqueAnimatedEdges(edges: Edge[], connections: Connection[]): Edge[] {
+  const seen = new Set(edges.map(edgeIdentity));
+  let next = edges;
+  for (const connection of connections) {
+    const key = edgeIdentity(connection);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    next = addEdge({ ...connection, animated: true }, next);
+  }
+  return next;
+}
+
+function resolveShotListSourceHandlesForConnect(
+  selectionMap: Record<string, string[]>,
+  nodeId: string,
+  sourceHandle: string | null | undefined,
+): string[] {
+  const draggedWireId = parseShotListItemOutputHandleId(sourceHandle);
+  if (!draggedWireId) return [sourceHandle ?? DEPT_OUTPUT_HANDLE_ID];
+  const selectedWireIds = selectionMap[nodeId] ?? [];
+  if (selectedWireIds.length >= 2 && selectedWireIds.includes(draggedWireId)) {
+    return selectedWireIds.map((wireId) => makeShotListItemOutputHandleId(wireId));
+  }
+  return [sourceHandle ?? DEPT_OUTPUT_HANDLE_ID];
+}
+
+type UndoSnapshot = {
+  nodes: StudioRFNode[];
+  edges: Edge[];
+  assets: ApprovedAsset[];
+  shotListSelectedWiresByNodeId: Record<string, string[]>;
+  selectedNodeId: string | null;
+  activeNodeId: string | null;
+  detailOpen: boolean;
+};
+
+function makeRuntimeApi(get: () => StudioState) {
+  return {
+    executeNodeTask: (id: string) => get().executeNodeTask(id),
+    focusNode: (id: string, o?: { openDetail?: boolean }) => get().focusNode(id, o),
+    removeNodesByIds: (ids: string[]) => get().removeNodesByIds(ids),
+  };
+}
+
+function snapshotNodesForUndo(nodes: StudioRFNode[]): StudioRFNode[] {
+  return stripFunctionsDeep(nodes) as StudioRFNode[];
+}
+
+function makeUndoSnapshot(state: Pick<
+  StudioState,
+  | 'nodes'
+  | 'edges'
+  | 'assets'
+  | 'shotListSelectedWiresByNodeId'
+  | 'selectedNodeId'
+  | 'activeNodeId'
+  | 'detailOpen'
+>): UndoSnapshot {
+  return {
+    nodes: snapshotNodesForUndo(state.nodes),
+    edges: stripFunctionsDeep(state.edges) as Edge[],
+    assets: stripFunctionsDeep(state.assets) as ApprovedAsset[],
+    shotListSelectedWiresByNodeId: stripFunctionsDeep(
+      state.shotListSelectedWiresByNodeId,
+    ) as Record<string, string[]>,
+    selectedNodeId: state.selectedNodeId,
+    activeNodeId: state.activeNodeId,
+    detailOpen: state.detailOpen,
+  };
+}
+
+function undoSnapshotSignature(snapshot: UndoSnapshot): string {
+  return JSON.stringify(snapshot);
+}
+
+type StudioSet = (
+  partial:
+    | Partial<StudioState>
+    | StudioState
+    | ((state: StudioState) => Partial<StudioState> | StudioState),
+) => void;
+
+function pushUndoSnapshot(set: StudioSet) {
+  set((state) => {
+    const snapshot = makeUndoSnapshot(state);
+    const prev = state.undoStack[state.undoStack.length - 1];
+    if (prev && undoSnapshotSignature(prev) === undoSnapshotSignature(snapshot)) {
+      return state;
+    }
+    const nextStack =
+      state.undoStack.length >= UNDO_STACK_LIMIT
+        ? [...state.undoStack.slice(state.undoStack.length - UNDO_STACK_LIMIT + 1), snapshot]
+        : [...state.undoStack, snapshot];
+    return { undoStack: nextStack };
+  });
+}
+
+function restoreUndoSnapshot(snapshot: UndoSnapshot, get: () => StudioState): Partial<StudioState> {
+  const api = makeRuntimeApi(get);
+  const normalized = snapshot.nodes.map(normalizeRestoredStudioNode);
+  const rebound = rebindStudioNodeRuntimeHandlers(normalized, api).map((node) => ({
+    ...node,
+    selected: snapshot.selectedNodeId != null && node.id === snapshot.selectedNodeId,
+    dragging: false,
+  }));
+  return {
+    nodes: rebound,
+    edges: stripFunctionsDeep(snapshot.edges) as Edge[],
+    assets: stripFunctionsDeep(snapshot.assets) as ApprovedAsset[],
+    shotListSelectedWiresByNodeId: stripFunctionsDeep(
+      snapshot.shotListSelectedWiresByNodeId,
+    ) as Record<string, string[]>,
+    selectedNodeId: snapshot.selectedNodeId,
+    activeNodeId: snapshot.activeNodeId,
+    detailOpen: snapshot.detailOpen && snapshot.selectedNodeId != null,
+    requestFitNodeId: null,
+  };
+}
+
+function waitWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+  if (signal.aborted) {
+    return Promise.reject(new Error(STOP_TASK_MESSAGE));
+  }
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      reject(new Error(STOP_TASK_MESSAGE));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+export const useStudioStore = create<StudioState>((set, get) => ({
+  nodes: [],
+  edges: [],
+  assets: [],
+  messages: [],
+  activeNodeId: null,
+  selectedNodeId: null,
+  detailOpen: false,
+  requestFitNodeId: null,
+  shotListSelectedWiresByNodeId: {},
+  undoStack: [],
+  workflowAgentSession: null,
+
+  onNodesChange: (changes) => {
+    if (
+      changes.some(
+        (change) =>
+          change.type === 'remove' ||
+          change.type === 'dimensions' ||
+          (change.type === 'position' && change.dragging !== true),
+      )
+    ) {
+      pushUndoSnapshot(set);
+    }
+    set((s) => {
+      let toApply = changes as NodeChange<StudioRFNode>[];
+      for (const c of changes) {
+        if (c.type === 'remove') {
+          const n = s.nodes.find((x) => x.id === c.id);
+          if (n?.type === 'department' && n.data.type === 'storyboard') {
+            for (const m of s.nodes) {
+              if (m.type === 'shotList' && m.data.sourceStoryboardNodeId === c.id) {
+                if (!toApply.some((t) => t.type === 'remove' && 'id' in t && t.id === m.id)) {
+                  toApply = [...toApply, { type: 'remove', id: m.id } as NodeChange<StudioRFNode>];
+                }
+              }
+            }
+          }
+        }
+      }
+
+      const removedIds = toApply
+        .filter((c): c is NodeChange<StudioRFNode> & { type: 'remove'; id: string } => c.type === 'remove')
+        .map((c) => c.id);
+
+      const nextNodes = applyNodeChanges(toApply, s.nodes) as StudioRFNode[];
+
+      let nextEdges = s.edges;
+      let nextShotListSelectedWiresByNodeId = s.shotListSelectedWiresByNodeId;
+      if (removedIds.length > 0) {
+        const gone = new Set(removedIds);
+        nextEdges = s.edges.filter((e) => !gone.has(e.source) && !gone.has(e.target));
+        nextShotListSelectedWiresByNodeId = Object.fromEntries(
+          Object.entries(s.shotListSelectedWiresByNodeId).filter(([nodeId]) => !gone.has(nodeId)),
+        );
+      }
+
+      const sel = nextNodes.find((n) => n.selected)?.id ?? null;
+
+      let activeNodeId = s.activeNodeId;
+      if (activeNodeId && removedIds.includes(activeNodeId)) {
+        activeNodeId = null;
+      }
+
+      const detailOpen = sel != null ? s.detailOpen : false;
+
+      return {
+        nodes: nextNodes,
+        edges: nextEdges,
+        selectedNodeId: sel,
+        activeNodeId,
+        detailOpen,
+        shotListSelectedWiresByNodeId: nextShotListSelectedWiresByNodeId,
+      };
+    });
+  },
+
+  onEdgesChange: (changes) => {
+    if (changes.some((change) => change.type === 'remove')) {
+      pushUndoSnapshot(set);
+    }
+    set((s) => ({ edges: applyEdgeChanges(changes, s.edges) }));
+    if (changes.some((ch) => ch.type === 'remove')) {
+      get().reconcileShotListGraphBindings();
+    } else {
+      resyncConsumersAfterEdgeMutation(get);
+    }
+  },
+
+  removeEdges: (edgeIds) => {
+    if (edgeIds.length === 0) return;
+    pushUndoSnapshot(set);
+    const drop = new Set(edgeIds);
+    set((s) => ({ edges: s.edges.filter((e) => !drop.has(e.id)) }));
+    get().reconcileShotListGraphBindings();
+    get().pushMessage({
+      role: 'system',
+      text: `宸叉柇寮€ ${edgeIds.length} 鏉¤繛绾縛,
+    });
+  },
+
+  onConnect: (c) => {
+    pushUndoSnapshot(set);
+    const sourceNodeId = c.source;
+    const sourceHandles =
+      sourceNodeId != null
+        ? resolveShotListSourceHandlesForConnect(
+            get().shotListSelectedWiresByNodeId,
+            sourceNodeId,
+            c.sourceHandle,
+          )
+        : [c.sourceHandle ?? DEPT_OUTPUT_HANDLE_ID];
+    set((s) => ({
+      edges: addUniqueAnimatedEdges(
+        s.edges,
+        sourceHandles.map((sourceHandle) => ({ ...c, sourceHandle })),
+      ),
+    }));
+    const { nodes, edges } = get();
+    const tgt = c.target;
+    if (!tgt) return;
+    const targetNode = nodes.find((n) => n.id === tgt);
+    if (targetNode?.type === 'department' && !shouldPreferManualInput(targetNode.data)) {
+      const merged = mergedTextInputForDepartment(tgt, nodes, edges);
+      if (merged !== null) {
+        get().patchNodeData(tgt, { input: merged, inputSource: 'graph' }, false);
+      }
+    }
+    if (targetNode?.type === 'textNode') {
+      const m = mergedUpstreamForTextNode(tgt, nodes, edges);
+      if (m !== null) {
+        get().patchNodeData(tgt, { raw_text: m, input: m }, false);
+      }
+    }
+    get().reconcileShotListGraphBindings();
+  },
+
+  setShotListSelectedWires: (nodeId, wireIds) =>
+    set((s) => {
+      const prev = s.shotListSelectedWiresByNodeId[nodeId] ?? [];
+      if (prev.length === wireIds.length && prev.every((wireId, index) => wireId === wireIds[index])) {
+        return s;
+      }
+      if (wireIds.length === 0) {
+        if (!(nodeId in s.shotListSelectedWiresByNodeId)) return s;
+        const next = { ...s.shotListSelectedWiresByNodeId };
+        delete next[nodeId];
+        return { shotListSelectedWiresByNodeId: next };
+      }
+      return {
+        shotListSelectedWiresByNodeId: {
+          ...s.shotListSelectedWiresByNodeId,
+          [nodeId]: wireIds,
+        },
+      };
+    }),
+
+  setSelected: (id) =>
+    set((s) => ({
+      selectedNodeId: id,
+      nodes: s.nodes.map((n) => ({ ...n, selected: id != null && n.id === id })),
+    })),
+  setDetailOpen: (open) => set({ detailOpen: open }),
+  setActiveNodeId: (id) => set({ activeNodeId: id }),
+
+  consumeFitRequest: () => set({ requestFitNodeId: null }),
+
+  clearWorkflowAgentSession: () => set({ workflowAgentSession: null }),
+
+  pushMessage: (m) => {
+    const msg: ChatMessage = {
+      id: m.id ?? uid('msg'),
+      role: m.role,
+      text: m.text,
+      nodeId: m.nodeId,
+      ts: Date.now(),
+    };
+    set((s) => ({ messages: [...s.messages, msg] }));
+    return msg.id;
+  },
+
+  linkChatMessageToNode: (messageId, nodeId) => {
+    set((s) => ({
+      messages: s.messages.map((x) => (x.id === messageId ? { ...x, nodeId } : x)),
+    }));
+  },
+
+  submitWorkflowAgentChat: async (text, position) => {
+    const raw = text.trim();
+    if (!raw) return;
+
+    const now = Date.now();
+    const flowPos = position ?? { x: 360, y: 260 };
+    const currentSession = get().workflowAgentSession;
+    const intent = detectWorkflowAgentIntent(raw, currentSession);
+
+    get().pushMessage({ role: 'user', text: raw });
+
+    if (intent === 'restart') {
+      set({ workflowAgentSession: null });
+      get().pushMessage({
+        role: 'assistant',
+        text: '宸叉竻绌轰笂涓€杞祦绋嬩笂涓嬫枃銆傛妸鏂扮殑灏忚鎴栧墽鏈枃鏈彂缁欐垜锛屾垜浼氶噸鏂颁负浣犺鍒掕矾绾裤€?,
+      });
+      return;
+    }
+
+    if (!currentSession || intent === 'start') {
+      const inputType = detectWorkflowAgentInputType(raw);
+      if (inputType === 'unknown') {
+        get().pushMessage({
+          role: 'assistant',
+          text: '鎴戣繕娌℃硶绋冲畾鍒ゆ柇杩欐槸灏忚杩樻槸鍓ф湰銆備綘鍙互鐩存帴璐存洿瀹屾暣鐨勬鏂囷紝鎴栬€呰ˉ涓€鍙モ€滆繖鏄皬璇粹€?鈥滆繖鏄墽鏈€濄€?,
+        });
+        return;
+      }
+
+      const mode = detectWorkflowAgentMode(raw);
+      const route = resolveWorkflowRoute(inputType, mode);
+      const intro = buildWorkflowAgentStartMessage({ inputType, route, mode });
+      const session: WorkflowAgentSession = {
+        id: uid('agent'),
+        inputType,
+        mode,
+        route,
+        state: 'INIT',
+        sourceText: raw,
+        lastUserMessage: raw,
+        lastAssistantMessage: intro,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      if (route === 'novel_to_script_to_storyboard_to_prompt') {
+        const writingNodeId = get().startWritingPipeline(raw, flowPos);
+        session.writingNodeId = writingNodeId;
+      } else if (route === 'script_to_storyboard_to_prompt') {
+        const storyboardNodeId = get().addDepartmentNode('storyboard', flowPos);
+        get().patchNodeData(storyboardNodeId, { input: raw }, false);
+        get().focusNode(storyboardNodeId, { openDetail: true });
+        void get().executeNodeTask(storyboardNodeId);
+        session.storyboardNodeId = storyboardNodeId;
+      } else {
+        const promptNodeId = get().startPromptPipeline(raw, flowPos);
+        session.promptNodeId = promptNodeId;
+      }
+
+      set({ workflowAgentSession: session });
+      get().pushMessage({
+        role: 'assistant',
+        text: `${intro}\n\n${buildWorkflowAgentStageHint(session)}`,
+      });
+      return;
+    }
+
+    const updateSession = (patch: Partial<WorkflowAgentSession>) => {
+      set((state) => {
+        if (!state.workflowAgentSession || state.workflowAgentSession.id !== currentSession.id) {
+          return state;
+        }
+        return {
+          workflowAgentSession: {
+            ...state.workflowAgentSession,
+            ...patch,
+            updatedAt: Date.now(),
+          },
+        };
+      });
+    };
+
+    if (intent === 'continue') {
+      if (
+        currentSession.route === 'novel_to_script_to_storyboard_to_prompt' &&
+        currentSession.state === 'SCRIPT_READY'
+      ) {
+        const writingNode = currentSession.writingNodeId
+          ? get().nodes.find((node) => node.id === currentSession.writingNodeId)
+          : null;
+        const writingInput =
+          writingNode?.type === 'department' && writingNode.data.output
+            ? JSON.stringify(writingNode.data.output, null, 2)
+            : currentSession.sourceText;
+        const storyboardNodeId = get().addDepartmentNode('storyboard', {
+          x: flowPos.x + 180,
+          y: flowPos.y + 60,
+        });
+        get().patchNodeData(storyboardNodeId, { input: writingInput }, false);
+        get().focusNode(storyboardNodeId, { openDetail: true });
+        void get().executeNodeTask(storyboardNodeId);
+        updateSession({
+          storyboardNodeId,
+          lastUserMessage: raw,
+          lastAssistantMessage: '宸蹭粠鍓ф湰闃舵鍒囧埌鍒嗛暅闃舵锛屾鍦ㄧ敓鎴愬垎闀溿€?,
+        });
+        get().pushMessage({
+          role: 'assistant',
+          text: '宸蹭粠鍓ф湰闃舵鍒囧埌鍒嗛暅闃舵锛屾鍦ㄧ敓鎴愬垎闀溿€傜敓鎴愬畬鎴愬悗锛屾垜浼氭妸褰撳墠娴佺▼鐘舵€佹洿鏂颁负銆屽垎闀滃凡鐢熸垚銆嶃€?,
+          nodeId: storyboardNodeId,
+        });
+        return;
+      }
+
+      if (
+        currentSession.promptNodeId &&
+        (currentSession.state === 'STORYBOARD_CONFIRMED' ||
+          currentSession.state === 'PROMPT_GENERATED')
+      ) {
+        get().focusNode(currentSession.promptNodeId, { openDetail: true });
+        updateSession({
+          lastUserMessage: raw,
+          lastAssistantMessage: '宸蹭负浣犲畾浣嶅埌褰撳墠 Prompt 鑺傜偣锛屼綘鍙互缁х画瀹＄湅銆佸井璋冿紝鎴栫洿鎺ョ粨鏉熻繖涓€杞祦绋嬨€?,
+        });
+        get().pushMessage({
+          role: 'assistant',
+          text: '宸蹭负浣犲畾浣嶅埌褰撳墠 Prompt 鑺傜偣銆備綘鍙互缁х画寰皟鎻愮ず璇嶏紝鎴栬€呭憡璇夋垜鈥滃畬鎴愨€濈粨鏉熻繖涓€杞祦绋嬨€?,
+          nodeId: currentSession.promptNodeId,
+        });
+        return;
+      }
+
+      if (
+        (currentSession.state === 'STORYBOARD_CONFIRMED' ||
+          currentSession.state === 'STORYBOARD_GENERATED' ||
+          currentSession.state === 'STORYBOARD_ADJUSTED') &&
+        currentSession.route !== 'novel_to_script_to_storyboard_to_prompt' &&
+        currentSession.route !== 'script_to_storyboard_to_prompt'
+      ) {
+        // no-op: quick route handled at start
+      }
+    }
+
+    if (intent === 'adjust_storyboard') {
+      const targetId = currentSession.shotListNodeId ?? currentSession.storyboardNodeId ?? null;
+      if (!targetId) {
+        get().pushMessage({
+          role: 'assistant',
+          text: '褰撳墠娴佺▼閲岃繕娌℃湁鍙皟鏁寸殑鍒嗛暅鑺傜偣銆傚厛璁╂垜鎶婂垎闀滅敓鎴愬嚭鏉ワ紝鎴戜滑鍐嶈繘鍏ヨ皟鏁撮樁娈点€?,
+        });
+        return;
+      }
+      get().focusNode(targetId, { openDetail: true });
+      updateSession({
+        state:
+          currentSession.state === 'STORYBOARD_GENERATED' ? 'STORYBOARD_ADJUSTED' : currentSession.state,
+        lastUserMessage: raw,
+        lastAssistantMessage: '鎴戝凡缁忓府浣犲畾浣嶅埌褰撳墠鍒嗛暅鑺傜偣銆備綘鐜板湪鍙互缁х画閫変腑瀹冿紝閫氳繃鑺傜偣鑱婂ぉ绮句慨鍒嗛暅銆?,
+      });
+      get().pushMessage({
+        role: 'assistant',
+        text: '鎴戝凡缁忓府浣犲畾浣嶅埌褰撳墠鍒嗛暅鑺傜偣銆備綘鐜板湪鍙互缁х画閫変腑瀹冿紝閫氳繃鑺傜偣鑱婂ぉ绮句慨鍒嗛暅锛涙敼瀹屽悗鍐嶅憡璇夋垜鈥滅‘璁ゅ垎闀溾€濆嵆鍙繘鍏ユ彁绀鸿瘝闃舵銆?,
+        nodeId: targetId,
+      });
+      return;
+    }
+
+    if (intent === 'confirm_storyboard') {
+      const storyboardCarrierId = currentSession.shotListNodeId ?? currentSession.storyboardNodeId ?? null;
+      const storyboardCarrier = storyboardCarrierId
+        ? get().nodes.find((node) => node.id === storyboardCarrierId)
+        : null;
+      const storyboardPayload =
+        storyboardCarrier?.data.output != null
+          ? JSON.stringify(storyboardCarrier.data.output, null, 2)
+          : '';
+      if (!storyboardPayload) {
+        get().pushMessage({
+          role: 'assistant',
+          text: '鎴戣繕娌℃嬁鍒板彲纭鐨勫垎闀滅粨鏋溿€傜瓑鍒嗛暅鑺傜偣鍏堣窇瀹岋紝鎴栬€呯‘璁や綘鐜板湪閫変腑鐨勫氨鏄暅澶磋〃鑺傜偣銆?,
+        });
+        return;
+      }
+      const promptNodeId = get().startPromptPipeline(storyboardPayload, {
+        x: flowPos.x + 220,
+        y: flowPos.y + 80,
+      });
+      updateSession({
+        state: 'STORYBOARD_CONFIRMED',
+        promptNodeId,
+        lastUserMessage: raw,
+        lastAssistantMessage: '鍒嗛暅宸茬‘璁わ紝姝ｅ湪杩涘叆鎻愮ず璇嶉樁娈点€?,
+      });
+      get().pushMessage({
+        role: 'assistant',
+        text: '鍒嗛暅宸茬‘璁わ紝姝ｅ湪杩涘叆鎻愮ず璇嶉樁娈点€傛垜宸茬粡鎶婂綋鍓嶅垎闀滅粨鏋滀氦缁?Prompt 鑺傜偣澶勭悊銆?,
+        nodeId: promptNodeId,
+      });
+      return;
+    }
+
+    if (intent === 'complete') {
+      updateSession({
+        state: 'COMPLETED',
+        lastUserMessage: raw,
+        lastAssistantMessage: '杩欎竴杞?Agent 娴佺▼宸叉爣璁板畬鎴愩€?,
+      });
+      get().pushMessage({
+        role: 'assistant',
+        text: '杩欎竴杞?Agent 娴佺▼宸叉爣璁板畬鎴愩€備綘鍙互缁х画寰皟鐜版湁鑺傜偣锛屾垨鑰呯洿鎺ュ彂鏂扮殑鏁呬簨鏂囨湰寮€鍚笅涓€杞€?,
+      });
+      return;
+    }
+
+    get().pushMessage({
+      role: 'assistant',
+      text: `褰撳墠娴佺▼锛?{routeLabel(currentSession.route)}\n褰撳墠闃舵锛?{stageLabel(currentSession.state)}\n\n${buildWorkflowAgentStageHint(currentSession)}`,
+    });
+  },
+
+  submitAssistantChat: async (text) => {
+    const raw = text.trim();
+    if (!raw) return;
+
+    const selectedId = get().selectedNodeId ?? get().activeNodeId;
+    if (!selectedId) {
+      get().pushMessage({
+        role: 'system',
+        text: '璇峰厛閫変腑涓€涓妭鐐癸紝鍐嶉€氳繃鑱婂ぉ璁╁姪鎵嬩慨鏀瑰綋鍓嶄换鍔℃垨褰撳墠缁撴灉銆?,
+      });
+      return;
+    }
+
+    const selectedNode = get().nodes.find((n) => n.id === selectedId);
+    if (!selectedNode) {
+      get().pushMessage({ role: 'system', text: '褰撳墠閫変腑鐨勮妭鐐逛笉瀛樺湪銆? });
+      return;
+    }
+
+    if (
+      selectedNode.type !== 'department' &&
+      selectedNode.type !== 'shotList' &&
+      selectedNode.type !== 'textNode'
+    ) {
+      get().pushMessage({
+        role: 'system',
+        text: '褰撳墠鑺傜偣鏆備笉鏀寔鏅鸿兘鍔╂墜缂栬緫銆?,
+        nodeId: selectedId,
+      });
+      return;
+    }
+
+    const instructionNode =
+      selectedNode.type === 'shotList' && selectedNode.data.sourceStoryboardNodeId
+        ? get().nodes.find((n) => n.id === selectedNode.data.sourceStoryboardNodeId) ?? selectedNode
+        : selectedNode;
+
+    const outputNode =
+      selectedNode.type === 'department' && selectedNode.data.type === 'storyboard'
+        ? (findStoryboardShotListChild(get().nodes, get().edges, selectedNode.id) ?? selectedNode)
+        : selectedNode;
+
+    const contextData: StudioNodeData = {
+      ...selectedNode.data,
+      assistant_preferences: instructionNode.data.assistant_preferences ?? '',
+      assistant_task_instruction: instructionNode.data.assistant_task_instruction ?? '',
+    };
+
+    const currentOutput =
+      outputNode.type === 'department' && outputNode.data.type === 'writing'
+        ? ((outputNode.data.output as WritingOutput | null) ?? null)
+        : outputNode.type === 'department' && outputNode.data.type === 'prompt'
+          ? ((outputNode.data.output as PromptOutput | null) ?? null)
+          : outputNode.data.output
+            ? (tryParseStoryboardOutput(outputNode.data.output) ?? null)
+            : null;
+
+    get().pushMessage({ role: 'user', text: raw, nodeId: selectedId });
+
+    try {
+      const result = await runNodeAssistant({
+        data: contextData,
+        history: getNodeAssistantHistory(get().messages, selectedId),
+        userMessage: raw,
+        currentOutput,
+      });
+
+      let changed = false;
+
+      if (result.action === 'update_task' && result.applyChange) {
+        get().patchNodeData(
+          instructionNode.id,
+          { assistant_task_instruction: result.taskInstruction },
+          false,
+        );
+        changed = true;
+      }
+
+      if (result.action === 'update_preferences' && result.applyChange) {
+        get().patchNodeData(
+          instructionNode.id,
+          { assistant_preferences: result.assistantPreferences },
+          false,
+        );
+        changed = true;
+      }
+
+      if (result.targetKind === 'text' && result.action === 'revise_output' && result.applyChange) {
+        get().patchNodeData(
+          outputNode.id,
+          {
+            raw_text: result.updatedText,
+            input: result.updatedText,
+            assistant_preferences: result.assistantPreferences,
+            assistant_task_instruction: result.taskInstruction,
+          },
+          true,
+        );
+        changed = true;
+      }
+
+      if (
+        result.targetKind === 'writing' &&
+        result.action === 'revise_output' &&
+        result.applyChange &&
+        result.updatedOutput
+      ) {
+        get().patchNodeData(
+          outputNode.id,
+          {
+            output: result.updatedOutput,
+            assistant_preferences: result.assistantPreferences,
+            assistant_task_instruction: result.taskInstruction,
+          },
+          true,
+        );
+        changed = true;
+      }
+
+      if (
+        result.targetKind === 'prompt' &&
+        result.action === 'revise_output' &&
+        result.applyChange &&
+        result.updatedOutput
+      ) {
+        get().patchNodeData(
+          outputNode.id,
+          {
+            output: result.updatedOutput,
+            assistant_preferences: result.assistantPreferences,
+            assistant_task_instruction: result.taskInstruction,
+          },
+          true,
+        );
+        changed = true;
+      }
+
+      if (
+        result.targetKind === 'storyboard' &&
+        result.action === 'revise_output' &&
+        result.applyChange &&
+        result.updatedOutput
+      ) {
+        if (outputNode.type === 'shotList') {
+          get().patchShotListNodeOutput(outputNode.id, result.updatedOutput as StoryboardOutput, true);
+          get().patchNodeData(
+            instructionNode.id,
+            {
+              assistant_preferences: result.assistantPreferences,
+              assistant_task_instruction: result.taskInstruction,
+            },
+            false,
+          );
+        } else {
+          get().patchNodeData(
+            outputNode.id,
+            {
+              output: result.updatedOutput,
+              assistant_preferences: result.assistantPreferences,
+              assistant_task_instruction: result.taskInstruction,
+            },
+            true,
+          );
+        }
+        changed = true;
+      }
+
+      if (
+        result.action !== 'revise_output' &&
+        (result.taskInstruction !== (instructionNode.data.assistant_task_instruction ?? '') ||
+          result.assistantPreferences !== (instructionNode.data.assistant_preferences ?? ''))
+      ) {
+        get().patchNodeData(
+          instructionNode.id,
+          {
+            assistant_task_instruction: result.taskInstruction,
+            assistant_preferences: result.assistantPreferences,
+          },
+          false,
+        );
+      }
+
+      const workflowSession = get().workflowAgentSession;
+      if (workflowSession && changed) {
+        const relevantIds = new Set(
+          [
+            workflowSession.writingNodeId,
+            workflowSession.storyboardNodeId,
+            workflowSession.shotListNodeId,
+            workflowSession.promptNodeId,
+            instructionNode.id,
+            outputNode.id,
+            selectedId,
+          ].filter((value): value is string => Boolean(value)),
+        );
+        if (
+          result.targetKind === 'storyboard' &&
+          relevantIds.has(selectedId) &&
+          (workflowSession.state === 'STORYBOARD_GENERATED' ||
+            workflowSession.state === 'STORYBOARD_ADJUSTED')
+        ) {
+          set((state) =>
+            state.workflowAgentSession?.id === workflowSession.id
+              ? {
+                  workflowAgentSession: {
+                    ...state.workflowAgentSession,
+                    state: 'STORYBOARD_ADJUSTED',
+                    lastAssistantMessage: '閸掑棝鏆呭鏌モ偓姘崇箖閼哄倻鍋ｉ崝鈺傚閺囧瓨鏌婇敍灞藉讲缂佈呯敾瀵邦喛鐨熼幋鏍纯閹恒儳鈥樼拋銈呭瀻闂€婊嗙箻閸忋儲褰佺粈楦跨槤闂冭埖顔岄妴?',
+                    updatedAt: Date.now(),
+                  },
+                }
+              : state,
+          );
+        }
+        if (result.targetKind === 'prompt' && relevantIds.has(selectedId)) {
+          set((state) =>
+            state.workflowAgentSession?.id === workflowSession.id
+              ? {
+                  workflowAgentSession: {
+                    ...state.workflowAgentSession,
+                    state: 'PROMPT_GENERATED',
+                    lastAssistantMessage: '閹绘劗銇氱拠宥呭嚒缂佸繘鈧俺绻冮懞鍌滃仯閸斺晜澧滈弴瀛樻煀閿涘苯褰叉禒銉ф埛缂侇厽澧︾壕銊﹀灗閻╁瓨甯寸€瑰本鍨氭潻娆庣鏉烆喓鈧?',
+                    updatedAt: Date.now(),
+                  },
+                }
+              : state,
+          );
+        }
+      }
+
+      const suffix =
+        result.action === 'update_task' && result.applyChange
+          ? '\n\n宸茶鍏ュ綋鍓嶈妭鐐圭殑浠诲姟琛ュ厖瑕佹眰锛屼笅娆℃墽琛屼細鑷姩甯︿笂銆?
+          : result.action === 'update_preferences' && result.applyChange
+            ? '\n\n宸叉洿鏂拌繖涓妭鐐圭殑闀挎湡鍒涗綔鍋忓ソ銆?
+            : changed
+              ? '\n\n褰撳墠鑺傜偣鍐呭宸叉寜浣犵殑瑕佹眰鏇存柊銆?
+              : '';
+
+      get().pushMessage({
+        role: 'assistant',
+        text: `${result.assistantReply}${suffix}`.trim(),
+        nodeId: selectedId,
+      });
+    } catch (e) {
+      const errMsg =
+        e instanceof Error && e.message.trim()
+          ? e.message.trim()
+          : '鏅鸿兘鍔╂墜鎵ц澶辫触锛岃妫€鏌ユā鍨嬮厤缃悗閲嶈瘯銆?;
+      get().pushMessage({
+        role: 'system',
+        text: errMsg,
+        nodeId: selectedId,
+      });
+    }
+  },
+
+  registerAsset: (a) => {
+    const createdAt = a.createdAt ?? Date.now();
+    const snapshot: ApprovedAsset = {
+      ...a,
+      createdAt,
+      snapshotId: a.snapshotId ?? `snapshot_${a.nodeId}_${createdAt}`,
+    };
+    set((s) => ({ assets: [...s.assets, snapshot] }));
+  },
+
+  patchNodeData: (id, patch, bumpVersion = false) => {
+    const targetPre = get().nodes.find((n) => n.id === id);
+    let patchEff: Partial<StudioNodeData> = patch;
+    if (targetPre?.type === 'textNode') {
+      if (patch.raw_text !== undefined && patch.input === undefined) {
+        patchEff = { ...patch, input: patch.raw_text };
+      } else if (patch.input !== undefined && patch.raw_text === undefined) {
+        patchEff = { ...patch, raw_text: patch.input };
+      }
+    }
+    if (
+      targetPre?.type === 'department' &&
+      patchEff.mounted_skills !== undefined &&
+      (targetPre.data.type === 'writing' ||
+        targetPre.data.type === 'storyboard' ||
+        targetPre.data.type === 'prompt')
+    ) {
+      patchEff = {
+        ...patchEff,
+        mounted_skills: normalizeMountedSkillIdsForKind(targetPre.data.type, patchEff.mounted_skills),
+      };
+    }
+
+    if (targetPre && !patchChangesNodeData(targetPre.data, patchEff, bumpVersion)) {
+      return;
+    }
+
+    set((s) => {
+      const target = s.nodes.find((n) => n.id === id);
+      if (!target) return s;
+      if (
+        patchEff.status !== undefined &&
+        target.data.type !== 'text_node' &&
+        target.data.type !== 'shot_list_node'
+      ) {
+        if (!canTransitionPipelineStatus(target.data.status, patchEff.status)) {
+          return s;
+        }
+      }
+      if (!patchChangesNodeData(target.data, patchEff, bumpVersion)) {
+        return s;
+      }
+      return {
+        nodes: s.nodes.map((n) => {
+          if (n.id !== id) return n;
+          const nextVersion = bumpVersion ? n.data.version + 1 : n.data.version;
+          const nextData: StudioNodeData = { ...n.data, ...patchEff, version: nextVersion };
+          if (bumpVersion) {
+            nextData.lastUpdatedAt = Date.now();
+          }
+          return { ...n, data: nextData };
+        }),
+      };
+    });
+
+    const updated = get().nodes.find((n) => n.id === id);
+    if (updated?.type === 'textNode') {
+      const { nodes, edges } = get();
+      const targets = [...new Set(edges.filter((e) => e.source === id).map((e) => e.target))];
+      for (const tid of targets) {
+        const t = nodes.find((n) => n.id === tid);
+        if (t?.type === 'department' && shouldPreferManualInput(t.data)) continue;
+        const merged = mergedTextInputForDepartment(tid, nodes, edges);
+        if (merged !== null) {
+          get().patchNodeData(tid, { input: merged, inputSource: 'graph' }, false);
+        }
+      }
+    }
+    // 浠呭綋 output 鍙樺寲鏃跺埛鏂?Output 杩炵嚎涓嬬殑鍚堝苟杈撳叆锛涚函 input 鏇存柊鑻ヤ篃鍒锋柊浼氱骇鑱?patchNodeTask鈫扲eact 鎶?Maximum update depth
+    const outputTouched = 'output' in patchEff;
+    if (updated?.type === 'department' && outputTouched) {
+      refreshDownstreamAfterDepartmentOutputChange(get, id);
+    }
+
+    if (
+      updated?.type === 'department' &&
+      updated.data.type === 'storyboard' &&
+      patchEff.output !== undefined &&
+      updated.data.status !== 'IN_PROGRESS'
+    ) {
+      get().syncShotListNodesFromStoryboard(id);
+    }
+  },
+
+  syncShotListNodesFromStoryboard: (storyboardId) => {
+    const sb = get().nodes.find((n) => n.id === storyboardId);
+    if (!sb || sb.type !== 'department' || sb.data.type !== 'storyboard') return;
+    if (sb.data.status === 'IN_PROGRESS') return;
+    const out = sb.data.output;
+    const parsed = out ? tryParseStoryboardOutput(out) : null;
+    if (!parsed?.shots?.length) return;
+    const snap = sb.data.storyboard_ai_snapshot
+      ? cloneStoryboardOutput(sb.data.storyboard_ai_snapshot)
+      : cloneStoryboardOutput(parsed);
+    const childIds = get()
+      .edges.filter(
+        (e) => e.source === storyboardId && e.sourceHandle === SHOT_LIST_LINK_HANDLE_ID,
+      )
+      .map((e) => e.target);
+    if (childIds.length === 0) return;
+    const parsedKey = storyboardOutputFingerprint(parsed);
+    const hasAnyDiff = get().nodes.some((n) => {
+      if (!childIds.includes(n.id) || n.type !== 'shotList') return false;
+      const childParsed = n.data.output ? tryParseStoryboardOutput(n.data.output) : null;
+      return storyboardOutputFingerprint(childParsed) !== parsedKey;
+    });
+    if (!hasAnyDiff) return;
+    set((s) => ({
+      nodes: s.nodes.map((n) => {
+        if (!childIds.includes(n.id) || n.type !== 'shotList') return n;
+        return {
+          ...n,
+          data: {
+            ...n.data,
+            output: cloneStoryboardOutput(parsed),
+            storyboard_ai_snapshot: snap,
+            sourceSceneCount: sb.data.sourceSceneCount,
+          },
+        };
+      }),
+    }));
+  },
+
+  ensureShotListForStoryboard: (storyboardNodeId) => {
+    const sb = get().nodes.find((n) => n.id === storyboardNodeId);
+    if (!sb || sb.type !== 'department' || sb.data.type !== 'storyboard') return;
+    if (sb.data.status === 'IN_PROGRESS') return;
+    const out = sb.data.output;
+    const parsed = out ? tryParseStoryboardOutput(out) : null;
+    if (!parsed?.shots?.length) return;
+
+    const existing = get().edges.find(
+      (e) =>
+        e.source === storyboardNodeId && e.sourceHandle === SHOT_LIST_LINK_HANDLE_ID,
+    );
+    if (existing) {
+      get().syncShotListNodesFromStoryboard(storyboardNodeId);
+      return;
+    }
+
+    const slId = uid('shotlist');
+    const snap = sb.data.storyboard_ai_snapshot
+      ? cloneStoryboardOutput(sb.data.storyboard_ai_snapshot)
+      : cloneStoryboardOutput(parsed);
+    const data = makeShotListNodeData(
+      slId,
+      storyboardNodeId,
+      cloneStoryboardOutput(parsed),
+      snap,
+      typeof sb.data.sourceSceneCount === 'number' ? sb.data.sourceSceneCount : undefined,
+    );
+    const pos = { x: sb.position.x, y: sb.position.y + 200 };
+    set((s) => ({
+      nodes: [
+        ...s.nodes,
+        {
+          id: slId,
+          type: 'shotList',
+          position: pos,
+          selected: false,
+          data,
+        },
+      ],
+      edges: addEdge(
+        {
+          source: storyboardNodeId,
+          target: slId,
+          sourceHandle: SHOT_LIST_LINK_HANDLE_ID,
+          targetHandle: SHOT_LIST_PARENT_HANDLE_ID,
+          animated: true,
+          style: { strokeDasharray: '6 4' },
+        },
+        s.edges,
+      ),
+    }));
+    get().pushMessage({
+      role: 'broadcast',
+      text: '宸插湪鍒嗛暅鑺傜偣涓嬭嚜鍔ㄥ垱寤恒€岄暅澶磋〃銆嶅瓙鑺傜偣锛涜〃鏍艰鍦ㄥ瓙鑺傜偣璇︽儏涓紪杈戙€?,
+      nodeId: slId,
+    });
+  },
+
+  patchShotListNodeOutput: (shotListId, output, bumpVersion = true) => {
+    if (bumpVersion) {
+      pushUndoSnapshot(set);
+    }
+    const sl = get().nodes.find((n) => n.id === shotListId);
+    if (!sl || sl.type !== 'shotList' || sl.data.type !== 'shot_list_node') return;
+    const parentId = sl.data.sourceStoryboardNodeId;
+    if (!parentId) return;
+    const now = Date.now();
+    set((s) => ({
+      nodes: s.nodes.map((n) => {
+        if (n.id === shotListId) {
+          const v = bumpVersion ? n.data.version + 1 : n.data.version;
+          return {
+            ...n,
+            data: {
+              ...n.data,
+              output,
+              version: v,
+              ...(bumpVersion ? { lastUpdatedAt: now } : {}),
+            },
+          };
+        }
+        if (n.id === parentId && n.type === 'department') {
+          const v = bumpVersion ? n.data.version + 1 : n.data.version;
+          return {
+            ...n,
+            data: {
+              ...n.data,
+              output,
+              version: v,
+              ...(bumpVersion ? { lastUpdatedAt: now } : {}),
+            },
+          };
+        }
+        return n;
+      }),
+    }));
+    refreshDownstreamAfterDepartmentOutputChange(get, parentId);
+    // 鐢诲竷/璇︽儏鎵嬫敼闀滃ご琛ㄥ悗锛岄』璁╄繛鍦ㄩ暅澶磋〃 Output 涓婄殑 Prompt 濮嬬粓鍚冨埌鏈€鏂?JSON锛堜笉鍥犻潰鏉裤€屾墜鍔ㄨ緭鍏ャ€嶈€屽崱浣忥級
+    refreshDownstreamAfterDepartmentOutputChange(get, shotListId, { ignoreManualInput: true });
+  },
+
+  setStatus: (id, next) => {
+    const n = get().nodes.find((x) => x.id === id);
+    if (!n) return false;
+    if (!canTransitionPipelineStatus(n.data.status, next)) return false;
+    get().patchNodeData(id, { status: next }, true);
+    get().pushMessage({
+      role: 'broadcast',
+      text: `鑺傜偣 ${n.data.label} 鈫?${next}`,
+      nodeId: id,
+    });
+    return true;
+  },
+
+  addDepartmentNode: (kind, position) => {
+    pushUndoSnapshot(set);
+    const id = uid('node');
+    const pos = position ?? { x: 280, y: 220 };
+    const data = makeNodeData(id, kind);
+    set((s) => ({
+      nodes: [
+        ...s.nodes,
+        {
+          id,
+          type: 'department',
+          position: pos,
+          selected: false,
+          data,
+        },
+      ],
+    }));
+    get().pushMessage({
+      role: 'system',
+      text: `宸插垱寤?{deptLabel(kindToDepartment(kind))}鑺傜偣`,
+      nodeId: id,
+    });
+    return id;
+  },
+
+  addTextNode: (text = '', position) => {
+    pushUndoSnapshot(set);
+    const id = uid('text');
+    const pos = position ?? { x: 320, y: 240 };
+    const data = makeTextNodeData(id, text);
+    set((s) => ({
+      nodes: [
+        ...s.nodes,
+        {
+          id,
+          type: 'textNode',
+          position: pos,
+          selected: false,
+          data,
+        },
+      ],
+    }));
+    get().pushMessage({
+      role: 'system',
+      text: '宸插垱寤烘枃鏈崱鐗囷細鎶婂彸渚у渾鐐硅繛鍒伴儴闂ㄨ妭鐐瑰乏渚э紝鍐呭浼氳嚜鍔ㄥ悓姝ヤ负閮ㄩ棬杈撳叆銆?,
+      nodeId: id,
+    });
+    return id;
+  },
+
+  addStoryboardFileNode: (position) => {
+    pushUndoSnapshot(set);
+    const id = uid('storyfile');
+    const pos = position ?? { x: 320, y: 240 };
+    const data = makeStoryboardFileNodeData(id);
+    set((s) => ({
+      nodes: [
+        ...s.nodes,
+        {
+          id,
+          type: 'storyboardFile',
+          position: pos,
+          selected: false,
+          data,
+        },
+      ],
+    }));
+    get().pushMessage({
+      role: 'system',
+      text: '宸插垱寤哄垎闀滆〃鏂囦欢鑺傜偣锛氬鍏ョ幇鏈?Excel 闀滃ご琛ㄥ悗锛屽彲鐩存帴杩炲埌 Prompt 鑺傜偣鐢熸垚鎻愮ず璇嶃€?,
+      nodeId: id,
+    });
+    return id;
+  },
+
+  createTextNodeLinkedToDepartment: (deptId, position) => {
+    pushUndoSnapshot(set);
+    const id = uid('text');
+    const data = makeTextNodeData(id, '');
+    set((s) => ({
+      nodes: [
+        ...s.nodes,
+        {
+          id,
+          type: 'textNode',
+          position,
+          selected: false,
+          data,
+        },
+      ],
+      edges: addEdge(
+        {
+          source: id,
+          target: deptId,
+          sourceHandle: 'out',
+          targetHandle: 'in',
+          animated: true,
+        },
+        s.edges,
+      ),
+    }));
+    const { nodes, edges } = get();
+    const deptNode = nodes.find((n) => n.id === deptId);
+    if (!shouldPreferManualInput(deptNode?.data)) {
+      const merged = mergedTextInputForDepartment(deptId, nodes, edges);
+      if (merged !== null) {
+        get().patchNodeData(deptId, { input: merged, inputSource: 'graph' }, false);
+      }
+    }
+    get().pushMessage({
+      role: 'system',
+      text: '宸插垱寤烘枃鏈崱鐗囷紝骞跺凡鎺ュ叆閮ㄩ棬杈撳叆绔彛銆?,
+      nodeId: id,
+    });
+    return id;
+  },
+
+  completeConnectionMenuPick: (p) => {
+    const from = get().nodes.find((n) => n.id === p.fromNodeId);
+    if (!from) return undefined;
+
+    const hid = p.fromHandleId ?? '';
+    const ht = p.fromHandleType;
+    const fp = p.flowPosition;
+    const upstreamPos = { x: fp.x - 300, y: fp.y - 70 };
+    const downstreamPos = { x: fp.x + 56, y: fp.y - 70 };
+
+    const pushErr = (text: string) => {
+      get().pushMessage({ role: 'system', text, nodeId: p.fromNodeId });
+      return undefined;
+    };
+
+    const syncDeptIn = (deptId: string) => {
+      const { nodes, edges } = get();
+      const dept = nodes.find((n) => n.id === deptId);
+      if (shouldPreferManualInput(dept?.data)) return;
+      const merged = mergedTextInputForDepartment(deptId, nodes, edges);
+      if (merged !== null) {
+        get().patchNodeData(deptId, { input: merged, inputSource: 'graph' }, false);
+      }
+    };
+
+    const syncTextIn = (textId: string) => {
+      const { nodes, edges } = get();
+      const m = mergedUpstreamForTextNode(textId, nodes, edges);
+      if (m !== null) {
+        get().patchNodeData(textId, { raw_text: m, input: m }, false);
+      }
+    };
+
+    const INPUT_PULL = 'input-pull';
+
+    const feedingDept =
+      from.type === 'department' &&
+      ((hid === INPUT_PULL && ht === 'source') || (hid === 'in' && ht === 'target'));
+
+    const feedingText = from.type === 'textNode' && hid === 'in' && ht === 'target';
+
+    const fromDownstreamOut =
+      ht === 'source' &&
+      (hid === 'out' || (from.type === 'shotList' && isShotListItemOutputHandleId(hid)));
+
+    if (feedingDept) {
+      const dk = from.data.type as PipelineKind;
+      if (p.pick === 'text_node') {
+        const id = uid('text');
+        const data = makeTextNodeData(id, '');
+        set((s) => ({
+          nodes: [
+            ...s.nodes,
+            {
+              id,
+              type: 'textNode',
+              position: upstreamPos,
+              selected: false,
+              data,
+            },
+          ],
+          edges: addEdge(
+            {
+              source: id,
+              target: from.id,
+              sourceHandle: 'out',
+              targetHandle: 'in',
+              animated: true,
+            },
+            s.edges,
+          ),
+        }));
+        syncDeptIn(from.id);
+        get().pushMessage({
+          role: 'system',
+          text: '宸插垱寤烘枃鏈崱鐗囷紝骞跺凡鎺ュ叆璇ラ儴闂ㄨ緭鍏ャ€?,
+          nodeId: id,
+        });
+        return id;
+      }
+      if (p.pick === 'storyboard_file_node') {
+        if (dk !== 'prompt') {
+          return pushErr('鍒嗛暅琛ㄦ枃浠惰妭鐐圭洰鍓嶄粎鏀寔浣滀负 Prompt 鑺傜偣鐨勪笂娓歌緭鍏ャ€?);
+        }
+        const id = get().addStoryboardFileNode(upstreamPos);
+        set((s) => ({
+          edges: addEdge(
+            {
+              source: id,
+              target: from.id,
+              sourceHandle: DEPT_OUTPUT_HANDLE_ID,
+              targetHandle: 'in',
+              animated: true,
+            },
+            s.edges,
+          ),
+        }));
+        syncDeptIn(from.id);
+        return id;
+      }
+      const upKind = p.pick as PipelineKind;
+      if (!canDeptChain(upKind, dk)) {
+        return pushErr('璇ラ儴闂ㄧ被鍨嬫棤娉曚綔涓轰笂娓告帴鍏ュ綋鍓嶈妭鐐圭殑 Input銆?);
+      }
+      const id = get().addDepartmentNode(upKind, upstreamPos);
+      set((s) => ({
+        edges: addEdge(
+          {
+            source: id,
+            target: from.id,
+            sourceHandle: DEPT_OUTPUT_HANDLE_ID,
+            targetHandle: 'in',
+            animated: true,
+          },
+          s.edges,
+        ),
+      }));
+      syncDeptIn(from.id);
+      return id;
+    }
+
+    if (feedingText) {
+      if (p.pick === 'text_node') {
+        const id = uid('text');
+        const data = makeTextNodeData(id, '');
+        set((s) => ({
+          nodes: [
+            ...s.nodes,
+            {
+              id,
+              type: 'textNode',
+              position: upstreamPos,
+              selected: false,
+              data,
+            },
+          ],
+          edges: addEdge(
+            {
+              source: id,
+              target: from.id,
+              sourceHandle: 'out',
+              targetHandle: 'in',
+              animated: true,
+            },
+            s.edges,
+          ),
+        }));
+        syncTextIn(from.id);
+        get().pushMessage({ role: 'system', text: '宸插垱寤烘枃鏈崱鐗囷紝骞跺凡鎺ュ叆涓婃父銆?, nodeId: id });
+        return id;
+      }
+      if (p.pick === 'storyboard_file_node') {
+        const id = get().addStoryboardFileNode(upstreamPos);
+        set((s) => ({
+          edges: addEdge(
+            {
+              source: id,
+              target: from.id,
+              sourceHandle: DEPT_OUTPUT_HANDLE_ID,
+              targetHandle: 'in',
+              animated: true,
+            },
+            s.edges,
+          ),
+        }));
+        syncTextIn(from.id);
+        return id;
+      }
+      const upKind = p.pick as PipelineKind;
+      const id = get().addDepartmentNode(upKind, upstreamPos);
+      set((s) => ({
+        edges: addEdge(
+          {
+            source: id,
+            target: from.id,
+            sourceHandle: DEPT_OUTPUT_HANDLE_ID,
+            targetHandle: 'in',
+            animated: true,
+          },
+          s.edges,
+        ),
+      }));
+      syncTextIn(from.id);
+      return id;
+    }
+
+    if (fromDownstreamOut) {
+      if (from.type === 'textNode') {
+        if (p.pick === 'text_node') {
+          const id = uid('text');
+          const data = makeTextNodeData(id, '');
+          set((s) => ({
+            nodes: [
+              ...s.nodes,
+              {
+                id,
+                type: 'textNode',
+                position: downstreamPos,
+                selected: false,
+                data,
+              },
+            ],
+            edges: addEdge(
+              {
+                source: from.id,
+                target: id,
+                sourceHandle: 'out',
+                targetHandle: 'in',
+                animated: true,
+              },
+              s.edges,
+            ),
+          }));
+          syncTextIn(id);
+          get().pushMessage({ role: 'system', text: '宸插垱寤轰笅娓告枃鏈崱鐗囷紝骞跺凡鑷姩杩炵嚎銆?, nodeId: id });
+          return id;
+        }
+        if (p.pick === 'storyboard_file_node') {
+          return pushErr('鍒嗛暅琛ㄦ枃浠惰妭鐐逛笉鑳戒綔涓烘枃鏈崱鐗囩殑涓嬫父鑺傜偣鍒涘缓銆?);
+        }
+        const tk = p.pick as PipelineKind;
+        const id = get().addDepartmentNode(tk, downstreamPos);
+        set((s) => ({
+          edges: addEdge(
+            {
+              source: from.id,
+              target: id,
+              sourceHandle: 'out',
+              targetHandle: 'in',
+              animated: true,
+            },
+            s.edges,
+          ),
+        }));
+        syncDeptIn(id);
+        return id;
+      }
+
+      if (from.type === 'shotList') {
+        if (from.data.type !== 'shot_list_node') return pushErr('闀滃ご琛ㄨ妭鐐规暟鎹紓甯搞€?);
+        if (p.pick !== 'prompt') {
+          return pushErr('闀滃ご琛ㄥ彸渚?Output 浠呮敮鎸佸垱寤轰笅娓?Prompt 閮紙璇诲彇宸ヤ綔鍙板畾绋垮悗鐨勯暅澶达級銆?);
+        }
+        const id = get().addDepartmentNode('prompt', downstreamPos);
+        const sourceHandles = resolveShotListSourceHandlesForConnect(
+          get().shotListSelectedWiresByNodeId,
+          from.id,
+          hid,
+        );
+        set((s) => ({
+          edges: addUniqueAnimatedEdges(
+            s.edges,
+            sourceHandles.map((sourceHandle) => ({
+              source: from.id,
+              target: id,
+              sourceHandle,
+              targetHandle: 'in',
+            })),
+          ),
+        }));
+        syncDeptIn(id);
+        get().pushMessage({
+          role: 'broadcast',
+          text:
+            hid && hid !== DEPT_OUTPUT_HANDLE_ID
+              ? '宸插垱寤?Prompt 閮紝骞舵帴鍏ュ綋鍓嶉暅澶磋 Output锛涚户缁妸鏇村闀滃ご琛岃繛鍒板悓涓€涓?Prompt锛屽彲鐢熸垚澶氶暅澶寸粍鍚堟彁绀鸿瘝銆?
+              : '宸插垱寤?Prompt 閮ㄥ苟宸叉帴鍏ラ暅澶磋〃瀛愯妭鐐?Output锛堜笌琛ㄦ牸鎵嬫敼鐗堟湰涓€鑷达級銆?,
+          nodeId: id,
+        });
+        return id;
+      }
+
+      if (from.type === 'storyboardFile') {
+        if (p.pick !== 'prompt') {
+          return pushErr('鍒嗛暅琛ㄦ枃浠惰妭鐐瑰彸渚?Output 浠呮敮鎸佸垱寤轰笅娓?Prompt 鑺傜偣銆?);
+        }
+        const id = get().addDepartmentNode('prompt', downstreamPos);
+        set((s) => ({
+          edges: addEdge(
+            {
+              source: from.id,
+              target: id,
+              sourceHandle: DEPT_OUTPUT_HANDLE_ID,
+              targetHandle: 'in',
+              animated: true,
+            },
+            s.edges,
+          ),
+        }));
+        syncDeptIn(id);
+        get().pushMessage({
+          role: 'broadcast',
+          text: '宸插垱寤?Prompt 鑺傜偣锛屽苟鎺ュ叆瀵煎叆鍚庣殑鍒嗛暅琛ㄦ枃浠躲€?,
+          nodeId: id,
+        });
+        return id;
+      }
+
+      if (from.type === 'department') {
+        const fk = from.data.type as PipelineKind;
+        if (p.pick === 'text_node') {
+          const id = uid('text');
+          const data = makeTextNodeData(id, '');
+          set((s) => ({
+            nodes: [
+              ...s.nodes,
+              {
+                id,
+                type: 'textNode',
+                position: downstreamPos,
+                selected: false,
+                data,
+              },
+            ],
+            edges: addEdge(
+              {
+                source: from.id,
+                target: id,
+                sourceHandle: DEPT_OUTPUT_HANDLE_ID,
+                targetHandle: 'in',
+                animated: true,
+              },
+              s.edges,
+            ),
+          }));
+          syncTextIn(id);
+          get().pushMessage({ role: 'system', text: '宸插垱寤烘枃鏈崱鐗囷紝骞跺凡鎺ュ叆閮ㄩ棬杈撳嚭銆?, nodeId: id });
+          return id;
+        }
+        if (p.pick === 'storyboard_file_node') {
+          return pushErr('鍒嗛暅琛ㄦ枃浠惰妭鐐逛笉鑳戒綔涓洪儴闂ㄨ妭鐐圭殑涓嬫父鑺傜偣鍒涘缓銆?);
+        }
+        const tk = p.pick as PipelineKind;
+        if (!canDeptChain(fk, tk)) {
+          return pushErr('褰撳墠閮ㄩ棬 Output 鏃犳硶鎺ュ叆鎵€閫変笅娓搁儴闂ㄣ€?);
+        }
+        const id = get().addDepartmentNode(tk, downstreamPos);
+        set((s) => ({
+          edges: addEdge(
+            {
+              source: from.id,
+              target: id,
+              sourceHandle: DEPT_OUTPUT_HANDLE_ID,
+              targetHandle: 'in',
+              animated: true,
+            },
+            s.edges,
+          ),
+        }));
+        syncDeptIn(id);
+        const upstreamMounted = Array.isArray(from.data.mounted_skills) ? from.data.mounted_skills : [];
+        const chained = mergeDownstreamSkillsFromChain(upstreamMounted, fk, tk);
+        if (chained.length > 0) {
+          get().patchNodeData(id, { mounted_skills: chained }, false);
+          const labels = chained.map((sid) => getSkillById(sid)?.name ?? sid);
+          get().pushMessage({
+            role: 'system',
+            text: `Skill Chain锛氬凡鏍规嵁涓婃父鑺傜偣鎸傝浇缁ф壙/瀵归綈鎶€鑳?鈥?${labels.join('銆?)}`,
+            nodeId: id,
+          });
+        }
+        return id;
+      }
+    }
+
+    return pushErr('璇ョ鍙ｄ笉鏀寔浠庢澶勬媺鍑哄垱寤鸿妭鐐广€?);
+  },
+
+  startWritingPipeline: (text, position) => {
+    const id = get().addDepartmentNode('writing', position);
+    get().patchNodeData(id, { input: text }, false);
+    get().setActiveNodeId(id);
+    get().pushMessage({
+      role: 'broadcast',
+      text: '缂栧墽閮?AI 鍛樺伐寮€濮嬬敓鎴愬垎闆嗗ぇ绾蹭笌鍦烘琛ㄢ€?,
+      nodeId: id,
+    });
+    void get().executeNodeTask(id);
+    return id;
+  },
+
+  executeNodeTask: async (nodeId, opts) => {
+    const fromReviewed = opts?.optimizeFromReviewed === true;
+    const node = get().nodes.find((n) => n.id === nodeId);
+    if (!node || node.type !== 'department') return;
+    const kind = node.data.type;
+    if (kind !== 'writing' && kind !== 'storyboard' && kind !== 'prompt') return;
+    if (fromReviewed) {
+      if (node.data.status !== 'REVIEWED') {
+        get().pushMessage({
+          role: 'system',
+          text: '浠呫€屽凡闃呫€嶇姸鎬佸彲鍙戣捣浼樺寲杩唬锛氳鍏堝畬鎴愪竴娆″憳宸ョ敓鎴愪笌鎬荤洃瀹℃牳銆?,
+          nodeId,
+        });
+        return;
+      }
+    } else if (node.data.status !== 'NOT_STARTED' && node.data.status !== 'REJECTED') {
+      get().pushMessage({
+        role: 'system',
+        text: `褰撳墠鐘舵€佷负 ${node.data.status}锛屼粎銆屾湭寮€濮?/ 宸查┏鍥炪€嶅彲鎵ц锛涘凡闃呰妭鐐硅鐢ㄣ€屾墽琛屼紭鍖栥€嶆垨銆岀淮鎸佺幇鐘堕€氳繃銆嶃€俙,
+        nodeId,
+      });
+      return;
+    }
+    const optimizeFb = fromReviewed ? (node.data.ai_review_feedback?.trim() ?? '') : '';
+    // 1. 浠诲姟鏂囨湰锛氭湁 Input 杩炵嚎鏃跺缁堝悎骞剁鍙ｄ晶鏈€鏂版枃鏈紙鍚?TEXT_NODE.raw_text锛夛紝鍐嶅啓鍏ヨ妭鐐?input 渚涘睍绀?
+    const { nodes: n0, edges: e0 } = get();
+    const merged0 = mergedTextInputForDepartment(nodeId, n0, e0);
+    if (merged0 !== null && merged0.trim() !== '') {
+      get().patchNodeData(nodeId, { input: merged0.trim(), inputSource: 'graph' }, false);
+    }
+    const deptRow = get().nodes.find((n) => n.id === nodeId);
+    const inputText = resolveDepartmentExecutionInput(
+      nodeId,
+      get().nodes,
+      get().edges,
+      deptRow?.data.input ?? '',
+    );
+    if (!inputText && !fromReviewed) {
+        const msg =
+          kind === 'writing'
+            ? '璇峰厛鎻愪緵绱犳潗锛氬皢鏂囨湰鍗＄墖杩炲埌 Input锛屾垨鍦ㄨ鎯呬腑绮樿创灏忚 / IP 姝ｆ枃銆?
+            : kind === 'storyboard'
+            ? '璇峰厛鍐欏叆鍓ф湰鏂囨湰锛氳繛鎺ユ枃鏈崱鐗囧埌 Input 鍚屾锛屾垨鍦ㄨ鎯呴潰鏉裤€屽墽鏈鏂囥€嶄腑绮樿创銆?
+            : '璇峰厛鎻愪緵闇€姹傝鏄庯細灏嗘枃鏈崱鐗囪繛鍒?Input锛屾垨鍦ㄨ鎯呬腑濉啓浠诲姟鎻忚堪銆?;
+      get().pushMessage({ role: 'system', text: msg, nodeId });
+      return;
+    }
+    // 2. 杩涘叆鎵ц锛欼N_PROGRESS + 娴佸紡棰勮瀛楁 + 钃濊壊娴佸厜锛堣 DepartmentNode锛?
+    get().patchNodeData(
+      nodeId,
+      {
+        status: 'IN_PROGRESS',
+        ...(fromReviewed
+          ? {}
+          : {
+              output: null,
+              review_result: null,
+              ai_review_feedback: null,
+              leader_review_suggested_pass: undefined,
+              ...(kind === 'storyboard' ? { storyboard_ai_snapshot: null } : {}),
+            }),
+        generation_error: undefined,
+        streaming_preview: '',
+        generation_phase: 'employee',
+      },
+      true,
+    );
+    get().setActiveNodeId(nodeId);
+    const broadcastText = fromReviewed
+      ? `${deptLabel(kindToDepartment(kind))}锛氭寜鎬荤洃瀹℃牳鎰忚鎵ц浼樺寲杩唬鈥
+      : kind === 'writing'
+        ? '缂栧墽閮?AI 姝ｅ湪璇诲彇 Input 绱犳潗骞剁敓鎴愬垎闆嗗ぇ绾蹭笌鍦烘琛ㄢ€?
+        : kind === 'storyboard'
+          ? '鍒嗛暅璁捐甯堟鍦ㄨ鍙栧墽鏈枃鏈苟鐢熸垚闀滃ご琛ㄢ€?
+          : 'Prompt 閮ㄦ鍦ㄨ鍙栭暅澶磋〃骞剁敓鎴愰€愰暅瑙嗛寮曟搸鎻愮ず璇嶁€?;
+    get().pushMessage({ role: 'broadcast', text: broadcastText, nodeId });
+    activeTaskAbortControllers.get(nodeId)?.abort();
+    const controller = new AbortController();
+    activeTaskAbortControllers.set(nodeId, controller);
+    const ensureNotStopped = () => {
+      if (controller.signal.aborted) {
+        throw new Error(STOP_TASK_MESSAGE);
+      }
+    };
+
+    try {
+      const src = get().nodes.find((n) => n.id === nodeId);
+      const reviewOptimization =
+        fromReviewed && src
+          ? {
+              feedback: optimizeFb || DEFAULT_AI_REVIEW_PASS_SUMMARY,
+              currentVersionContent: formatReviewOptimizationPayload(src.data),
+            }
+          : undefined;
+      const taskParams = {
+        kind,
+        nodeId,
+        nodes: get().nodes,
+        edges: get().edges,
+        fallbackInput: src?.data.input ?? '',
+        assets: get().assets,
+        sourceSceneCount:
+          kind === 'storyboard' && typeof src?.data.sourceSceneCount === 'number'
+            ? src.data.sourceSceneCount
+            : undefined,
+        mountedSkills: Array.isArray(src?.data.mounted_skills) ? src.data.mounted_skills : [],
+        taskInstruction:
+          typeof src?.data.assistant_task_instruction === 'string'
+            ? src.data.assistant_task_instruction
+            : '',
+        reviewOptimization,
+        signal: controller.signal,
+        onModelStreamChunk: (_delta: string, accumulated: string) => {
+          get().patchNodeData(
+            nodeId,
+            {
+              streaming_preview: accumulated.trim()
+                ? `妯″瀷瀹炴椂杈撳嚭锛堝師濮?JSON锛?..\n\n${accumulated}`
+                : '姝ｅ湪鎺ユ敹妯″瀷娴佸紡杈撳嚭鈥?,
+              generation_phase: 'employee',
+            },
+            false,
+          );
+        },
+      };
+
+      get().patchNodeData(
+        nodeId,
+        { streaming_preview: '姝ｅ湪寤虹珛妯″瀷娴佸紡杩炴帴鈥?, generation_phase: 'employee' },
+        false,
+      );
+
+      const emp = await executeEmployeePhase(taskParams);
+      ensureNotStopped();
+
+      if (emp.ok && emp.skillWarnings?.length) {
+        for (const w of emp.skillWarnings) {
+          get().pushMessage({ role: 'system', text: w, nodeId });
+        }
+      }
+
+      if (!emp.ok) {
+        const stoppedByUser = (emp.message ?? '') === STOP_TASK_MESSAGE;
+        const failMsg = emp.message ?? `${deptLabel(kindToDepartment(kind))}鎵ц澶辫触`;
+        get().patchNodeData(
+          nodeId,
+          {
+            status: stoppedByUser && fromReviewed ? 'REVIEWED' : 'NOT_STARTED',
+            streaming_preview: undefined,
+            generation_phase: undefined,
+            generation_error: failMsg,
+          },
+          true,
+        );
+        const workflowSession = get().workflowAgentSession;
+        if (
+          workflowSession &&
+          (workflowSession.writingNodeId === nodeId ||
+            workflowSession.storyboardNodeId === nodeId ||
+            workflowSession.promptNodeId === nodeId)
+        ) {
+          set((state) =>
+            state.workflowAgentSession?.id === workflowSession.id
+              ? {
+                  workflowAgentSession: {
+                    ...state.workflowAgentSession,
+                    state: stoppedByUser ? state.workflowAgentSession.state : 'FAILED',
+                    lastAssistantMessage: stoppedByUser
+                      ? '瑜版挸澧犲ù浣衡柤闂冭埖顔屽鍙夊閸斻劌浠犲顫礉娴ｇ姴褰叉禒銉╁櫢閺傛澘褰傜挧閿嬪灗缂佈呯敾鐠嬪啯鏆ｉ妴?'
+                      : `${stageLabel(state.workflowAgentSession.state)}闂冭埖顔岄幍褑顢戞径杈Е閿涘矁顕Λ鈧弻銉ㄥΝ閻愯濮ら柨娆忔倵閸愬啿鐣鹃弰顖炲櫢鐠囨洝绻曢弰顖炲櫢閺傛澘绱戞慨瀣ㄢ偓?`,
+                    updatedAt: Date.now(),
+                  },
+                }
+              : state,
+          );
+        }
+        get().pushMessage({
+          role: 'system',
+          text: failMsg,
+          nodeId,
+        });
+        return;
+      }
+
+      if (kind === 'writing') {
+        ingestWritingOutputToProjectContext(nodeId, emp.output as WritingOutput);
+        get().pushMessage({
+          role: 'system',
+          text: 'ProjectContext锛氬凡鏍规嵁鏈紪鍓т骇鍑烘洿鏂板叏灞€瑙掕壊璁惧畾涓庨鏍奸敋鐐癸紱鍒嗛暅/Prompt 璋冪敤 API 鏃跺皢鑷姩闄勫甫銆?,
+          nodeId,
+        });
+      }
+
+      const previewBody = formatPipelineOutputPreview(kind, emp.output);
+      await typewriterStream(
+        previewBody,
+        (acc) => get().patchNodeData(nodeId, { streaming_preview: acc, generation_phase: 'employee' }, false),
+        { chunkChars: 40, delayMs: 20, signal: controller.signal },
+      );
+      ensureNotStopped();
+
+      const afterEmployee: Partial<StudioNodeData> = {
+        output: emp.output,
+        input: emp.inputUsed,
+        streaming_preview: undefined,
+        generation_phase: 'leader',
+        generation_error: undefined,
+      };
+      if (kind === 'storyboard' && emp.narrativeBeatCount != null) {
+        afterEmployee.sourceSceneCount = emp.narrativeBeatCount;
+      }
+      if (kind === 'storyboard' && emp.output) {
+        afterEmployee.storyboard_ai_snapshot = cloneStoryboardOutput(emp.output as StoryboardOutput);
+      }
+      get().patchNodeData(nodeId, afterEmployee, true);
+
+      get().pushMessage({
+        role: 'broadcast',
+        text: '鍛樺伐澶ц剳宸插畬鎴愯緭鍑猴紝1 绉掑悗灏嗚嚜鍔ㄨЕ鍙戞€荤洃澶ц剳瀹℃牳鈥?,
+        nodeId,
+      });
+      get().patchNodeData(
+        nodeId,
+        { streaming_preview: '绛夊緟瑙﹀彂鎬荤洃澶ц剳瀹℃牳锛圓PI锛夆€?, generation_phase: 'leader' },
+        false,
+      );
+      await waitWithAbort(LEADER_AUTO_DELAY_MS, controller.signal);
+      ensureNotStopped();
+      get().patchNodeData(
+        nodeId,
+        { streaming_preview: '鎬荤洃澶ц剳姝ｅ湪瀹℃牳锛圓PI锛夆€?, generation_phase: 'leader' },
+        false,
+      );
+
+      const leader = await executeLeaderPhase({
+        kind,
+        output: emp.output,
+        sourceSceneCount:
+          kind === 'storyboard'
+            ? emp.narrativeBeatCount ?? (typeof src?.data.sourceSceneCount === 'number' ? src.data.sourceSceneCount : undefined)
+            : undefined,
+        signal: controller.signal,
+      });
+      ensureNotStopped();
+
+      const feedbackText = leader.approved
+        ? (leader.feedback?.trim() || DEFAULT_AI_REVIEW_PASS_SUMMARY)
+        : (leader.feedback?.trim() || 'AI 鎬荤洃寤鸿淇锛氳闃呰鎰忚鍚庡湪璇︽儏涓€夋嫨銆屾墽琛屼紭鍖栬凯浠ｃ€嶆垨銆岀淮鎸佺幇鐘堕€氳繃銆嶃€?);
+
+      get().patchNodeData(
+        nodeId,
+        {
+          status: 'REVIEWED',
+          ai_review_feedback: feedbackText,
+          leader_review_suggested_pass: leader.approved,
+          review_result: null,
+          streaming_preview: undefined,
+          generation_phase: undefined,
+          generation_error: undefined,
+        },
+        true,
+      );
+      if (kind === 'storyboard') {
+        get().ensureShotListForStoryboard(nodeId);
+        get().syncShotListNodesFromStoryboard(nodeId);
+      }
+
+      const workflowSession = get().workflowAgentSession;
+      if (workflowSession) {
+        if (kind === 'writing' && workflowSession.writingNodeId === nodeId) {
+          set((state) =>
+            state.workflowAgentSession?.id === workflowSession.id
+              ? {
+                  workflowAgentSession: {
+                    ...state.workflowAgentSession,
+                    state: 'SCRIPT_READY',
+                    lastAssistantMessage: '鍓ф湰闃舵宸插畬鎴愶紝鍙互缁х画杩涘叆鍒嗛暅闃舵銆?,
+                    updatedAt: Date.now(),
+                  },
+                }
+              : state,
+          );
+          get().pushMessage({
+            role: 'assistant',
+            text: 'Agent 鏇存柊锛氬墽鏈樁娈靛凡瀹屾垚銆備綘鍙互缁х画璁╂垜杩涘叆鍒嗛暅闃舵锛屼篃鍙互鍏堜汉宸ュ井璋冨墽鏈€?,
+            nodeId,
+          });
+        }
+        if (kind === 'storyboard' && workflowSession.storyboardNodeId === nodeId) {
+          const shotListChild = findStoryboardShotListChild(get().nodes, get().edges, nodeId);
+          set((state) =>
+            state.workflowAgentSession?.id === workflowSession.id
+              ? {
+                  workflowAgentSession: {
+                    ...state.workflowAgentSession,
+                    state: 'STORYBOARD_GENERATED',
+                    shotListNodeId: shotListChild?.id,
+                    lastAssistantMessage: '鍒嗛暅闃舵宸插畬鎴愶紝鍙互璋冩暣鎴栫‘璁ゅ悗杩涘叆鎻愮ず璇嶉樁娈点€?,
+                    updatedAt: Date.now(),
+                  },
+                }
+              : state,
+          );
+          get().pushMessage({
+            role: 'assistant',
+            text: 'Agent 鏇存柊锛氬垎闀滃凡缁忕敓鎴愬畬鎴愩€備綘鍙互鍏堣皟鏁村垎闀滐紝鎴栬€呯洿鎺ュ憡璇夋垜鈥滅‘璁ゅ垎闀溾€濊繘鍏ユ彁绀鸿瘝闃舵銆?,
+            nodeId: shotListChild?.id ?? nodeId,
+          });
+        }
+        if (kind === 'prompt' && workflowSession.promptNodeId === nodeId) {
+          set((state) =>
+            state.workflowAgentSession?.id === workflowSession.id
+              ? {
+                  workflowAgentSession: {
+                    ...state.workflowAgentSession,
+                    state: 'PROMPT_GENERATED',
+                    lastAssistantMessage: '鎻愮ず璇嶉樁娈靛凡瀹屾垚锛岃繖涓€杞祦绋嬪凡鍙敹灏俱€?,
+                    updatedAt: Date.now(),
+                  },
+                }
+              : state,
+          );
+          get().pushMessage({
+            role: 'assistant',
+            text: 'Agent 鏇存柊锛氭彁绀鸿瘝宸茬粡鐢熸垚瀹屾垚銆備綘鍙互缁х画寰皟 Prompt锛屾垨鑰呭憡璇夋垜鈥滃畬鎴愨€濇潵缁撴潫杩欎竴杞祦绋嬨€?,
+            nodeId,
+          });
+        }
+      }
+
+      if (leader.approved) {
+        const okMsg =
+          kind === 'writing'
+            ? '缂栧墽閮細鎬荤洃宸查槄锛堝€惧悜閫氳繃锛夈€傝鍦ㄨ鎯呴€夋嫨銆屾墽琛屼紭鍖栬凯浠ｃ€嶆垨銆岀淮鎸佺幇鐘堕€氳繃銆嶃€?
+            : kind === 'storyboard'
+              ? '鍒嗛暅閮細鎬荤洃宸查槄銆傝鍦ㄨ鎯呴€夋嫨銆屾墽琛屼紭鍖栬凯浠ｃ€嶆垨銆岀淮鎸佺幇鐘堕€氳繃銆嶃€?
+              : 'Prompt 閮細鎬荤洃宸查槄銆傝鍦ㄨ鎯呴€夋嫨銆屾墽琛屼紭鍖栬凯浠ｃ€嶆垨銆岀淮鎸佺幇鐘堕€氳繃銆嶃€?;
+        get().pushMessage({ role: 'broadcast', text: okMsg, nodeId });
+      } else {
+        get().pushMessage({
+          role: 'broadcast',
+          text: `${deptLabel(kindToDepartment(kind))}锛氭€荤洃宸查槄骞舵彁鍑轰慨璁㈡剰瑙?鈥?${leader.feedback ?? ''}`,
+          nodeId,
+        });
+      }
+    } catch (e) {
+      const stoppedByUser =
+        e instanceof Error && e.message.trim() === STOP_TASK_MESSAGE;
+      const errMsg =
+        e instanceof Error && e.message.trim()
+          ? e.message.trim()
+          : `${deptLabel(kindToDepartment(kind))}鎵ц寮傚父锛岃鏌ョ湅鑺傜偣涓嬫柟鎻愮ず鎴栫◢鍚庨噸璇曘€俙;
+      get().patchNodeData(
+        nodeId,
+        {
+          status: stoppedByUser && fromReviewed ? 'REVIEWED' : 'NOT_STARTED',
+          streaming_preview: undefined,
+          generation_phase: undefined,
+          generation_error: errMsg,
+        },
+        true,
+      );
+      const workflowSession = get().workflowAgentSession;
+      if (
+        workflowSession &&
+        (workflowSession.writingNodeId === nodeId ||
+          workflowSession.storyboardNodeId === nodeId ||
+          workflowSession.promptNodeId === nodeId)
+      ) {
+        set((state) =>
+          state.workflowAgentSession?.id === workflowSession.id
+            ? {
+                workflowAgentSession: {
+                  ...state.workflowAgentSession,
+                  state: stoppedByUser ? state.workflowAgentSession.state : 'FAILED',
+                  lastAssistantMessage: stoppedByUser
+                    ? '瑜版挸澧犲ù浣衡柤闂冭埖顔屽鍙夊閸斻劌浠犲顫礉娴ｇ姴褰叉禒銉╁櫢閺傛澘褰傜挧閿嬪灗缂佈呯敾鐠嬪啯鏆ｉ妴?'
+                    : `${stageLabel(state.workflowAgentSession.state)}闂冭埖顔岄幍褑顢戞径杈Е閿涘矁顕Λ鈧弻銉ㄥΝ閻愯濮ら柨娆忔倵閸愬啿鐣鹃弰顖炲櫢鐠囨洝绻曢弰顖炲櫢閺傛澘绱戞慨瀣ㄢ偓?`,
+                  updatedAt: Date.now(),
+                },
+              }
+            : state,
+        );
+      }
+      get().pushMessage({
+        role: 'system',
+        text: errMsg,
+        nodeId,
+      });
+    } finally {
+      if (activeTaskAbortControllers.get(nodeId) === controller) {
+        activeTaskAbortControllers.delete(nodeId);
+      }
+    }
+  },
+
+  stopNodeTask: (nodeId) => {
+    const id = nodeId ?? get().activeNodeId ?? get().selectedNodeId;
+    if (!id) {
+      get().pushMessage({ role: 'system', text: '濞屸剝婀侀崣顖欒厬濮濄垻娈戞潻鎰攽娑擃厺鎹㈤崝掳鈧?' });
+      return;
+    }
+    const controller = activeTaskAbortControllers.get(id);
+    if (!controller) {
+      get().pushMessage({
+        role: 'system',
+        text: '瑜版挸澧犻懞鍌滃仯濞屸剝婀佸锝呮躬鏉╂劘顢戦惃鍕崲閸斅扳偓?',
+        nodeId: id,
+      });
+      return;
+    }
+    controller.abort();
+    get().pushMessage({
+      role: 'system',
+      text: STOP_TASK_MESSAGE,
+      nodeId: id,
+    });
+  },
+
+  runReviewedOptimization: (nodeId) => {
+    const id = nodeId ?? get().activeNodeId ?? get().selectedNodeId;
+    if (!id) {
+      get().pushMessage({ role: 'system', text: '娌℃湁閫変腑鐨勯儴闂ㄨ妭鐐广€? });
+      return;
+    }
+    const node = get().nodes.find((n) => n.id === id);
+    if (!node || node.type !== 'department') return;
+    if (node.data.status !== 'REVIEWED') {
+      get().pushMessage({
+        role: 'system',
+        text: `褰撳墠鐘舵€佷负 ${node.data.status}锛屼粎銆屽凡闃呫€嶅彲鍙戣捣浼樺寲杩唬銆俙,
+        nodeId: id,
+      });
+      return;
+    }
+    const prev = node.data.pipeline_resolution_history ?? [];
+    const flashUntil = Date.now() + PIPELINE_DECISION_FLASH_MS;
+    get().patchNodeData(
+      id,
+      {
+        pipeline_resolution_history: [
+          ...prev,
+          { at: Date.now(), kind: 'ai_optimize', summary: '閲囩撼寤鸿骞堕噸绠? },
+        ],
+        pipeline_decision_flash: { kind: 'optimize', until: flashUntil },
+      },
+      true,
+    );
+    schedulePipelineFlashClear(get, id, flashUntil);
+    void get().executeNodeTask(id, { optimizeFromReviewed: true });
+  },
+
+  approveReviewedAsIs: (nodeId) => {
+    const id = nodeId ?? get().activeNodeId ?? get().selectedNodeId;
+    if (!id) {
+      get().pushMessage({ role: 'system', text: '娌℃湁閫変腑鐨勯儴闂ㄨ妭鐐广€? });
+      return undefined;
+    }
+    const node = get().nodes.find((n) => n.id === id);
+    if (!node || node.type !== 'department') return undefined;
+    if (node.data.status !== 'REVIEWED') {
+      get().pushMessage({
+        role: 'system',
+        text: `褰撳墠鐘舵€佷负 ${node.data.status}锛屼粎銆屽凡闃呫€嶅彲閫夋嫨缁存寔鐜扮姸閫氳繃銆俙,
+        nodeId: id,
+      });
+      return id;
+    }
+    const prev = node.data.pipeline_resolution_history ?? [];
+    const hist = [
+      ...prev,
+      { at: Date.now(), kind: 'human_approve_as_is' as const, summary: '蹇界暐寤鸿鐩存帴閫氳繃锛堢粓瀹★級' },
+    ];
+    const flashUntil = Date.now() + PIPELINE_DECISION_FLASH_MS;
+    if (node.data.type === 'writing') {
+      const out = node.data.output as WritingOutput | null;
+      if (!out) {
+        get().pushMessage({ role: 'system', text: '灏氭棤缂栧墽浜у嚭锛屾棤娉曢€氳繃銆?, nodeId: id });
+        return id;
+      }
+      get().patchNodeData(
+        id,
+        {
+          status: 'APPROVED',
+          review_result: REVIEW_RESULT_APPROVE_AS_IS,
+          pipeline_resolution_history: hist,
+          ai_review_feedback: null,
+          leader_review_suggested_pass: undefined,
+          pipeline_decision_flash: { kind: 'approve', until: flashUntil },
+        },
+        true,
+      );
+      schedulePipelineFlashClear(get, id, flashUntil);
+      const v = get().nodes.find((x) => x.id === id)?.data.version ?? node.data.version;
+      get().registerAsset({
+        nodeId: id,
+        department: 'WRITING',
+        version: v,
+        payload: out,
+        createdAt: Date.now(),
+      });
+      get().pushMessage({
+        role: 'broadcast',
+        text: '缂栧墽閮細宸茬淮鎸佺幇鐘跺苟閫氳繃锛岃祫浜у凡鐧昏锛屼笅娓稿彲寮曠敤銆?,
+        nodeId: id,
+      });
+      return id;
+    }
+    if (node.data.type === 'storyboard') {
+      const out = node.data.output as StoryboardOutput | null;
+      if (!out) {
+        get().pushMessage({ role: 'system', text: '灏氭棤鍒嗛暅浜у嚭锛屾棤娉曢€氳繃銆?, nodeId: id });
+        return id;
+      }
+      get().patchNodeData(
+        id,
+        {
+          status: 'APPROVED',
+          review_result: REVIEW_RESULT_APPROVE_AS_IS,
+          pipeline_resolution_history: hist,
+          ai_review_feedback: null,
+          leader_review_suggested_pass: undefined,
+          pipeline_decision_flash: { kind: 'approve', until: flashUntil },
+        },
+        true,
+      );
+      schedulePipelineFlashClear(get, id, flashUntil);
+      const v = get().nodes.find((x) => x.id === id)?.data.version ?? node.data.version;
+      get().registerAsset({
+        nodeId: id,
+        department: 'STORYBOARD',
+        version: v,
+        payload: out,
+        createdAt: Date.now(),
+      });
+      get().pushMessage({
+        role: 'broadcast',
+        text: '鍒嗛暅閮細宸茬淮鎸佺幇鐘跺苟閫氳繃锛屽垎闀滆祫浜у凡鐧昏銆?,
+        nodeId: id,
+      });
+      return id;
+    }
+    if (node.data.type === 'prompt') {
+      const out = node.data.output as PromptOutput | null;
+      if (!out) {
+        get().pushMessage({ role: 'system', text: '灏氭棤 Prompt 浜у嚭锛屾棤娉曢€氳繃銆?, nodeId: id });
+        return id;
+      }
+      get().patchNodeData(
+        id,
+        {
+          status: 'APPROVED',
+          review_result: REVIEW_RESULT_APPROVE_AS_IS,
+          pipeline_resolution_history: hist,
+          ai_review_feedback: null,
+          leader_review_suggested_pass: undefined,
+          pipeline_decision_flash: { kind: 'approve', until: flashUntil },
+        },
+        true,
+      );
+      schedulePipelineFlashClear(get, id, flashUntil);
+      const v = get().nodes.find((x) => x.id === id)?.data.version ?? node.data.version;
+      get().registerAsset({
+        nodeId: id,
+        department: 'PROMPT',
+        version: v,
+        payload: out,
+        createdAt: Date.now(),
+      });
+      get().pushMessage({
+        role: 'broadcast',
+        text: 'Prompt 閮細宸茬淮鎸佺幇鐘跺苟閫氳繃锛岃祫浜у凡鐧昏銆?,
+        nodeId: id,
+      });
+      return id;
+    }
+    return id;
+  },
+
+  runWritingFromInput: (id) => {
+    const node = get().nodes.find((n) => n.id === id);
+    if (!node || node.data.type !== 'writing') return;
+    void get().executeNodeTask(id);
+  },
+
+  startStoryboardPipeline: (position) => {
+    const id = get().addDepartmentNode('storyboard', position);
+    get().patchNodeData(
+      id,
+      {
+        input: '',
+        status: 'NOT_STARTED',
+        output: null,
+        review_result: null,
+        sourceSceneCount: undefined,
+      },
+      true,
+    );
+    get().setActiveNodeId(id);
+    get().pushMessage({
+      role: 'broadcast',
+      text:
+        '宸插垱寤哄垎闀滆妭鐐癸紙鐙珛妯″紡锛夛細璇蜂粠 Input 鎷夌嚎鍒涘缓鏂囨湰鍗＄墖骞剁矘璐村墽鏈紝鎴栧湪璇︽儏涓洿鎺ヨ緭鍏ユ鏂囷紝鐒跺悗鐐瑰嚮銆屽紑濮嬫媶瑙ｉ暅澶淬€嶃€?,
+      nodeId: id,
+    });
+    return id;
+  },
+
+  runStoryboardFromInput: (id) => {
+    const node = get().nodes.find((n) => n.id === id);
+    if (!node || node.data.type !== 'storyboard') return;
+    void get().executeNodeTask(id);
+  },
+
+  startPromptPipeline: (brief, position) => {
+    const id = get().addDepartmentNode('prompt', position);
+    get().patchNodeData(id, { input: brief }, false);
+    get().setActiveNodeId(id);
+    get().pushMessage({
+      role: 'broadcast',
+      text: 'Prompt 閮ㄦ鍦ㄨ鍙?Input 骞剁敓鎴愰€愰暅鎻愮ず璇嶅寘鈥?,
+      nodeId: id,
+    });
+    void get().executeNodeTask(id);
+    return id;
+  },
+
+  runPromptFromInput: (id) => {
+    const node = get().nodes.find((n) => n.id === id);
+    if (!node || node.data.type !== 'prompt') return;
+    void get().executeNodeTask(id);
+  },
+
+  triggerLeaderReview: async (nodeId) => {
+    const id = nodeId ?? get().activeNodeId ?? get().selectedNodeId;
+    if (!id) {
+      get().pushMessage({ role: 'system', text: '娌℃湁鍙鏍哥殑娲昏穬鑺傜偣锛氳鍏堥€変腑鐢诲竷鑺傜偣锛屾垨鐢ㄨ亰澶╁垱寤烘祦姘寸嚎鍚庝繚鎸佽鑺傜偣涓烘椿璺冦€? });
+      return undefined;
+    }
+    const node = get().nodes.find((n) => n.id === id);
+    if (!node) return undefined;
+    if (node.data.status === 'REVIEWED') {
+      get().pushMessage({
+        role: 'system',
+        text:
+          '鑺傜偣宸蹭负銆屽凡闃呫€嶏細鑷姩鎬荤洃鎰忚宸插湪璇︽儏灞曠ず銆傝浣跨敤銆屾墽琛屼紭鍖栬凯浠ｃ€嶆垨銆岀淮鎸佺幇鐘堕€氳繃銆嶏紝鏃犻渶鍐嶆 @Leader銆?,
+        nodeId: id,
+      });
+      return id;
+    }
+    if (node.data.status !== 'WAITING_REVIEW') {
+      get().pushMessage({
+        role: 'system',
+        text: `鑺傜偣鐘舵€佷负 ${node.data.status}锛屾棤娉曡繘琛屼簩娆℃€荤洃瀹℃牳锛堥渶鏃ф€併€屽緟缁堣銆峎AITING_REVIEW锛夈€俙,
+        nodeId: id,
+      });
+      return id;
+    }
+
+    get().pushMessage({
+      role: 'broadcast',
+      text: `鎬荤洃瀹℃牳杩涜涓細${node.data.label}鈥,
+      nodeId: id,
+    });
+
+    if (node.data.type === 'writing') {
+      const out = node.data.output as WritingOutput | null;
+      if (!out) return id;
+      const decision = await runWritingLeaderReview(out);
+      if (decision.approved) {
+        get().patchNodeData(id, { status: 'APPROVED', review_result: '閫氳繃' }, true);
+        const v = get().nodes.find((x) => x.id === id)?.data.version ?? node.data.version;
+        get().registerAsset({
+          nodeId: id,
+          department: 'WRITING',
+          version: v,
+          payload: out,
+          createdAt: Date.now(),
+        });
+        get().pushMessage({ role: 'broadcast', text: '缂栧墽鎬荤洃锛氬凡閫氳繃锛岃祫浜у凡鐧昏銆?, nodeId: id });
+      } else {
+        get().patchNodeData(
+          id,
+          { status: 'REJECTED', review_result: decision.feedback },
+          true,
+        );
+        get().pushMessage({
+          role: 'broadcast',
+          text: `缂栧墽鎬荤洃锛氶┏鍥?鈥?${decision.feedback}`,
+          nodeId: id,
+        });
+      }
+      return id;
+    }
+
+    if (node.data.type === 'storyboard') {
+      const out = node.data.output as StoryboardOutput | null;
+      if (!out) return id;
+      const sceneCount =
+        typeof node.data.sourceSceneCount === 'number'
+          ? node.data.sourceSceneCount
+          : (out.narrativeBeats?.length ?? 0);
+      const decision = await runStoryboardLeaderReview(out, sceneCount);
+      if (decision.approved) {
+        get().patchNodeData(id, { status: 'APPROVED', review_result: '閫氳繃' }, true);
+        const v = get().nodes.find((x) => x.id === id)?.data.version ?? node.data.version;
+        get().registerAsset({
+          nodeId: id,
+          department: 'STORYBOARD',
+          version: v,
+          payload: out,
+          createdAt: Date.now(),
+        });
+        get().pushMessage({
+          role: 'broadcast',
+          text: '鍒嗛暅鎬荤洃锛氬凡閫氳繃锛屽垎闀滆祫浜у凡鐧昏銆?,
+          nodeId: id,
+        });
+      } else {
+        get().patchNodeData(
+          id,
+          { status: 'REJECTED', review_result: decision.feedback },
+          true,
+        );
+        get().pushMessage({
+          role: 'broadcast',
+          text: `鍒嗛暅鎬荤洃锛氶┏鍥?鈥?${decision.feedback}`,
+          nodeId: id,
+        });
+      }
+      return id;
+    }
+
+    if (node.data.type === 'prompt') {
+      const out = node.data.output as PromptOutput | null;
+      if (!out) return id;
+      const decision = await runPromptLeaderReview(
+        out,
+        Array.isArray(node.data.mounted_skills) ? node.data.mounted_skills : [],
+      );
+      if (decision.approved) {
+        get().patchNodeData(id, { status: 'APPROVED', review_result: '閫氳繃' }, true);
+        const v = get().nodes.find((x) => x.id === id)?.data.version ?? node.data.version;
+        get().registerAsset({
+          nodeId: id,
+          department: 'PROMPT',
+          version: v,
+          payload: out,
+          createdAt: Date.now(),
+        });
+        get().pushMessage({ role: 'broadcast', text: 'Prompt鎬荤洃锛氬凡閫氳繃锛岃祫浜у凡鐧昏銆?, nodeId: id });
+      } else {
+        get().patchNodeData(
+          id,
+          { status: 'REJECTED', review_result: decision.feedback },
+          true,
+        );
+        get().pushMessage({
+          role: 'broadcast',
+          text: `Prompt鎬荤洃锛氶┏鍥?鈥?${decision.feedback}`,
+          nodeId: id,
+        });
+      }
+      return id;
+    }
+
+    get().pushMessage({
+      role: 'system',
+      text: '璇ヨ妭鐐圭被鍨嬩笉鏀寔鎬荤洃娴佹按绾垮鏍搞€?,
+      nodeId: id,
+    });
+    return id;
+  },
+
+  manualPassLeaderReview: (nodeId) => {
+    const id = nodeId ?? get().activeNodeId ?? get().selectedNodeId;
+    if (!id) {
+      get().pushMessage({ role: 'system', text: '娌℃湁鍙搷浣滅殑娲昏穬鑺傜偣锛氳鍏堥€変腑鐢诲竷涓婄殑閮ㄩ棬鑺傜偣銆? });
+      return undefined;
+    }
+    const node = get().nodes.find((n) => n.id === id);
+    if (!node) return undefined;
+    if (node.data.status === 'REVIEWED') {
+      return get().approveReviewedAsIs(id);
+    }
+    if (node.data.status !== 'WAITING_REVIEW') {
+      get().pushMessage({
+        role: 'system',
+        text: `褰撳墠鐘舵€佷负 ${node.data.status}锛岃浣跨敤璇︽儏涓殑銆岀淮鎸佺幇鐘堕€氳繃銆嶆垨锛堟棫鐢诲竷锛夊湪銆屽緟缁堣銆嶄笅鎵嬪姩閫氳繃銆俙,
+        nodeId: id,
+      });
+      return id;
+    }
+
+    if (node.data.type === 'writing') {
+      const out = node.data.output as WritingOutput | null;
+      if (!out) {
+        get().pushMessage({ role: 'system', text: '灏氭棤缂栧墽浜у嚭锛屾棤娉曟墜鍔ㄩ€氳繃銆?, nodeId: id });
+        return id;
+      }
+      get().patchNodeData(id, { status: 'APPROVED', review_result: REVIEW_RESULT_MANUAL_PASS }, true);
+      const v = get().nodes.find((x) => x.id === id)?.data.version ?? node.data.version;
+      get().registerAsset({
+        nodeId: id,
+        department: 'WRITING',
+        version: v,
+        payload: out,
+        createdAt: Date.now(),
+      });
+      get().pushMessage({
+        role: 'broadcast',
+        text: '缂栧墽閮細宸叉墜鍔ㄩ€氳繃锛堟湭璋冪敤 AI 鎬荤洃锛夛紝璧勪骇宸茬櫥璁帮紝涓嬫父鍙紩鐢ㄣ€?,
+        nodeId: id,
+      });
+      return id;
+    }
+
+    if (node.data.type === 'storyboard') {
+      const out = node.data.output as StoryboardOutput | null;
+      if (!out) {
+        get().pushMessage({ role: 'system', text: '灏氭棤鍒嗛暅浜у嚭锛屾棤娉曟墜鍔ㄩ€氳繃銆?, nodeId: id });
+        return id;
+      }
+      get().patchNodeData(id, { status: 'APPROVED', review_result: REVIEW_RESULT_MANUAL_PASS }, true);
+      const v = get().nodes.find((x) => x.id === id)?.data.version ?? node.data.version;
+      get().registerAsset({
+        nodeId: id,
+        department: 'STORYBOARD',
+        version: v,
+        payload: out,
+        createdAt: Date.now(),
+      });
+      get().pushMessage({
+        role: 'broadcast',
+        text: '鍒嗛暅閮細宸叉墜鍔ㄩ€氳繃锛堟湭璋冪敤 AI 鎬荤洃锛夛紝鍒嗛暅璧勪骇宸茬櫥璁般€?,
+        nodeId: id,
+      });
+      return id;
+    }
+
+    if (node.data.type === 'prompt') {
+      const out = node.data.output as PromptOutput | null;
+      if (!out) {
+        get().pushMessage({ role: 'system', text: '灏氭棤 Prompt 浜у嚭锛屾棤娉曟墜鍔ㄩ€氳繃銆?, nodeId: id });
+        return id;
+      }
+      get().patchNodeData(id, { status: 'APPROVED', review_result: REVIEW_RESULT_MANUAL_PASS }, true);
+      const v = get().nodes.find((x) => x.id === id)?.data.version ?? node.data.version;
+      get().registerAsset({
+        nodeId: id,
+        department: 'PROMPT',
+        version: v,
+        payload: out,
+        createdAt: Date.now(),
+      });
+      get().pushMessage({
+        role: 'broadcast',
+        text: 'Prompt 閮細宸叉墜鍔ㄩ€氳繃锛堟湭璋冪敤 AI 鎬荤洃锛夛紝璧勪骇宸茬櫥璁般€?,
+        nodeId: id,
+      });
+      return id;
+    }
+
+    get().pushMessage({
+      role: 'system',
+      text: '璇ヨ妭鐐圭被鍨嬩笉鏀寔鎵嬪姩閫氳繃銆?,
+      nodeId: id,
+    });
+    return id;
+  },
+
+  focusNode: (id, opts) => {
+    const openDetail = opts?.openDetail !== false;
+    set((s) => ({
+      selectedNodeId: id,
+      detailOpen: openDetail,
+      activeNodeId: id,
+      nodes: s.nodes.map((n) => ({ ...n, selected: n.id === id })),
+    }));
+  },
+
+  retryPipeline: (id) => {
+    const node = get().nodes.find((n) => n.id === id);
+    if (!node || node.data.status !== 'REJECTED') return;
+    if (
+      node.data.type !== 'writing' &&
+      node.data.type !== 'storyboard' &&
+      node.data.type !== 'prompt'
+    ) {
+      return;
+    }
+    get().pushMessage({
+      role: 'broadcast',
+      text: `${deptLabel(kindToDepartment(node.data.type))}鏍规嵁鍙嶉閲嶆柊鐢熸垚涓€,
+      nodeId: id,
+    });
+    void get().executeNodeTask(id);
+  },
+
+  syncDepartmentInputFromGraph: (deptId) => {
+    const { nodes, edges } = get();
+    const merged = mergedTextInputForDepartment(deptId, nodes, edges);
+    get().patchNodeData(deptId, { inputSource: 'graph' }, false);
+    if (merged !== null) {
+      get().patchNodeData(deptId, { input: merged, inputSource: 'graph' }, false);
+    }
+  },
+
+  removeNodesByIds: (ids) => {
+    if (ids.length === 0) return;
+    const changes = ids.map((id) => ({ type: 'remove' as const, id }));
+    get().onNodesChange(changes);
+    get().pushMessage({
+      role: 'system',
+      text: `宸插垹闄?${ids.length} 涓妭鐐筦,
+    });
+  },
+
+  layoutCanvasWithDagre: () => {
+    const { nodes, edges } = get();
+    const next = layoutStudioNodesWithDagre(nodes, edges);
+    set({ nodes: next });
+    get().pushMessage({ role: 'broadcast', text: '宸叉寜灞傜骇鏁寸悊鐢诲竷锛圖agre锛? });
+  },
+
+  undo: () => {
+    const snapshot = get().undoStack[get().undoStack.length - 1];
+    if (!snapshot) {
+      get().pushMessage({ role: 'system', text: '瑜版挸澧犲▽鈩冩箒閸欘垱鎸欓柨鈧惃鍕暰鐢啫褰夐弴娣偓?' });
+      return;
+    }
+    for (const controller of activeTaskAbortControllers.values()) {
+      controller.abort();
+    }
+    activeTaskAbortControllers.clear();
+    set((state) => {
+      const restored = restoreUndoSnapshot(snapshot, get);
+      return {
+        ...restored,
+        undoStack: state.undoStack.slice(0, -1),
+      };
+    });
+    get().reconcileShotListGraphBindings();
+    get().pushMessage({
+      role: 'system',
+      text: '瀹稿弶鎸欓柨鈧稉鈧▎锛勬暰鐢啫褰夐弴娣偓?',
+    });
+  },
+
+  hydrateProject: (nodes, edges, opts) => {
+    const normalized = nodes.map(normalizeRestoredStudioNode);
+    const api = {
+      executeNodeTask: (id: string) => get().executeNodeTask(id),
+      focusNode: (id: string, o?: { openDetail?: boolean }) => get().focusNode(id, o),
+      removeNodesByIds: (ids: string[]) => get().removeNodesByIds(ids),
+    };
+    const bound = rebindStudioNodeRuntimeHandlers(normalized, api);
+    const cleaned: StudioRFNode[] = bound.map((n) => ({
+      ...n,
+      selected: false,
+      dragging: false,
+    }));
+    set({
+      nodes: cleaned,
+      edges,
+      assets: [],
+      selectedNodeId: null,
+      activeNodeId: null,
+      detailOpen: false,
+      requestFitNodeId: null,
+      shotListSelectedWiresByNodeId: {},
+    });
+    get().reconcileShotListGraphBindings();
+    get().pushMessage({
+      role: 'broadcast',
+      text:
+        opts?.broadcastText ??
+        `宸茶浇鍏ラ」鐩細${nodes.length} 涓妭鐐癸紝${edges.length} 鏉¤繛绾縛,
+    });
+  },
+
+  reconcileShotListGraphBindings: () => {
+    const { nodes, edges } = get();
+    const parentByShotList = buildStoryboardParentByShotListId(nodes, edges);
+
+    let nextNodes = nodes;
+    for (const n of nodes) {
+      if (n.type !== 'shotList' || n.data.type !== 'shot_list_node') continue;
+      const wiredParent = parentByShotList.get(n.id);
+      if (wiredParent === n.data.sourceStoryboardNodeId) continue;
+      nextNodes = nextNodes.map((x) =>
+        x.id === n.id
+          ? {
+              ...x,
+              data: {
+                ...x.data,
+                sourceStoryboardNodeId: wiredParent,
+              },
+            }
+          : x,
+      );
+    }
+    if (nextNodes !== nodes) {
+      set({ nodes: nextNodes });
+    }
+
+    const snap = get();
+    const parentMap = buildStoryboardParentByShotListId(snap.nodes, snap.edges);
+    const syncParents = new Set<string>();
+    const pushShotListIds: string[] = [];
+
+    for (const n of snap.nodes) {
+      if (n.type !== 'shotList' || n.data.type !== 'shot_list_node') continue;
+      const parentId = n.data.sourceStoryboardNodeId;
+      if (!parentId || parentMap.get(n.id) !== parentId) continue;
+      const parent = snap.nodes.find(
+        (x) => x.id === parentId && x.type === 'department' && x.data.type === 'storyboard',
+      );
+      if (!parent) continue;
+      // 鐖跺垎闀滄鍦ㄧ敓鎴愭椂鍕垮榻?output锛屽惁鍒?onConnect 绛夎Е鍙戠殑 reconcile 浼氳鐩栨祦寮忎腑鐨?output锛屾槗瀵艰嚧鐘舵€侀敊涔辩敋鑷虫覆鏌撳紓甯?
+      if (parent.data.status === 'IN_PROGRESS') continue;
+
+      const slParsed = n.data.output ? tryParseStoryboardOutput(n.data.output) : null;
+      const paParsed = parent.data.output ? tryParseStoryboardOutput(parent.data.output) : null;
+      const slKey = storyboardOutputFingerprint(slParsed);
+      const paKey = storyboardOutputFingerprint(paParsed);
+      if (slKey === paKey) continue;
+
+      if (!slParsed?.shots?.length && paParsed?.shots?.length) {
+        syncParents.add(parentId);
+      } else if (slParsed?.shots?.length) {
+        pushShotListIds.push(n.id);
+      }
+    }
+
+    for (const sb of syncParents) {
+      get().syncShotListNodesFromStoryboard(sb);
+    }
+
+    const afterSync = get();
+    const parentMap2 = buildStoryboardParentByShotListId(afterSync.nodes, afterSync.edges);
+    for (const slId of pushShotListIds) {
+      const n = afterSync.nodes.find((x) => x.id === slId);
+      if (!n || n.type !== 'shotList' || n.data.type !== 'shot_list_node') continue;
+      const parentId = n.data.sourceStoryboardNodeId;
+      if (!parentId || parentMap2.get(slId) !== parentId) continue;
+      const parent = afterSync.nodes.find(
+        (x) => x.id === parentId && x.type === 'department' && x.data.type === 'storyboard',
+      );
+      if (!parent) continue;
+      if (parent.data.status === 'IN_PROGRESS') continue;
+      const slParsed = n.data.output ? tryParseStoryboardOutput(n.data.output) : null;
+      const paParsed = parent.data.output ? tryParseStoryboardOutput(parent.data.output) : null;
+      if (storyboardOutputFingerprint(slParsed) === storyboardOutputFingerprint(paParsed)) continue;
+      if (!slParsed?.shots?.length) continue;
+      get().patchShotListNodeOutput(slId, slParsed, false);
+    }
+
+    resyncConsumersAfterEdgeMutation(get);
+  },
+
+  ensureRuntimeBindingsOnNodes: () => {
+    const { nodes } = get();
+    if (nodes.length === 0) return;
+    // 宸插甫 onDelete 鍒欒鏄?hydrate/rebind 杩囷紱閬垮厤姣忔 set 鏂板嚱鏁板紩鐢ㄨЕ鍙?React Flow 鍙楁帶鑺傜偣鍙嶅鍚屾 鈫?鏃犻檺鏇存柊
+    if (nodes.every((n) => typeof n.data.onDelete === 'function')) return;
+    const api = {
+      executeNodeTask: (id: string) => get().executeNodeTask(id),
+      focusNode: (id: string, o?: { openDetail?: boolean }) => get().focusNode(id, o),
+      removeNodesByIds: (ids: string[]) => get().removeNodesByIds(ids),
+    };
+    set({ nodes: rebindStudioNodeRuntimeHandlers(nodes, api) });
+  },
+}));
+
+export { getLatestApprovedWritingAsset, getLatestApprovedWritingBundle } from './workflow';
+export { canTransitionPipelineStatus, PIPELINE_INITIAL_STATUS } from './workflow';
