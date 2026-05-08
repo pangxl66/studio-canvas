@@ -9,18 +9,19 @@ The project supports two deployment modes:
 
 ## Online Website Mode
 
-Use Vercel + Supabase:
+Recommended simple deployment: Render + Supabase.
 
 1. Create a Supabase project.
 2. Run `docs/supabase-schema.sql` in Supabase SQL Editor.
 3. Push this repository to GitHub.
-4. Import the GitHub repository into Vercel.
-5. Add the variables from `.env.production.example` to Vercel Environment Variables.
+4. Create a Render Web Service from the GitHub repository.
+5. Add the variables from `.env.production.example` to Render Environment Variables.
 6. Deploy.
 
 Detailed launch guide:
 
 ```text
+docs/render-deploy-guide.md
 docs/online-website-launch.md
 ```
 
@@ -45,6 +46,13 @@ The Vercel build command runs:
 ```powershell
 npm.cmd run saas:check:prod
 npm.cmd run build
+```
+
+Render/Railway-style Node hosting can use:
+
+```powershell
+npm.cmd run cloud:build
+npm.cmd start
 ```
 
 The production check blocks unsafe browser-exposed LLM keys such as `VITE_LLM_API_KEY`.
