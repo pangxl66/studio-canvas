@@ -1,7 +1,40 @@
-node_modules
-dist
+node_modules/
+dist/
+
+# Local environment
 *.local
 .env
 .env.*
 !.env.example
+!.env.production.example
+
+# Build/cache artifacts
+*.tsbuildinfo
+.vite/
+.vercel/
+coverage/
+
+# Logs
+*.log
+.codex_vite.log
+
+# Share/release artifacts generated outside the source tree
+desktop-release/
+release/
+share_package/
+archives/
+StudioCanvas_share_package*.zip
+*.zip
+
+# Temporary restore/inspection workspaces
+.tmp_*/
+tmp_*/
+tmp_restore/
+
+# Scratch assets used during manual verification
+tmp_*.xlsx
+test/*.png
+
+# OS/editor noise
 .DS_Store
+Thumbs.db

@@ -1,4 +1,5 @@
 import type { ModelGatewayConfig } from '@/services/ModelGateway';
+import { isSaasHostedMode } from '@/services/authClient';
 
 // Bump the storage key so stale browser-cached settings do not override the GPT-5.5 defaults.
 const STORAGE_KEY = 'studio_canvas_llm_settings_v6';
@@ -147,7 +148,8 @@ export function pipelineModeNeedsGateway(mode: PipelineExecutionMode): boolean {
 
 export function getResolvedLlmGatewayConfig(): ModelGatewayConfig | null {
   const saved = loadLlmUserSettings();
-  const proxyUrl = (saved?.proxyUrl ?? envProxyUrl()).trim();
+  const forcedSaasProxyUrl = isSaasHostedMode() ? envProxyUrl() : '';
+  const proxyUrl = (forcedSaasProxyUrl || saved?.proxyUrl || envProxyUrl()).trim();
   const baseUrl = (saved?.baseUrl ?? envBaseUrl()).trim();
   const apiKey = (saved?.apiKey ?? envApiKey()).trim();
   const mode = normalizeMode(saved?.mode ?? envMode());
@@ -159,8 +161,8 @@ export function getResolvedLlmGatewayConfig(): ModelGatewayConfig | null {
 
   return {
     proxyUrl: proxyUrl || undefined,
-    baseUrl: baseUrl || undefined,
-    apiKey: apiKey || undefined,
+    baseUrl: forcedSaasProxyUrl ? undefined : baseUrl || undefined,
+    apiKey: forcedSaasProxyUrl ? undefined : apiKey || undefined,
     model: mode === 'deep' ? deepModel : fastModel,
     timeoutMs,
   };
@@ -169,10 +171,11 @@ export function getResolvedLlmGatewayConfig(): ModelGatewayConfig | null {
 export function getLlmSettingsFormDefaults(): LlmUserSettings {
   const saved = loadLlmUserSettings();
   const mode = normalizeMode(saved?.mode ?? envMode());
+  const forcedSaasProxyUrl = isSaasHostedMode() ? envProxyUrl() : '';
   return {
-    proxyUrl: (saved?.proxyUrl ?? envProxyUrl()).trim(),
-    baseUrl: (saved?.baseUrl ?? envBaseUrl()).trim(),
-    apiKey: (saved?.apiKey ?? envApiKey()).trim(),
+    proxyUrl: (forcedSaasProxyUrl || saved?.proxyUrl || envProxyUrl()).trim(),
+    baseUrl: forcedSaasProxyUrl ? '' : (saved?.baseUrl ?? envBaseUrl()).trim(),
+    apiKey: forcedSaasProxyUrl ? '' : (saved?.apiKey ?? envApiKey()).trim(),
     mode,
     fastModel: normalizeModelName(saved?.fastModel ?? envFastModel(), DEFAULT_FAST_LLM_MODEL),
     deepModel: normalizeModelName(saved?.deepModel ?? envDeepModel(), DEFAULT_DEEP_LLM_MODEL),

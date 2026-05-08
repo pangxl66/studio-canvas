@@ -1,4 +1,6 @@
 import { safeJsonParse } from '@/services/safeJsonParse';
+import { getSupabaseClient, isSaasAuthEnabled } from '@/services/authClient';
+import { requestCreditRefresh, spendMockCredit } from '@/services/creditService';
 
 export type ModelGatewayConfig = {
   proxyUrl?: string;
@@ -94,6 +96,24 @@ export function getGatewayRequestHeaders(config: ModelGatewayConfig): Record<str
     headers.Authorization = `Bearer ${apiKey}`;
   }
   return headers;
+}
+
+async function getGatewayRequestHeadersForFetch(config: ModelGatewayConfig): Promise<Record<string, string>> {
+  const headers = getGatewayRequestHeaders(config);
+  if (config.proxyUrl && isSaasAuthEnabled()) {
+    const session = (await getSupabaseClient()?.auth.getSession())?.data.session;
+    if (session?.access_token) {
+      headers.Authorization = `Bearer ${session.access_token}`;
+    }
+  }
+  return headers;
+}
+
+function refreshCreditAfterProxySuccess(config: ModelGatewayConfig): void {
+  spendMockCredit(1);
+  if (config.proxyUrl && isSaasAuthEnabled()) {
+    requestCreditRefresh();
+  }
 }
 
 function parseAssistantContent(data: ChatCompletionsResponse): string | null {
@@ -336,7 +356,7 @@ async function requestLLMOnce(
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: getGatewayRequestHeaders(config),
+      headers: await getGatewayRequestHeadersForFetch(config),
       body: JSON.stringify(body),
       signal: controller.signal,
     });
@@ -391,6 +411,7 @@ async function requestLLMOnce(
       };
     }
 
+    refreshCreditAfterProxySuccess(config);
     return { ok: true, content };
   } catch (error) {
     const name = error instanceof Error ? error.name : '';
@@ -537,7 +558,7 @@ async function requestLLMStreamOnce(
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: getGatewayRequestHeaders(config),
+      headers: await getGatewayRequestHeadersForFetch(config),
       body: JSON.stringify(body),
       signal: controller.signal,
     });
@@ -619,6 +640,7 @@ async function requestLLMStreamOnce(
       };
     }
 
+    refreshCreditAfterProxySuccess(config);
     return { ok: true, content: accumulated };
   } catch (error) {
     const name = error instanceof Error ? error.name : '';

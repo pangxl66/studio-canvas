@@ -140,6 +140,8 @@ export function DetailPanel() {
   const patchNodeData = useStudioStore((s) => s.patchNodeData);
   const syncDepartmentInputFromGraph = useStudioStore((s) => s.syncDepartmentInputFromGraph);
   const executeNodeTask = useStudioStore((s) => s.executeNodeTask);
+  const runTextPolish = useStudioStore((s) => s.runTextPolish);
+  const stopNodeTask = useStudioStore((s) => s.stopNodeTask);
   const pushMessage = useStudioStore((s) => s.pushMessage);
   const focusNode = useStudioStore((s) => s.focusNode);
   const patchShotListNodeOutput = useStudioStore((s) => s.patchShotListNodeOutput);
@@ -430,7 +432,30 @@ export function DetailPanel() {
       }
     }
     if (node.type === 'text_node') {
+      const textBusy = node.status === 'IN_PROGRESS';
+      const hasText = Boolean((node.raw_text ?? node.input ?? '').trim());
       items.push(
+        {
+          id: 'text-polish',
+          label: textBusy ? '停止润色' : 'LLM 润色',
+          node: (
+            <button
+              type="button"
+              className="writing-header-actions__download node-detail-action-btn"
+              disabled={!textBusy && !hasText}
+              title={textBusy ? '停止当前润色任务' : '调用 LLM 润色当前文本'}
+              onClick={() => {
+                if (textBusy) {
+                  stopNodeTask(node.id);
+                  return;
+                }
+                void runTextPolish(node.id);
+              }}
+            >
+              {textBusy ? '停止润色' : 'LLM 润色'}
+            </button>
+          ),
+        },
         {
           id: 'text-clear',
           label: '清空内容',
@@ -525,8 +550,10 @@ export function DetailPanel() {
     pushMessage,
     removeNodesByIds,
     rfNodes,
+    runTextPolish,
     selectedId,
     setDetailOpen,
+    stopNodeTask,
   ]);
 
   const headerActions =
@@ -776,11 +803,16 @@ export function DetailPanel() {
           <div className="detail-panel__hint">文本卡片内容</div>
           <textarea
             className="detail-panel__text-editor"
-            value={node.raw_text ?? node.input}
+            value={
+              node.status === 'IN_PROGRESS'
+                ? (node.streaming_preview ?? node.raw_text ?? node.input)
+                : (node.raw_text ?? node.input)
+            }
             onChange={onTextChange}
             placeholder="长文本素材；连线到部门节点后自动同步为对方 input"
             spellCheck={false}
             rows={16}
+            disabled={node.status === 'IN_PROGRESS'}
           />
           <p className="detail-panel__tip">
             画布内可直接编辑；从本节点右侧 Output 连到编剧/分镜/Prompt 部门左侧 Input 即可同步为任务原始输入。

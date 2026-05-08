@@ -2,6 +2,13 @@ import { Panel } from '@xyflow/react';
 import { saveAs } from 'file-saver';
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import { STUDIO_OPEN_SETTINGS_EVENT } from '@/components/StudioSettings';
+import { isSaasAuthEnabled } from '@/services/authClient';
+import {
+  getCloudProject,
+  listCloudProjects,
+  saveCloudProject,
+  type CloudProjectSummary,
+} from '@/services/cloudProjectService';
 import {
   createStudioProjectId,
   getActiveStudioProjectRef,
@@ -25,6 +32,7 @@ import { toPersistableNodesAndEdges } from '@/utils/studioNodePersistence';
 const AUTOSAVE_INTERVAL_MS = 5 * 60 * 1000;
 const AUTOSAVE_DEBOUNCE_MS = 1200;
 const MAX_RECENT_PROJECTS = 10;
+const UUID_LIKE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function sanitizeFileName(name: string): string {
   return name.replace(/[\\/:*?"<>|]+/g, '-').trim() || 'studio-project';
@@ -64,8 +72,11 @@ export function StudioProjectMenu() {
   const edgeCount = edges.length;
 
   const [recentProjects, setRecentProjects] = useState<StudioRecentProjectRef[]>([]);
+  const [cloudProjects, setCloudProjects] = useState<CloudProjectSummary[]>([]);
+  const [cloudBusy, setCloudBusy] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [recentOpen, setRecentOpen] = useState(false);
+  const cloudEnabled = isSaasAuthEnabled();
 
   const refreshProjectData = useCallback(async () => {
     try {
@@ -91,10 +102,19 @@ export function StudioProjectMenu() {
           .sort((a, b) => b.openedAt - a.openedAt)
           .slice(0, MAX_RECENT_PROJECTS),
       );
+      if (cloudEnabled) {
+        try {
+          setCloudProjects(await listCloudProjects());
+        } catch (error) {
+          console.warn('Cloud project list failed', error);
+        }
+      } else {
+        setCloudProjects([]);
+      }
     } catch (error) {
       console.warn(error);
     }
-  }, []);
+  }, [cloudEnabled]);
 
   const rememberRecent = useCallback(
     async (projectId: string, projectName: string, source: StudioRecentProjectRef['source']) => {
@@ -256,6 +276,95 @@ export function StudioProjectMenu() {
     });
     closeMenus();
   }, [closeMenus, pushMessage, rememberRecent, setCurrentProjectMeta]);
+
+  const saveProjectToCloud = useCallback(async () => {
+    if (!cloudEnabled) return;
+
+    const {
+      nodes: liveNodes,
+      edges: liveEdges,
+      currentProjectId: projectIdInState,
+      currentProjectName: projectNameInState,
+    } = useStudioStore.getState();
+    const suggestedName = projectNameInState || '未命名工程';
+    const projectName = window.prompt('云端工程名称', suggestedName)?.trim();
+    if (!projectName) return;
+
+    setCloudBusy(true);
+    try {
+      const record = await saveCloudProject({
+        projectId: projectIdInState && UUID_LIKE_RE.test(projectIdInState) ? projectIdInState : null,
+        projectName,
+        nodes: liveNodes,
+        edges: liveEdges,
+      });
+      setCurrentProjectMeta(record.id, record.name);
+      await putStudioProjectRecord(record.id, record.name, liveNodes, liveEdges);
+      await setActiveStudioProjectRef({ projectId: record.id, projectName: record.name });
+      await rememberRecent(record.id, record.name, 'workspace');
+      await refreshProjectData();
+      pushMessage({
+        role: 'broadcast',
+        text: `已保存到云端工程「${record.name}」。`,
+      });
+      closeMenus();
+    } catch (error) {
+      pushMessage({
+        role: 'system',
+        text: `云端保存失败：${error instanceof Error ? error.message : '未知错误'}`,
+      });
+    } finally {
+      setCloudBusy(false);
+    }
+  }, [
+    closeMenus,
+    cloudEnabled,
+    pushMessage,
+    refreshProjectData,
+    rememberRecent,
+    setCurrentProjectMeta,
+  ]);
+
+  const openCloudProjectRecord = useCallback(
+    async (projectId: string) => {
+      if (!cloudEnabled) return;
+
+      setCloudBusy(true);
+      try {
+        const record = await getCloudProject(projectId);
+        if (!record) {
+          pushMessage({ role: 'system', text: '打开云端工程失败：找不到该工程。' });
+          await refreshProjectData();
+          return;
+        }
+
+        const current = useStudioStore.getState();
+        if (current.nodes.length > 0) {
+          const ok = window.confirm(`打开云端工程「${record.name}」将替换当前画布，是否继续？`);
+          if (!ok) return;
+        }
+
+        hydrateProject(record.snapshot.nodes, record.snapshot.edges, {
+          projectId: record.id,
+          projectName: record.name,
+          broadcastText: `已打开云端工程「${record.name}」。`,
+        });
+        await putStudioProjectRecord(record.id, record.name, record.snapshot.nodes, record.snapshot.edges);
+        await setActiveStudioProjectRef({ projectId: record.id, projectName: record.name });
+        await rememberRecent(record.id, record.name, 'workspace');
+        await refreshProjectData();
+        closeMenus();
+      } catch (error) {
+        pushMessage({
+          role: 'system',
+          text: `打开云端工程失败：${error instanceof Error ? error.message : '未知错误'}`,
+        });
+      } finally {
+        setCloudBusy(false);
+      }
+    },
+    [closeMenus, cloudEnabled, hydrateProject, pushMessage, refreshProjectData, rememberRecent],
+  );
 
   const createProject = useCallback(async () => {
     const current = useStudioStore.getState();
@@ -492,6 +601,38 @@ export function StudioProjectMenu() {
             >
               <span>保存到工作区</span>
             </button>
+            {cloudEnabled ? (
+              <div className="studio-project-menu__cloud" role="group" aria-label="云端工程">
+                <button
+                  type="button"
+                  className="studio-project-menu__item"
+                  disabled={cloudBusy}
+                  onClick={() => void saveProjectToCloud()}
+                >
+                  <span>{cloudBusy ? '云端处理中...' : '保存到云端'}</span>
+                </button>
+                <div className="studio-project-menu__section-title">云端工程</div>
+                {cloudProjects.length > 0 ? (
+                  cloudProjects.slice(0, 6).map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      className="studio-project-menu__recent"
+                      disabled={cloudBusy}
+                      onClick={() => void openCloudProjectRecord(item.id)}
+                    >
+                      <strong>{item.name}</strong>
+                      <span>
+                        {item.nodeCount} 节点 / {item.edgeCount} 连线
+                      </span>
+                      <time>{formatTime(item.updatedAt)}</time>
+                    </button>
+                  ))
+                ) : (
+                  <div className="studio-project-menu__empty">暂无云端工程</div>
+                )}
+              </div>
+            ) : null}
             <div
               className={`studio-project-menu__item studio-project-menu__item--submenu ${
                 recentOpen ? 'studio-project-menu__item--open' : ''

@@ -19,6 +19,9 @@ export const PROMPT_REVIEW_OUTPUT_HANDLE_ID = DEPT_OUTPUT_HANDLE_ID;
 const PROMPT_REVIEW_MIN_WIDTH = 320;
 const PROMPT_REVIEW_MAX_WIDTH = 760;
 const PROMPT_REVIEW_DEFAULT_WIDTH = 380;
+const PROMPT_REVIEW_MIN_HEIGHT = 560;
+const PROMPT_REVIEW_MAX_HEIGHT = 980;
+const PROMPT_REVIEW_DEFAULT_HEIGHT = 640;
 
 function formatHistoryTime(value: number): string {
   if (!Number.isFinite(value)) return '未知时间';
@@ -57,9 +60,18 @@ function PromptReviewNodeInner({ id, data, selected }: NodeProps<PromptReviewRF>
     PROMPT_REVIEW_MAX_WIDTH,
     Math.max(PROMPT_REVIEW_MIN_WIDTH, Math.round(data.canvasWidth ?? PROMPT_REVIEW_DEFAULT_WIDTH)),
   );
-  const [liveWidth, setLiveWidth] = useState(persistedWidth);
+  const persistedHeight = Math.min(
+    PROMPT_REVIEW_MAX_HEIGHT,
+    Math.max(
+      PROMPT_REVIEW_MIN_HEIGHT,
+      Math.round(data.canvasHeight ?? PROMPT_REVIEW_DEFAULT_HEIGHT),
+    ),
+  );
+  const [liveSize, setLiveSize] = useState({ width: persistedWidth, height: persistedHeight });
   const resizeFrameRef = useRef<number | null>(null);
   const resizingRef = useRef(false);
+  const width = liveSize.width;
+  const height = liveSize.height;
 
   const scheduleInternalsRefresh = useCallback(() => {
     if (resizeFrameRef.current != null) return;
@@ -71,8 +83,8 @@ function PromptReviewNodeInner({ id, data, selected }: NodeProps<PromptReviewRF>
 
   useEffect(() => {
     if (resizingRef.current) return;
-    setLiveWidth(persistedWidth);
-  }, [persistedWidth]);
+    setLiveSize({ width: persistedWidth, height: persistedHeight });
+  }, [persistedHeight, persistedWidth]);
 
   useEffect(
     () => () => {
@@ -143,25 +155,29 @@ function PromptReviewNodeInner({ id, data, selected }: NodeProps<PromptReviewRF>
   return (
     <div
       className={`prompt-review-node ${selected ? 'prompt-review-node--selected' : ''}`}
-      style={{ width: liveWidth, minWidth: liveWidth, maxWidth: liveWidth }}
+      style={{ width, minWidth: width, maxWidth: width, height, minHeight: height }}
     >
       <NodeResizeControl
         className="prompt-review-node__resize-handle"
         minWidth={PROMPT_REVIEW_MIN_WIDTH}
         maxWidth={PROMPT_REVIEW_MAX_WIDTH}
-        minHeight={1}
+        minHeight={PROMPT_REVIEW_MIN_HEIGHT}
+        maxHeight={PROMPT_REVIEW_MAX_HEIGHT}
         position="bottom-right"
-        resizeDirection="horizontal"
         onResizeStart={() => {
           resizingRef.current = true;
         }}
         onResize={(_event, params) => {
-          setLiveWidth(
-            Math.min(
+          setLiveSize({
+            width: Math.min(
               PROMPT_REVIEW_MAX_WIDTH,
               Math.max(PROMPT_REVIEW_MIN_WIDTH, Math.round(params.width)),
             ),
-          );
+            height: Math.min(
+              PROMPT_REVIEW_MAX_HEIGHT,
+              Math.max(PROMPT_REVIEW_MIN_HEIGHT, Math.round(params.height)),
+            ),
+          });
           scheduleInternalsRefresh();
         }}
         onResizeEnd={(_event, params) => {
@@ -170,13 +186,18 @@ function PromptReviewNodeInner({ id, data, selected }: NodeProps<PromptReviewRF>
             PROMPT_REVIEW_MAX_WIDTH,
             Math.max(PROMPT_REVIEW_MIN_WIDTH, Math.round(params.width)),
           );
-          setLiveWidth(nextWidth);
-          patchNodeData(id, { canvasWidth: nextWidth }, false);
+          const nextHeight = Math.min(
+            PROMPT_REVIEW_MAX_HEIGHT,
+            Math.max(PROMPT_REVIEW_MIN_HEIGHT, Math.round(params.height)),
+          );
+          setLiveSize({ width: nextWidth, height: nextHeight });
+          patchNodeData(id, { canvasWidth: nextWidth, canvasHeight: nextHeight }, false);
           scheduleInternalsRefresh();
         }}
       >
         <div className="prompt-review-node__resize-grip" aria-hidden />
       </NodeResizeControl>
+      <div className="prompt-review-node__resize-corner" aria-hidden />
 
       <Handle
         type="target"

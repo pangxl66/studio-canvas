@@ -2,13 +2,24 @@
   "name": "studio-canvas",
   "private": true,
   "version": "0.0.2",
+  "description": "A desktop visual workflow tool for cinematic storyboard and prompt generation.",
+  "author": "Studio Canvas",
   "type": "module",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "api:check": "tsc --noEmit --skipLibCheck --moduleResolution bundler --module ESNext --target ES2022 --types node api/health.ts api/llm/chat.ts api/credits/status.ts api/projects/index.ts api/projects/[id].ts",
+    "saas:check": "node tools/check-saas-env.cjs",
+    "saas:check:prod": "node tools/check-saas-env.cjs --prod",
+    "saas:dev": "npx vercel dev --listen 127.0.0.1:3000",
+    "desktop:dev": "npm run build && electron .",
+    "desktop:dir": "npm run build && node tools/build-desktop.cjs --dir",
+    "desktop:pack": "npm run build && node tools/build-desktop.cjs --pack",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.105.3",
     "@xyflow/react": "^12.4.4",
     "dagre": "^0.8.5",
     "docx": "^9.6.1",
@@ -27,7 +38,33 @@
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
     "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^42.0.0",
+    "electron-builder": "^26.8.1",
     "typescript": "~5.7.2",
     "vite": "^6.2.0"
+  },
+  "build": {
+    "appId": "com.studiocanvas.desktop",
+    "productName": "Studio Canvas",
+    "directories": {
+      "output": "desktop-release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "${productName}-${version}-Setup.${ext}",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    }
   }
 }

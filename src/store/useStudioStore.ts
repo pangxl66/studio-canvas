@@ -16,13 +16,17 @@ import {
   type NodeChange,
 } from '@xyflow/react';
 import { create } from 'zustand';
+import { createCanvasStoreSlice } from './slices/canvasStore';
+import { createPipelineStoreSlice } from './slices/pipelineStore';
+import { createProjectStoreSlice } from './slices/projectStore';
+import { createPromptReviewStoreSlice } from './slices/promptReviewStore';
+import { createShotListStoreSlice } from './slices/shotListStore';
+import { createTextStoreSlice } from './slices/textStore';
 import {
   cloneStoryboardOutput,
   tryParseStoryboardOutput,
 } from '@/agents/storyboardAgents';
 import { executeEmployeePhase } from '@/services/agents/executeTask';
-import { getResolvedLlmGatewayConfig } from '@/config/llmSettings';
-import { requestLLM, requestLLMStream } from '@/services/ModelGateway';
 import { runNodeAssistant } from '@/services/nodeAssistant';
 import { ingestWritingOutputToProjectContext } from '@/services/ProjectContext';
 import { mergeDownstreamSkillsFromChain } from '@/services/skillChain';
@@ -63,14 +67,12 @@ import {
   type NodeKind,
   type NodeStatus,
   type PromptOutput,
-  type PromptReviewHistoryEntry,
   type StoryboardOutput,
   type StudioNodeData,
   type WritingOutput,
   REVIEW_RESULT_APPROVE_AS_IS,
   REVIEW_RESULT_MANUAL_PASS,
 } from '@/types/studio';
-import { layoutStudioNodesWithDagre } from '@/utils/dagreLayout';
 import { flushShotListPendingEdits } from '@/utils/shotListPendingEdits';
 import {
   normalizeRestoredStudioNode,
@@ -117,8 +119,97 @@ function summarizeFeedbackPreview(text: string, max = 48): string {
 const STOP_TASK_MESSAGE = '当前任务已停止。';
 const SHOT_LIST_DEFAULT_WIDTH = 800;
 const SHOT_LIST_DEFAULT_HEIGHT = 420;
+const DUPLICATED_NODE_VERTICAL_GAP = 36;
+const DUPLICATED_NODE_COLLISION_PADDING = 16;
 const UNDO_STACK_LIMIT = 20;
 const activeTaskAbortControllers = new Map<string, AbortController>();
+
+type StudioNodeWithMeasuredSize = StudioRFNode & {
+  width?: number;
+  height?: number;
+  measured?: {
+    width?: number;
+    height?: number;
+  };
+};
+
+type NodeRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+function positiveNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function defaultNodeSize(node: StudioRFNode): { width: number; height: number } {
+  if (node.type === 'textNode') return { width: 220, height: 150 };
+  if (node.type === 'storyboardFile') return { width: 260, height: 190 };
+  if (node.type === 'imageNode') return { width: 260, height: 300 };
+  if (node.type === 'shotList') {
+    return {
+      width: positiveNumber(node.data.canvasWidth) ?? SHOT_LIST_DEFAULT_WIDTH,
+      height: positiveNumber(node.data.canvasHeight) ?? SHOT_LIST_DEFAULT_HEIGHT,
+    };
+  }
+  if (node.type === 'promptReview') {
+    return {
+      width: positiveNumber(node.data.canvasWidth) ?? 380,
+      height: positiveNumber(node.data.canvasHeight) ?? 640,
+    };
+  }
+  return { width: 244, height: 230 };
+}
+
+function getNodeSize(node: StudioRFNode): { width: number; height: number } {
+  const sizedNode = node as StudioNodeWithMeasuredSize;
+  const fallback = defaultNodeSize(node);
+  return {
+    width:
+      positiveNumber(sizedNode.width) ??
+      positiveNumber(sizedNode.measured?.width) ??
+      positiveNumber(node.data.canvasWidth) ??
+      fallback.width,
+    height:
+      positiveNumber(sizedNode.height) ??
+      positiveNumber(sizedNode.measured?.height) ??
+      positiveNumber(node.data.canvasHeight) ??
+      fallback.height,
+  };
+}
+
+function rectsOverlap(a: NodeRect, b: NodeRect, padding = 0): boolean {
+  return (
+    a.x < b.x + b.width + padding &&
+    a.x + a.width + padding > b.x &&
+    a.y < b.y + b.height + padding &&
+    a.y + a.height + padding > b.y
+  );
+}
+
+function findDuplicatedNodePosition(sourceNode: StudioRFNode, occupiedRects: NodeRect[]): { x: number; y: number } {
+  const size = getNodeSize(sourceNode);
+  const stepY = size.height + DUPLICATED_NODE_VERTICAL_GAP;
+  const rect: NodeRect = {
+    x: sourceNode.position.x,
+    y: sourceNode.position.y + stepY,
+    width: size.width,
+    height: size.height,
+  };
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (!occupiedRects.some((occupied) => rectsOverlap(rect, occupied, DUPLICATED_NODE_COLLISION_PADDING))) {
+      occupiedRects.push({ ...rect });
+      return { x: rect.x, y: rect.y };
+    }
+    rect.y += stepY;
+  }
+
+  occupiedRects.push({ ...rect });
+  return { x: rect.x, y: rect.y };
+}
 
 /** 闁劑妫梻鏉戞彥闁喐濯虹痪鍖＄窗閸掑棝鏆?閳?Prompt 娑撳秴婀銈夋懠閸愬拑绱欐い鑽ょ病闂€婊冦仈鐞涖劌鐡欓懞鍌滃仯 Output閿涘鈧?*/
 function canDeptChain(upstream: PipelineKind, downstream: PipelineKind): boolean {
@@ -254,75 +345,12 @@ function makePromptReviewNodeData(id: string, text = '', positionLabel?: string)
     review_result: null,
     version: 0,
     canvasWidth: 380,
+    canvasHeight: 640,
     prompt_review_history: [],
     label: positionLabel ?? `提示词审核 · ${id.slice(-4)}`,
     assistant_preferences: '',
     assistant_task_instruction: '',
   };
-}
-
-function stripPromptReviewLlmWrapper(raw: string): string {
-  let text = raw.replace(/^\uFEFF/, '').trim();
-  const fenced = text.match(/^```(?:text|markdown|md|json)?\s*([\s\S]*?)\s*```$/i);
-  if (fenced?.[1]) text = fenced[1].trim();
-  text = text.replace(/^修订后(?:的)?提示词[:：]\s*/i, '').trim();
-  text = text.replace(/^调整后(?:的)?提示词[:：]\s*/i, '').trim();
-  return text;
-}
-
-const PROMPT_REVIEW_HISTORY_LIMIT = 12;
-
-function promptReviewTextFromData(data: StudioNodeData): string {
-  return data.raw_text ?? data.input ?? '';
-}
-
-function promptReviewCharCount(text: string): number {
-  return text.replace(/\s+/g, '').length;
-}
-
-function normalizePromptReviewHistory(value: unknown): PromptReviewHistoryEntry[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter((entry): entry is PromptReviewHistoryEntry => {
-      return (
-        entry &&
-        typeof entry === 'object' &&
-        typeof (entry as PromptReviewHistoryEntry).id === 'string' &&
-        typeof (entry as PromptReviewHistoryEntry).text === 'string'
-      );
-    })
-    .map((entry) => ({
-      id: entry.id,
-      at: typeof entry.at === 'number' ? entry.at : Date.now(),
-      label: typeof entry.label === 'string' && entry.label.trim() ? entry.label.trim() : '历史版本',
-      text: entry.text,
-      charCount:
-        typeof entry.charCount === 'number'
-          ? entry.charCount
-          : promptReviewCharCount(entry.text),
-    }))
-    .slice(0, PROMPT_REVIEW_HISTORY_LIMIT);
-}
-
-function appendPromptReviewHistory(
-  data: StudioNodeData,
-  label: string,
-): PromptReviewHistoryEntry[] {
-  const text = promptReviewTextFromData(data);
-  const normalized = normalizePromptReviewHistory(data.prompt_review_history);
-  if (!text.trim()) return normalized;
-  if (normalized[0]?.text === text) return normalized;
-  const at = Date.now();
-  return [
-    {
-      id: `prompt_review_history_${at}_${Math.random().toString(36).slice(2, 7)}`,
-      at,
-      label,
-      text,
-      charCount: promptReviewCharCount(text),
-    },
-    ...normalized,
-  ].slice(0, PROMPT_REVIEW_HISTORY_LIMIT);
 }
 
 function cloneStoryboardOutputWithFreshWireIds(output: StoryboardOutput | null): StoryboardOutput | null {
@@ -372,7 +400,7 @@ function findStoryboardShotListChild(
   );
 }
 
-type StudioState = {
+export type StudioState = {
   nodes: StudioRFNode[];
   edges: Edge[];
   assets: ApprovedAsset[];
@@ -487,6 +515,7 @@ type StudioState = {
   /** 閸欐牗绉烽幍瀣З鐟曞棛娲婇敍灞肩矤鏉╃偟鍤庨柌宥嗘煀閸氬牆鑻?input */
   syncDepartmentInputFromGraph: (deptId: string) => void;
   syncPromptReviewInputFromGraph: (nodeId: string) => void;
+  runTextPolish: (nodeId: string) => Promise<void>;
   savePromptReviewSnapshot: (nodeId: string, label?: string) => boolean;
   restorePromptReviewSnapshot: (nodeId: string, snapshotId: string) => boolean;
   runPromptReviewLlm: (nodeId: string, instruction?: string) => Promise<void>;
@@ -786,6 +815,28 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   undoStack: [],
   workflowAgentSession: null,
 
+  ...createCanvasStoreSlice(set, get),
+  ...createProjectStoreSlice(set, get, {
+    uid,
+    nextProjectName,
+    pushUndoSnapshot,
+  }),
+  ...createPipelineStoreSlice(set, get, {
+    activeTaskAbortControllers,
+    stopTaskMessage: STOP_TASK_MESSAGE,
+    deptLabel,
+    kindToDepartment,
+  }),
+  ...createShotListStoreSlice(set, get),
+  ...createTextStoreSlice(set, get, {
+    activeTaskAbortControllers,
+    stopTaskMessage: STOP_TASK_MESSAGE,
+  }),
+  ...createPromptReviewStoreSlice(set, get, {
+    activeTaskAbortControllers,
+    stopTaskMessage: STOP_TASK_MESSAGE,
+  }),
+
   onNodesChange: (changes) => {
     if (
       changes.some(
@@ -925,36 +976,6 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     }
     get().reconcileShotListGraphBindings();
   },
-
-  setShotListSelectedWires: (nodeId, wireIds) =>
-    set((s) => {
-      const prev = s.shotListSelectedWiresByNodeId[nodeId] ?? [];
-      if (prev.length === wireIds.length && prev.every((wireId, index) => wireId === wireIds[index])) {
-        return s;
-      }
-      if (wireIds.length === 0) {
-        if (!(nodeId in s.shotListSelectedWiresByNodeId)) return s;
-        const next = { ...s.shotListSelectedWiresByNodeId };
-        delete next[nodeId];
-        return { shotListSelectedWiresByNodeId: next };
-      }
-      return {
-        shotListSelectedWiresByNodeId: {
-          ...s.shotListSelectedWiresByNodeId,
-          [nodeId]: wireIds,
-        },
-      };
-    }),
-
-  setSelected: (id) =>
-    set((s) => ({
-      selectedNodeId: id,
-      nodes: s.nodes.map((n) => ({ ...n, selected: id != null && n.id === id })),
-    })),
-  setDetailOpen: (open) => set({ detailOpen: open }),
-  setActiveNodeId: (id) => set({ activeNodeId: id }),
-
-  consumeFitRequest: () => set({ requestFitNodeId: null }),
 
   clearWorkflowAgentSession: () => set({ workflowAgentSession: null }),
 
@@ -1868,38 +1889,6 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     return true;
   },
 
-  setCurrentProjectMeta: (projectId, projectName) => {
-    set({
-      currentProjectId: projectId,
-      currentProjectName: nextProjectName(projectName),
-    });
-  },
-
-  createNewProject: (projectName) => {
-    const nextProjectId = uid('project');
-    const nextName = nextProjectName(projectName);
-    pushUndoSnapshot(set);
-    set({
-      nodes: [],
-      edges: [],
-      assets: [],
-      messages: [],
-      currentProjectId: nextProjectId,
-      currentProjectName: nextName,
-      selectedNodeId: null,
-      activeNodeId: null,
-      detailOpen: false,
-      requestFitNodeId: null,
-      shotListSelectedWiresByNodeId: {},
-      workflowAgentSession: null,
-    });
-    get().pushMessage({
-      role: 'broadcast',
-      text: `已新建项目「${nextName}」。`,
-    });
-    return nextProjectId;
-  },
-
   addDepartmentNode: (kind, position) => {
     pushUndoSnapshot(set);
     const id = uid('node');
@@ -2498,19 +2487,6 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     return pushErr('当前连接不支持该节点类型，请检查起点和终点的组合。');
   },
 
-  startWritingPipeline: (text, position) => {
-    const id = get().addDepartmentNode('writing', position);
-    get().patchNodeData(id, { input: text }, false);
-    get().setActiveNodeId(id);
-    get().pushMessage({
-      role: 'broadcast',
-      text: '编剧节点已开始执行 AI 任务，请稍候。',
-      nodeId: id,
-    });
-    void get().executeNodeTask(id);
-    return id;
-  },
-
   executeNodeTask: async (nodeId, opts) => {
     const fromReviewed = opts?.optimizeFromReviewed === true;
     const force = opts?.force === true;
@@ -2886,29 +2862,6 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     }
   },
 
-  stopNodeTask: (nodeId) => {
-    const id = nodeId ?? get().activeNodeId ?? get().selectedNodeId;
-    if (!id) {
-      get().pushMessage({ role: 'system', text: '当前没有可停止的任务，请先选中正在执行的节点。' });
-      return;
-    }
-    const controller = activeTaskAbortControllers.get(id);
-    if (!controller) {
-      get().pushMessage({
-        role: 'system',
-        text: '当前节点没有正在执行的任务。',
-        nodeId: id,
-      });
-      return;
-    }
-    controller.abort();
-    get().pushMessage({
-      role: 'system',
-      text: STOP_TASK_MESSAGE,
-      nodeId: id,
-    });
-  },
-
   runReviewedOptimization: (nodeId) => {
     const id = nodeId ?? get().activeNodeId ?? get().selectedNodeId;
     if (!id) {
@@ -3072,59 +3025,6 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       return id;
     }
     return id;
-  },
-
-  runWritingFromInput: (id) => {
-    const node = get().nodes.find((n) => n.id === id);
-    if (!node || node.data.type !== 'writing') return;
-    void get().executeNodeTask(id);
-  },
-
-  startStoryboardPipeline: (position) => {
-    const id = get().addDepartmentNode('storyboard', position);
-    get().patchNodeData(
-      id,
-      {
-        input: '',
-        status: 'NOT_STARTED',
-        output: null,
-        review_result: null,
-        sourceSceneCount: undefined,
-      },
-      true,
-    );
-    get().setActiveNodeId(id);
-    get().pushMessage({
-      role: 'broadcast',
-      text: '已创建分镜节点。请先输入剧本文本或连接上游内容，然后开始生成镜头表。',
-      nodeId: id,
-    });
-    return id;
-  },
-
-  runStoryboardFromInput: (id) => {
-    const node = get().nodes.find((n) => n.id === id);
-    if (!node || node.data.type !== 'storyboard') return;
-    void get().executeNodeTask(id);
-  },
-
-  startPromptPipeline: (brief, position) => {
-    const id = get().addDepartmentNode('prompt', position);
-    get().patchNodeData(id, { input: brief }, false);
-    get().setActiveNodeId(id);
-    get().pushMessage({
-      role: 'broadcast',
-      text: 'Prompt 节点已创建，并开始根据当前输入生成提示词。',
-      nodeId: id,
-    });
-    void get().executeNodeTask(id);
-    return id;
-  },
-
-  runPromptFromInput: (id) => {
-    const node = get().nodes.find((n) => n.id === id);
-    if (!node || node.data.type !== 'prompt') return;
-    void get().executeNodeTask(id);
   },
 
   submitLeaderReviewFeedback: (nodeId, feedback) => {
@@ -3341,64 +3241,6 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     return id;
   },
 
-  focusNode: (id, opts) => {
-    const openDetail = opts?.openDetail !== false;
-    set((s) => ({
-      selectedNodeId: id,
-      detailOpen: openDetail,
-      activeNodeId: id,
-      nodes: s.nodes.map((n) => ({ ...n, selected: n.id === id })),
-    }));
-  },
-
-  retryPipeline: (id) => {
-    const node = get().nodes.find((n) => n.id === id);
-    if (!node || node.data.status !== 'REJECTED') return;
-    if (
-      node.data.type !== 'writing' &&
-      node.data.type !== 'storyboard' &&
-      node.data.type !== 'prompt'
-    ) {
-      return;
-    }
-    get().pushMessage({
-      role: 'broadcast',
-      text: `${deptLabel(kindToDepartment(node.data.type))} 已开始重新生成，正在按当前输入重新执行。`,
-      nodeId: id,
-    });
-    void get().executeNodeTask(id);
-  },
-
-  regenerateNode: (id) => {
-    const node = get().nodes.find((n) => n.id === id);
-    if (!node || node.type !== 'department') return;
-    if (
-      node.data.type !== 'writing' &&
-      node.data.type !== 'storyboard' &&
-      node.data.type !== 'prompt'
-    ) {
-      return;
-    }
-    if (node.data.status === 'IN_PROGRESS') {
-      get().pushMessage({
-        role: 'system',
-        text: '当前节点正在执行中，请先等待完成或先停止任务。',
-        nodeId: id,
-      });
-      return;
-    }
-    if (node.data.status === 'REJECTED') {
-      get().retryPipeline(id);
-      return;
-    }
-    get().pushMessage({
-      role: 'broadcast',
-      text: `${deptLabel(kindToDepartment(node.data.type))} 已开始重新生成，正在按当前输入重新执行。`,
-      nodeId: id,
-    });
-    void get().executeNodeTask(id, { force: true });
-  },
-
   syncDepartmentInputFromGraph: (deptId) => {
     const { nodes, edges } = get();
     const merged = mergedTextInputForDepartment(deptId, nodes, edges);
@@ -3406,315 +3248,6 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     if (merged !== null) {
       get().patchNodeData(deptId, { input: merged, inputSource: 'graph' }, false);
     }
-  },
-
-  syncPromptReviewInputFromGraph: (nodeId) => {
-    const { nodes, edges } = get();
-    const node = nodes.find((n) => n.id === nodeId);
-    if (!node || node.type !== 'promptReview') return;
-    const merged = mergedUpstreamForPromptReviewNode(nodeId, nodes, edges);
-    if (merged !== null) {
-      get().patchNodeData(
-        nodeId,
-        {
-          input: merged,
-          raw_text: merged,
-          output: { text: merged },
-          inputSource: 'graph',
-          generation_error: undefined,
-          ...(promptReviewTextFromData(node.data) !== merged
-            ? { prompt_review_history: appendPromptReviewHistory(node.data, '同步上游前') }
-            : {}),
-        },
-        false,
-      );
-      get().pushMessage({
-        role: 'system',
-        text: '已同步上游 Prompt 卡片提示词到审核节点。',
-        nodeId,
-      });
-      return;
-    }
-    get().pushMessage({
-      role: 'system',
-      text: '没有读取到上游 Prompt 卡片提示词。请确认审核节点左侧 Input 已连接 Prompt 节点右侧 Output，且 Prompt 节点已有输出。',
-      nodeId,
-    });
-  },
-
-  savePromptReviewSnapshot: (nodeId, label) => {
-    const node = get().nodes.find((n) => n.id === nodeId);
-    if (!node || node.type !== 'promptReview') return false;
-    const text = promptReviewTextFromData(node.data);
-    if (!text.trim()) {
-      get().pushMessage({ role: 'system', text: '当前审核节点没有可保存的提示词内容。', nodeId });
-      return false;
-    }
-    const previousHistory = normalizePromptReviewHistory(node.data.prompt_review_history);
-    const history = appendPromptReviewHistory(node.data, label?.trim() || '手动保存');
-    const changed = history.length !== previousHistory.length || history[0]?.id !== previousHistory[0]?.id;
-    if (!changed) {
-      get().pushMessage({ role: 'system', text: '当前版本已在历史顶部，无需重复保存。', nodeId });
-      return false;
-    }
-    get().patchNodeData(nodeId, { prompt_review_history: history }, false);
-    get().pushMessage({ role: 'system', text: '已保存当前提示词版本，可随时一键回退。', nodeId });
-    return true;
-  },
-
-  restorePromptReviewSnapshot: (nodeId, snapshotId) => {
-    const node = get().nodes.find((n) => n.id === nodeId);
-    if (!node || node.type !== 'promptReview') return false;
-    const history = normalizePromptReviewHistory(node.data.prompt_review_history);
-    const snapshot = history.find((entry) => entry.id === snapshotId);
-    if (!snapshot) {
-      get().pushMessage({ role: 'system', text: '没有找到这个历史版本，可能已被清理。', nodeId });
-      return false;
-    }
-    const currentText = promptReviewTextFromData(node.data);
-    const nextHistory =
-      currentText === snapshot.text
-        ? history
-        : appendPromptReviewHistory(node.data, '回退前');
-    get().patchNodeData(
-      nodeId,
-      {
-        status: 'APPROVED',
-        input: snapshot.text,
-        raw_text: snapshot.text,
-        output: { text: snapshot.text },
-        generation_error: undefined,
-        streaming_preview: undefined,
-        prompt_review_history: nextHistory,
-      },
-      true,
-    );
-    get().pushMessage({ role: 'broadcast', text: '已回退到选中的提示词历史版本。', nodeId });
-    return true;
-  },
-
-  runPromptReviewLlm: async (nodeId, instruction) => {
-    const node = get().nodes.find((n) => n.id === nodeId);
-    if (!node || node.type !== 'promptReview') return;
-    const sourceText = (node.data.raw_text ?? node.data.input ?? '').trim();
-    if (!sourceText) {
-      get().pushMessage({ role: 'system', text: '审核节点当前没有可调整的提示词内容。', nodeId });
-      return;
-    }
-    const config = getResolvedLlmGatewayConfig();
-    if (!config) {
-      get().pushMessage({
-        role: 'system',
-        text: '未配置可用模型网关。请先在设置里填写代理 URL 或 Base URL / API Key。',
-        nodeId,
-      });
-      return;
-    }
-    const task = instruction?.trim() || '请审核并润色这份视频生成提示词，保留原有字段结构，只修正不清晰、不连贯或不符合视频生成的表达。';
-    activeTaskAbortControllers.get(nodeId)?.abort();
-    const controller = new AbortController();
-    activeTaskAbortControllers.set(nodeId, controller);
-    get().setActiveNodeId(nodeId);
-    get().patchNodeData(
-      nodeId,
-      {
-        status: 'IN_PROGRESS',
-        generation_error: undefined,
-        streaming_preview: 'LLM 正在审核并调整提示词...',
-      },
-      true,
-    );
-    get().pushMessage({ role: 'broadcast', text: '提示词审核节点正在调用 LLM 调整内容。', nodeId });
-    try {
-      const systemPrompt = [
-        '你是视频生成提示词审核编辑器。',
-        '你的任务是根据用户要求修订输入的提示词正文。',
-        '必须保留原有字段结构、镜头编号、字段标题、时长规范、连续性约束和钉子4行。',
-        '只修正文案、结构清晰度、镜头表达、灯光/构图/连续性问题，不要把提示词改写成分析报告。',
-        '不要新增解释、不要输出 Markdown 代码块、不要输出审核报告，只输出修订后的完整提示词正文。',
-        '如果原文已经合格，也要返回整理后的完整正文，不要返回“无需修改”。',
-      ].join('\n');
-      const userPrompt = [
-        `调整要求：${task}`,
-        '',
-        '待调整提示词正文：',
-        sourceText,
-      ].join('\n');
-      const requestParams = {
-        systemPrompt,
-        userPrompt,
-        temperature: 0.25,
-        jsonMode: false,
-        maxOutputTokens: 3500,
-        signal: controller.signal,
-      };
-      const result = await requestLLMStream(config, {
-        ...requestParams,
-        onDelta: (_delta, accumulated) => {
-          if (controller.signal.aborted) return;
-          get().patchNodeData(
-            nodeId,
-            {
-              streaming_preview: accumulated.trim()
-                ? stripPromptReviewLlmWrapper(accumulated)
-                : 'LLM 已连接，正在等待调整结果...',
-            },
-            false,
-          );
-        },
-      });
-      const finalResult =
-        result.ok || result.error.code === 'USER_ABORT'
-          ? result
-          : await requestLLM(config, requestParams);
-      if (!finalResult.ok) {
-        if (finalResult.error.code === 'USER_ABORT') {
-          get().patchNodeData(
-            nodeId,
-            {
-              status: 'APPROVED',
-              generation_error: undefined,
-              streaming_preview: undefined,
-            },
-            true,
-          );
-          get().pushMessage({ role: 'system', text: STOP_TASK_MESSAGE, nodeId });
-          return;
-        }
-        get().patchNodeData(
-          nodeId,
-          {
-            status: 'APPROVED',
-            generation_error: finalResult.error.message,
-            streaming_preview: undefined,
-          },
-          true,
-        );
-        get().pushMessage({ role: 'system', text: finalResult.error.message, nodeId });
-        return;
-      }
-      if (controller.signal.aborted) {
-        get().patchNodeData(
-          nodeId,
-          {
-            status: 'APPROVED',
-            generation_error: undefined,
-            streaming_preview: undefined,
-          },
-          true,
-        );
-        get().pushMessage({ role: 'system', text: STOP_TASK_MESSAGE, nodeId });
-        return;
-      }
-      const revised = stripPromptReviewLlmWrapper(finalResult.content);
-      if (!revised) {
-        get().patchNodeData(
-          nodeId,
-          {
-            status: 'APPROVED',
-            generation_error: '模型没有返回可写入的提示词正文，请稍后重试或补充更明确的调整要求。',
-            streaming_preview: undefined,
-          },
-          true,
-        );
-        get().pushMessage({ role: 'system', text: '模型没有返回可写入的提示词正文。', nodeId });
-        return;
-      }
-      const latestNode = get().nodes.find((n) => n.id === nodeId);
-      const latestData = latestNode?.type === 'promptReview' ? latestNode.data : node.data;
-      get().patchNodeData(
-        nodeId,
-        {
-          status: 'APPROVED',
-          input: revised,
-          raw_text: revised,
-          output: { text: revised },
-          generation_error: undefined,
-          streaming_preview: undefined,
-          ...(promptReviewTextFromData(latestData) !== revised
-            ? { prompt_review_history: appendPromptReviewHistory(latestData, 'LLM 调整前') }
-            : {}),
-        },
-        true,
-      );
-      get().pushMessage({ role: 'broadcast', text: '提示词审核节点已完成 LLM 调整。', nodeId });
-    } finally {
-      if (activeTaskAbortControllers.get(nodeId) === controller) {
-        activeTaskAbortControllers.delete(nodeId);
-      }
-    }
-  },
-
-  refreshPromptInputsFromShotList: (shotListId) => {
-    flushShotListPendingEdits(shotListId);
-    const { nodes, edges } = get();
-    const shotListNode = nodes.find((node) => node.id === shotListId);
-    if (!shotListNode || shotListNode.type !== 'shotList' || shotListNode.data.type !== 'shot_list_node') {
-      return [];
-    }
-
-    const promptIds = [...new Set(
-      edges
-        .filter((edge) => edge.source === shotListId)
-        .map((edge) => {
-          const target = nodes.find((node) => node.id === edge.target);
-          return target?.type === 'department' && target.data.type === 'prompt' ? target.id : null;
-        })
-        .filter(Boolean) as string[],
-    )];
-
-    if (promptIds.length === 0) {
-      get().pushMessage({
-        role: 'system',
-        text: '当前镜头表还没有连接下游 Prompt 节点。',
-        nodeId: shotListId,
-      });
-      return [];
-    }
-
-    const skippedPromptIds: string[] = [];
-    for (const promptId of promptIds) {
-      const promptNode = get().nodes.find((node) => node.id === promptId);
-      if (!promptNode || promptNode.type !== 'department' || promptNode.data.type !== 'prompt') continue;
-      if (promptNode.data.status === 'IN_PROGRESS') {
-        skippedPromptIds.push(promptId);
-        continue;
-      }
-      const merged = mergedTextInputForDepartment(promptId, get().nodes, get().edges);
-      const staleReason =
-        promptNode.data.output && typeof promptNode.data.output === 'object'
-          ? '镜头表已更新到当前 Prompt 输入；现有 Prompt 结果仍是旧版本，请点击重新生成。'
-          : null;
-      get().patchNodeData(
-        promptId,
-        {
-          input: merged ?? promptNode.data.input,
-          inputSource: 'graph',
-          output_stale_reason: staleReason,
-        },
-        false,
-      );
-    }
-
-    const syncedCount = promptIds.length - skippedPromptIds.length;
-    get().pushMessage({
-      role: 'broadcast',
-      text:
-        syncedCount > 0
-          ? `已把镜头表最新内容同步到 ${syncedCount} 个下游 Prompt 输入；如已有旧结果，请重新生成。`
-          : '下游 Prompt 当前正在执行中，暂未覆盖其本轮输入。',
-      nodeId: shotListId,
-    });
-    if (skippedPromptIds.length > 0) {
-      for (const promptId of skippedPromptIds) {
-        get().pushMessage({
-          role: 'system',
-          text: '该 Prompt 正在执行中，已跳过本次同步；请等待完成后再重新同步。',
-          nodeId: promptId,
-        });
-      }
-    }
-    return promptIds;
   },
 
   removeNodesByIds: (ids) => {
@@ -3733,7 +3266,16 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     pushUndoSnapshot(set);
     const duplicatedIds: string[] = [];
     set((state) => {
-      const nextNodes = [...state.nodes];
+      const nextNodes = state.nodes.map((node) => ({ ...node, selected: false }));
+      const occupiedRects = state.nodes.map((node) => {
+        const size = getNodeSize(node);
+        return {
+          x: node.position.x,
+          y: node.position.y,
+          width: size.width,
+          height: size.height,
+        };
+      });
       for (const sourceNode of sourceNodes) {
         const rawData = stripFunctionsDeep(sourceNode.data) as StudioNodeData;
         const duplicatedId =
@@ -3769,14 +3311,12 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         }
 
         duplicatedIds.push(duplicatedId);
+        const duplicatedPosition = findDuplicatedNodePosition(sourceNode, occupiedRects);
         nextNodes.push({
           ...sourceNode,
           id: duplicatedId,
-          position: {
-            x: sourceNode.position.x + 44,
-            y: sourceNode.position.y + 44,
-          },
-          selected: false,
+          position: duplicatedPosition,
+          selected: true,
           dragging: false,
           data: duplicatedData,
         });
@@ -3790,30 +3330,6 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       text: `已复制 ${duplicatedIds.length} 个节点。`,
     });
     return duplicatedIds;
-  },
-
-  repositionNodes: (patches) => {
-    const ids = Object.keys(patches);
-    if (ids.length === 0) return;
-    set((state) => ({
-      nodes: state.nodes.map((node) => {
-        const patch = patches[node.id];
-        if (!patch) return node;
-        return {
-          ...node,
-          position: { x: patch.x, y: patch.y },
-          selected: patch.selected ?? node.selected,
-          dragging: false,
-        };
-      }),
-    }));
-  },
-
-  layoutCanvasWithDagre: () => {
-    const { nodes, edges } = get();
-    const next = layoutStudioNodesWithDagre(nodes, edges);
-    set({ nodes: next });
-    get().pushMessage({ role: 'broadcast', text: '已按 Dagre 重新整理画布布局。' });
   },
 
   undo: () => {
@@ -3837,42 +3353,6 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     get().pushMessage({
       role: 'system',
       text: '已撤销上一步操作。',
-    });
-  },
-
-  hydrateProject: (nodes, edges, opts) => {
-    const normalized = nodes.map(normalizeRestoredStudioNode);
-    const api = {
-      executeNodeTask: (id: string) => get().executeNodeTask(id),
-      focusNode: (id: string, o?: { openDetail?: boolean }) => get().focusNode(id, o),
-      removeNodesByIds: (ids: string[]) => get().removeNodesByIds(ids),
-    };
-    const bound = rebindStudioNodeRuntimeHandlers(normalized, api);
-    const cleaned: StudioRFNode[] = bound.map((n) => ({
-      ...n,
-      selected: false,
-      dragging: false,
-    }));
-    set({
-      nodes: cleaned,
-      edges,
-      assets: [],
-      messages: [],
-      selectedNodeId: null,
-      activeNodeId: null,
-      detailOpen: false,
-      requestFitNodeId: null,
-      shotListSelectedWiresByNodeId: {},
-      currentProjectId: opts?.projectId ?? null,
-      currentProjectName: nextProjectName(opts?.projectName),
-      workflowAgentSession: null,
-    });
-    get().reconcileShotListGraphBindings();
-    get().pushMessage({
-      role: 'broadcast',
-      text:
-        opts?.broadcastText ??
-        `已恢复项目，包含 ${nodes.length} 个节点、${edges.length} 条连线。`,
     });
   },
 

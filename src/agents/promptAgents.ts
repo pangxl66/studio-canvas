@@ -7,10 +7,12 @@ import {
   PROMPT_LOCAL_COMPRESSION_RULE,
   PROMPT_LEADER_SPEC,
   PROMPT_MOUNT_TOKEN_RULE,
+  PROMPT_TIMING_SYSTEM_RULE,
 } from '@/agents/promptDeptSpec';
 import { tryParseStoryboardOutput } from '@/agents/storyboardAgents';
 import { invokeLlmJsonObjectStream, invokeLlmLeaderReview } from '@/services/llmJsonClient';
 import { resolveAndComposeMountedSkills } from '@/services/skillLoader';
+import { runPromptGenerationPipeline } from '@/agents/promptPipeline';
 import type {
   ApprovedAsset,
   PromptOutput,
@@ -51,16 +53,6 @@ const MAX_SEEDANCE_CARD_CHARS = 1800;
 const SEEDANCE_PROMPT_SECTION_INDEX = 9;
 const SEEDANCE_OPTIONAL_SECTION_INDICES = new Set<number>();
 const MOUNT_TOKEN_RE = /\|@=([^|\n]+)\|/g;
-const PROMPT_TIMING_SYSTEM_RULE = [
-  '【时长规划】不要把 15 秒当作默认值，也不要为了凑满 15 秒而拉长镜头。',
-  '- 每条镜头或连续镜头组都要先根据 description、content、action、movement、durationSec、note 判断真正需要的总时长。',
-  '- 如果输入已给出 durationSec，优先服从它；如果没有，就由你按动作复杂度、镜头数量、对白长度、情绪停顿、景别切换量和信息密度自行估算。',
-  '- 总时长必须不超过 15 秒，但完全可以是 3 秒、5 秒、8 秒、12 秒等更合理的值。',
-  '- 如果镜头包含 mergedMembers，必须为每个子镜头分配明确秒数和时间区间，写出类似“镜头1 0-1.5秒；镜头2 1.5-2.3秒；镜头3 2.3-5秒”的结果。',
-  '- 禁止平均分配时长，禁止无内容硬拖时长，禁止为了凑时长重复同一动作或同一情绪停顿。',
-  '- seedanceCard 首行中的“X秒”必须是你判断后的真实总时长，不得固定写 15 秒。',
-  '- 只有“摄影机动态参数”需要显式写出总时长和每段时长分配；其它模块不要重复写时间区间。',
-].join('\\n');
 const STRUCTURED_FIELD_NOISE_RE = /文字生成版|无素材|角色资产|场景资产|半空中袖|口一翻/;
 const ACTION_FRAGMENT_TOKEN_RE =
   /^(?:探头|探身|回头|转身|抬手|收枪|落锁|关门|开口|低声|沉声|冷声|停在|停住|看见|看向|望向|闪身|逼近|后撤|甩袖|翻腕)$/;
@@ -1337,96 +1329,26 @@ export async function runPromptEmployee(
   onDelta?: (delta: string, accumulated: string) => void,
   signal?: AbortSignal,
 ): Promise<PromptOutput> {
-  const assetRefs = promptAssetRefsFromApproved(approvedAssets);
-  const sourceStoryboard = tryParseStoryboardFromInputText(brief);
-  const systemBase = executionSystemPrompt?.trim() || PROMPT_DEPT_AGENT_SYSTEM;
-  const systemPrompt = `${systemBase}\n\n${PROMPT_TIMING_SYSTEM_RULE}\n\n【输出 JSON 形状参考】\n${PROMPT_DEPT_OUTPUT_SHAPE}`;
-  const outputFallback: Partial<Pick<PromptOutput, 'system' | 'userTemplate' | 'negative' | 'parameters'>> = {
-    system: systemBase,
-    userTemplate: brief.trim() || 'Prompt generated from current storyboard input.',
-    negative: DEFAULT_NEG,
-    parameters: {
-      engine: 'jimeng',
-      aspect: '16:9',
-      format: 'sd2_storyboard_dense_v2',
+  return runPromptGenerationPipeline(
+    { brief, approvedAssets, executionSystemPrompt, onDelta, signal },
+    {
+      defaultNegative: DEFAULT_NEG,
+      departmentSystemPrompt: PROMPT_DEPT_AGENT_SYSTEM,
+      departmentOutputShape: PROMPT_DEPT_OUTPUT_SHAPE,
+      timingSystemRule: PROMPT_TIMING_SYSTEM_RULE,
+      resolveAssetRefs: promptAssetRefsFromApproved,
+      parseSourceStoryboard: tryParseStoryboardFromInputText,
+      buildGenerationUserMessage: buildPromptUserMessageV3,
+      buildStructureRepairUserMessage: buildStructureRepairUserMessageV3,
+      buildCompressionRepairUserMessage: buildCompressionRepairUserMessageV3,
+      buildCoverageRepairUserMessage: buildCoverageRepairUserMessageV3,
+      invokeWithStructureRepair: invokePromptOutputWithStructureRepair,
+      outputNeedsCompressionRepair,
+      normalizeOutput: normalizePromptOutput,
+      validateCoverage: validatePromptCoverage,
+      sanitizeEllipsis: sanitizePromptOutputEllipsis,
     },
-  };
-
-  let draftOutput = await invokePromptOutputWithStructureRepair({
-    systemPrompt,
-    userPrompt: buildPromptUserMessageV3(brief, assetRefs, sourceStoryboard),
-    repairUserPromptBuilder: (invalidOutput, failureReason) =>
-      buildStructureRepairUserMessageV3(
-        brief,
-        assetRefs,
-        sourceStoryboard,
-        invalidOutput,
-        failureReason,
-      ),
-    outputFallback,
-    temperature: 0.25,
-    onDelta,
-    signal,
-  });
-
-  if (outputNeedsCompressionRepair(draftOutput)) {
-    draftOutput = await invokePromptOutputWithStructureRepair({
-      systemPrompt,
-      userPrompt: buildCompressionRepairUserMessageV3(
-        brief,
-        assetRefs,
-        sourceStoryboard,
-        draftOutput,
-      ),
-      repairUserPromptBuilder: (invalidOutput, failureReason) =>
-        buildStructureRepairUserMessageV3(
-          brief,
-          assetRefs,
-          sourceStoryboard,
-          invalidOutput,
-          failureReason,
-        ),
-      outputFallback,
-      temperature: 0.2,
-      onDelta,
-      signal,
-    });
-  }
-
-  let output = normalizePromptOutput(draftOutput, sourceStoryboard);
-
-  try {
-    validatePromptCoverage(output, sourceStoryboard);
-    return sanitizePromptOutputEllipsis(output);
-  } catch (error) {
-    if (!sourceStoryboard?.shots?.length) throw error;
-    const failureReason = error instanceof Error ? error.message : String(error);
-    const repairedOutput = await invokePromptOutputWithStructureRepair({
-      systemPrompt,
-      userPrompt: buildCoverageRepairUserMessageV3(
-        brief,
-        assetRefs,
-        sourceStoryboard,
-        output,
-        failureReason,
-      ),
-      repairUserPromptBuilder: (invalidOutput, structureFailureReason) =>
-        buildStructureRepairUserMessageV3(
-          brief,
-          assetRefs,
-          sourceStoryboard,
-          invalidOutput,
-          `${failureReason} | ${structureFailureReason}`,
-        ),
-      outputFallback,
-      temperature: 0.2,
-      onDelta,
-      signal,
-    });
-    output = normalizePromptOutput(repairedOutput, sourceStoryboard);
-    validatePromptCoverage(output, sourceStoryboard);
-    return sanitizePromptOutputEllipsis(output);
-  }
+  );
 }
 
 export type LeaderDecision = { approved: true } | { approved: false; feedback: string };
