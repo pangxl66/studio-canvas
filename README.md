@@ -9,7 +9,7 @@ The project supports two deployment modes:
 
 ## Online Website Mode
 
-Recommended simple deployment: Render + Supabase.
+Supported simple deployments: Render/Vercel-style hosting + Supabase, or a Hong Kong VPS + Docker + Supabase.
 
 1. Create a Supabase project.
 2. Run `docs/supabase-schema.sql` in Supabase SQL Editor.
@@ -18,10 +18,11 @@ Recommended simple deployment: Render + Supabase.
 5. Add the variables from `.env.production.example` to Render Environment Variables.
 6. Deploy.
 
-Detailed launch guide:
+Detailed launch guides:
 
 ```text
 docs/render-deploy-guide.md
+docs/hong-kong-vps-deploy-guide.md
 docs/online-website-launch.md
 ```
 
@@ -55,6 +56,12 @@ npm.cmd run cloud:build
 npm.cmd start
 ```
 
+Docker/VPS hosting can use:
+
+```powershell
+docker compose up -d --build
+```
+
 The production check blocks unsafe browser-exposed LLM keys such as `VITE_LLM_API_KEY`.
 
 ## API Routes
@@ -71,4 +78,4 @@ The production check blocks unsafe browser-exposed LLM keys such as `VITE_LLM_AP
 
 - Never commit `.env.local`.
 - Never put model keys in `VITE_*` variables for production.
-- `SUPABASE_SERVICE_ROLE_KEY` must only exist in server-side Vercel environment variables.
+- `SUPABASE_SERVICE_ROLE_KEY` must only exist in server-side hosting environment variables.

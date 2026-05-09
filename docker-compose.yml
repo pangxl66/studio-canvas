@@ -1,0 +1,17 @@
+services:
+  studio-canvas:
+    build:
+      context: .
+      args:
+        VITE_SAAS_MOCK: ${VITE_SAAS_MOCK:-false}
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL}
+        VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY}
+        VITE_LLM_PROXY_URL: ${VITE_LLM_PROXY_URL:-/api/llm/chat}
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
