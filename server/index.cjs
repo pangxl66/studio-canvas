@@ -11,6 +11,7 @@ const port = Number.parseInt(process.env.PORT || '3000', 10);
 const MAX_INPUT_CHARS = 80_000;
 const MAX_PROJECT_SNAPSHOT_CHARS = 5_000_000;
 const PROJECT_LIST_LIMIT = 40;
+const DEFAULT_MONTHLY_QUOTA = 20;
 const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_MODEL = 'gpt-5.5';
 
@@ -135,8 +136,8 @@ async function ensureUserRows(serviceClient, user) {
     serviceClient.from('credit_wallets').upsert(
       {
         user_id: user.id,
-        monthly_quota: 50,
-        remaining_quota: 50,
+        monthly_quota: DEFAULT_MONTHLY_QUOTA,
+        remaining_quota: DEFAULT_MONTHLY_QUOTA,
       },
       { onConflict: 'user_id', ignoreDuplicates: true },
     ),

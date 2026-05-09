@@ -13,6 +13,8 @@ type AnySupabaseClient = {
   from: (table: string) => any;
 };
 
+const DEFAULT_MONTHLY_QUOTA = 20;
+
 function env(name: string): string {
   return process.env[name]?.trim() ?? '';
 }
@@ -72,8 +74,8 @@ async function ensureUserRows(serviceClient: AnySupabaseClient, user: AuthedUser
     serviceClient.from('credit_wallets').upsert(
       {
         user_id: user.id,
-        monthly_quota: 50,
-        remaining_quota: 50,
+        monthly_quota: DEFAULT_MONTHLY_QUOTA,
+        remaining_quota: DEFAULT_MONTHLY_QUOTA,
       },
       { onConflict: 'user_id', ignoreDuplicates: true },
     ),

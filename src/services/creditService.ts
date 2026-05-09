@@ -14,6 +14,7 @@ export type CreditStatus = {
 };
 
 const MOCK_CREDIT_KEY = 'studio_canvas_saas_mock_credit_v1';
+const DEFAULT_MOCK_MONTHLY_QUOTA = 20;
 
 function readMockCredit(): CreditStatus {
   try {
@@ -28,9 +29,9 @@ function readMockCredit(): CreditStatus {
   const nextStatus: CreditStatus = {
     displayName: 'Local Mock',
     email: 'mock@studio.local',
-    monthlyQuota: 50,
+    monthlyQuota: DEFAULT_MOCK_MONTHLY_QUOTA,
     plan: 'trial',
-    remainingQuota: 50,
+    remainingQuota: DEFAULT_MOCK_MONTHLY_QUOTA,
     resetAt: null,
     updatedAt: new Date().toISOString(),
     userId: 'mock-user-local',

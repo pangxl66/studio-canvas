@@ -56,6 +56,7 @@ type QuotaReservation =
 const MAX_INPUT_CHARS = 80_000;
 const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_MODEL = 'gpt-5.5';
+const DEFAULT_MONTHLY_QUOTA = 20;
 const CHAT_COMPLETIONS_PATH = '/chat/completions';
 
 function env(name: string): string {
@@ -226,8 +227,8 @@ async function ensureUserRows(serviceClient: AnySupabaseClient, user: AuthedUser
     serviceClient.from('credit_wallets').upsert(
       {
         user_id: user.id,
-        monthly_quota: 50,
-        remaining_quota: 50,
+        monthly_quota: DEFAULT_MONTHLY_QUOTA,
+        remaining_quota: DEFAULT_MONTHLY_QUOTA,
       },
       { onConflict: 'user_id', ignoreDuplicates: true },
     ),
