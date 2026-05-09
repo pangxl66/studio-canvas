@@ -1,4 +1,5 @@
 const fs = require('node:fs');
+const https = require('node:https');
 const http = require('node:http');
 const path = require('node:path');
 const { createClient } = require('@supabase/supabase-js');
@@ -146,8 +147,8 @@ function hasLlmUpstream() {
   return Boolean(env('LLM_PROXY_URL') || env('LLM_BASE_URL'));
 }
 
-function buildProxyHeaders(req, upstreamUrl) {
-  const headers = new Headers();
+function buildProxyHeaders(req, body) {
+  const headers = {};
   for (const [key, value] of Object.entries(req.headers)) {
     const lowerKey = key.toLowerCase();
     if (
@@ -158,29 +159,25 @@ function buildProxyHeaders(req, upstreamUrl) {
     ) {
       continue;
     }
-    if (Array.isArray(value)) {
-      for (const item of value) headers.append(key, item);
-      continue;
-    }
-    if (value !== undefined) headers.set(key, String(value));
+    if (value !== undefined) headers[key] = value;
   }
-  headers.set('host', upstreamUrl.host);
+  if (body?.length) {
+    headers['content-length'] = String(body.length);
+  }
   return headers;
 }
 
-function copyProxyResponseHeaders(upstreamResponse, res) {
-  upstreamResponse.headers.forEach((value, key) => {
+function copyProxyResponseHeaders(upstreamHeaders, res) {
+  for (const [key, value] of Object.entries(upstreamHeaders)) {
     const lowerKey = key.toLowerCase();
     if (
       lowerKey === 'connection' ||
-      lowerKey === 'content-encoding' ||
-      lowerKey === 'content-length' ||
       lowerKey === 'transfer-encoding'
     ) {
-      return;
+      continue;
     }
-    res.setHeader(key, value);
-  });
+    if (value !== undefined) res.setHeader(key, value);
+  }
 }
 
 async function handleSupabaseProxy(req, res, url) {
@@ -195,21 +192,43 @@ async function handleSupabaseProxy(req, res, url) {
   const method = req.method || 'GET';
   const body = method === 'GET' || method === 'HEAD' ? undefined : await readRawBody(req);
 
-  try {
-    const upstreamResponse = await fetch(upstreamUrl, {
-      body,
-      headers: buildProxyHeaders(req, upstreamUrl),
-      method,
-      redirect: 'manual',
+  await new Promise((resolve) => {
+    const upstreamRequest = https.request(
+      {
+        headers: buildProxyHeaders(req, body),
+        hostname: upstreamUrl.hostname,
+        method,
+        path: `${upstreamUrl.pathname}${upstreamUrl.search}`,
+        port: upstreamUrl.port || 443,
+        protocol: upstreamUrl.protocol,
+        timeout: DEFAULT_TIMEOUT_MS,
+      },
+      (upstreamResponse) => {
+        res.statusCode = upstreamResponse.statusCode || 502;
+        copyProxyResponseHeaders(upstreamResponse.headers, res);
+        res.setHeader('cache-control', 'no-store');
+        upstreamResponse.pipe(res);
+        upstreamResponse.on('end', resolve);
+      },
+    );
+
+    upstreamRequest.on('timeout', () => {
+      upstreamRequest.destroy(new Error('Supabase proxy request timed out.'));
     });
-    const buffer = Buffer.from(await upstreamResponse.arrayBuffer());
-    res.statusCode = upstreamResponse.status;
-    copyProxyResponseHeaders(upstreamResponse, res);
-    res.setHeader('cache-control', 'no-store');
-    res.end(buffer);
-  } catch (error) {
-    sendText(res, 502, sanitizeError(error) || 'Supabase proxy request failed.');
-  }
+    upstreamRequest.on('error', (error) => {
+      if (res.headersSent) {
+        res.destroy(error);
+      } else {
+        sendText(res, 502, sanitizeError(error) || 'Supabase proxy request failed.');
+      }
+      resolve();
+    });
+
+    if (body?.length) {
+      upstreamRequest.write(body);
+    }
+    upstreamRequest.end();
+  });
 }
 
 function normalizeBaseUrl(baseUrl) {
