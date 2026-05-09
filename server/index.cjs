@@ -288,8 +288,19 @@ function quotaCostForFeature(feature, body) {
   return 1;
 }
 
-function normalizeModel(model) {
-  return String(model || '').trim() || env('LLM_MODEL') || DEFAULT_MODEL;
+function configuredModelForFeature(feature) {
+  const normalizedFeature = String(feature || '').trim();
+  if (normalizedFeature === 'text-polish') {
+    return env('LLM_FAST_MODEL') || env('LLM_MODEL');
+  }
+  if (normalizedFeature === 'prompt-review') {
+    return env('LLM_DEEP_MODEL') || env('LLM_MODEL');
+  }
+  return env('LLM_MODEL');
+}
+
+function normalizeModel(model, feature) {
+  return configuredModelForFeature(feature) || String(model || '').trim() || DEFAULT_MODEL;
 }
 
 function validateChatBody(body) {
@@ -310,7 +321,7 @@ function buildUpstreamBody(body) {
   const maxTokens = body.max_tokens || body.maxOutputTokens;
   const upstreamBody = {
     messages: body.messages,
-    model: normalizeModel(body.model),
+    model: normalizeModel(body.model, body.feature),
     stream: body.stream === true,
     temperature: typeof body.temperature === 'number' ? body.temperature : 0.35,
   };
@@ -669,7 +680,7 @@ async function handleLlmChat(req, res) {
   const feature = String(body.feature || '').trim() || 'llm-chat';
   const cost = quotaCostForFeature(feature, body);
   const inChars = inputChars(body);
-  const model = normalizeModel(body.model);
+  const model = normalizeModel(body.model, feature);
 
   try {
     await ensureUserRows(auth.serviceClient, auth.user);
@@ -714,6 +725,15 @@ async function handleLlmChat(req, res) {
       error_message: isOk ? undefined : sanitizeError(rawText),
     });
     if (!isOk) {
+      console.warn(
+        'LLM upstream failed',
+        JSON.stringify({
+          status: upstreamResponse.status,
+          model,
+          feature,
+          body: sanitizeError(rawText),
+        }),
+      );
       await refundQuota(auth.serviceClient, auth.userId, cost);
     }
     res.statusCode = upstreamResponse.status;

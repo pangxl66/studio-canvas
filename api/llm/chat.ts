@@ -148,15 +148,26 @@ function quotaCostForFeature(feature: string, body: ChatRequestBody): number {
   return 1;
 }
 
-function normalizeModel(model?: string): string {
-  return model?.trim() || env('LLM_MODEL') || DEFAULT_MODEL;
+function configuredModelForFeature(feature?: string): string {
+  const normalizedFeature = feature?.trim() ?? '';
+  if (normalizedFeature === 'text-polish') {
+    return env('LLM_FAST_MODEL') || env('LLM_MODEL');
+  }
+  if (normalizedFeature === 'prompt-review') {
+    return env('LLM_DEEP_MODEL') || env('LLM_MODEL');
+  }
+  return env('LLM_MODEL');
+}
+
+function normalizeModel(model?: string, feature?: string): string {
+  return configuredModelForFeature(feature) || model?.trim() || DEFAULT_MODEL;
 }
 
 function buildUpstreamBody(body: ChatRequestBody): Record<string, unknown> {
   const maxTokens = body.max_tokens ?? body.maxOutputTokens;
   const upstreamBody: Record<string, unknown> = {
     messages: body.messages,
-    model: normalizeModel(body.model),
+    model: normalizeModel(body.model, body.feature),
     stream: body.stream === true,
     temperature: typeof body.temperature === 'number' ? body.temperature : 0.35,
   };
@@ -348,7 +359,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   const feature = body.feature?.trim() || 'llm-chat';
   const quotaCost = quotaCostForFeature(feature, body);
   const inputChars = bodyInputChars(body);
-  const model = normalizeModel(body.model);
+  const model = normalizeModel(body.model, feature);
   const quotaReservation = await reserveQuota(serviceClient, userId, quotaCost);
   if (quotaReservation.ok === false) {
     await writeUsage(serviceClient, {
@@ -387,6 +398,15 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     });
 
     if (!isOk) {
+      console.warn(
+        'LLM upstream failed',
+        JSON.stringify({
+          status: upstreamResponse.status,
+          model,
+          feature,
+          body: sanitizeError(rawText),
+        }),
+      );
       await refundQuota(serviceClient, userId, quotaCost);
     }
 
