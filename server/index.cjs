@@ -346,9 +346,10 @@ async function reserveQuota(serviceClient, userId, cost) {
     p_user_id: userId,
   });
   if (error) {
+    console.warn('Credit reservation RPC failed', sanitizeError(error.message));
     return {
       ok: false,
-      message: error.message || '预扣额度失败，请确认已执行最新 Supabase SQL。',
+      message: '站内次数预扣失败，请更新 Supabase SQL 后重试。',
       remaining: 0,
     };
   }

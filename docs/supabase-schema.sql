@@ -141,13 +141,13 @@ declare
   next_remaining int;
   safe_cost int := greatest(coalesce(p_cost, 1), 1);
 begin
-  update public.credit_wallets
+  update public.credit_wallets as wallet
   set
-    remaining_quota = remaining_quota - safe_cost,
+    remaining_quota = wallet.remaining_quota - safe_cost,
     updated_at = now()
-  where user_id = p_user_id
-    and remaining_quota >= safe_cost
-  returning credit_wallets.remaining_quota into next_remaining;
+  where wallet.user_id = p_user_id
+    and wallet.remaining_quota >= safe_cost
+  returning wallet.remaining_quota into next_remaining;
 
   if found then
     return query select true, next_remaining;
@@ -173,12 +173,12 @@ declare
   next_remaining int;
   safe_cost int := greatest(coalesce(p_cost, 1), 1);
 begin
-  update public.credit_wallets
+  update public.credit_wallets as wallet
   set
-    remaining_quota = least(monthly_quota, remaining_quota + safe_cost),
+    remaining_quota = least(wallet.monthly_quota, wallet.remaining_quota + safe_cost),
     updated_at = now()
-  where user_id = p_user_id
-  returning credit_wallets.remaining_quota into next_remaining;
+  where wallet.user_id = p_user_id
+  returning wallet.remaining_quota into next_remaining;
 
   return query select coalesce(next_remaining, 0);
 end;
