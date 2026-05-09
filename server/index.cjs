@@ -167,19 +167,6 @@ function buildProxyHeaders(req, body) {
   return headers;
 }
 
-function copyProxyResponseHeaders(upstreamHeaders, res) {
-  for (const [key, value] of Object.entries(upstreamHeaders)) {
-    const lowerKey = key.toLowerCase();
-    if (
-      lowerKey === 'connection' ||
-      lowerKey === 'transfer-encoding'
-    ) {
-      continue;
-    }
-    if (value !== undefined) res.setHeader(key, value);
-  }
-}
-
 async function handleSupabaseProxy(req, res, url) {
   const supabaseUrl = env('SUPABASE_URL');
   if (!supabaseUrl) {
@@ -204,11 +191,31 @@ async function handleSupabaseProxy(req, res, url) {
         timeout: DEFAULT_TIMEOUT_MS,
       },
       (upstreamResponse) => {
-        res.statusCode = upstreamResponse.statusCode || 502;
-        copyProxyResponseHeaders(upstreamResponse.headers, res);
-        res.setHeader('cache-control', 'no-store');
-        upstreamResponse.pipe(res);
-        upstreamResponse.on('end', resolve);
+        const chunks = [];
+        upstreamResponse.on('data', (chunk) => {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        });
+        upstreamResponse.on('end', () => {
+          const payload = Buffer.concat(chunks);
+          res.statusCode = upstreamResponse.statusCode || 502;
+          res.setHeader(
+            'content-type',
+            upstreamResponse.headers['content-type'] || 'application/json; charset=utf-8',
+          );
+          const location = upstreamResponse.headers.location;
+          if (location) res.setHeader('location', Array.isArray(location) ? location[0] : location);
+          res.setHeader('cache-control', 'no-store');
+          res.end(payload);
+          resolve();
+        });
+        upstreamResponse.on('error', (error) => {
+          if (!res.headersSent) {
+            sendText(res, 502, sanitizeError(error) || 'Supabase proxy response failed.');
+          } else {
+            res.destroy(error);
+          }
+          resolve();
+        });
       },
     );
 
