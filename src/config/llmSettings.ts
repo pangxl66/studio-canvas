@@ -1,5 +1,5 @@
 import type { ModelGatewayConfig } from '@/services/ModelGateway';
-import { isSaasHostedMode } from '@/services/authClient';
+import { isDesktopRuntime, isSaasHostedMode } from '@/services/authClient';
 
 // Bump the storage key so stale browser-cached settings do not override the GPT-5.5 defaults.
 const STORAGE_KEY = 'studio_canvas_llm_settings_v6';
@@ -28,6 +28,13 @@ export type LlmUserSettings = {
 
 function envProxyUrl(): string {
   return (import.meta.env.VITE_LLM_PROXY_URL as string | undefined)?.trim() ?? '';
+}
+
+function forcedBrowserProxyUrl(): string {
+  const proxyUrl = envProxyUrl();
+  if (!proxyUrl || isDesktopRuntime()) return '';
+  if (isSaasHostedMode()) return proxyUrl;
+  return envApiKey() ? '' : proxyUrl;
 }
 
 function envBaseUrl(): string {
@@ -148,7 +155,7 @@ export function pipelineModeNeedsGateway(mode: PipelineExecutionMode): boolean {
 
 export function getResolvedLlmGatewayConfig(): ModelGatewayConfig | null {
   const saved = loadLlmUserSettings();
-  const forcedSaasProxyUrl = isSaasHostedMode() ? envProxyUrl() : '';
+  const forcedSaasProxyUrl = forcedBrowserProxyUrl();
   const proxyUrl = (forcedSaasProxyUrl || saved?.proxyUrl || envProxyUrl()).trim();
   const baseUrl = (saved?.baseUrl ?? envBaseUrl()).trim();
   const apiKey = (saved?.apiKey ?? envApiKey()).trim();
@@ -171,7 +178,7 @@ export function getResolvedLlmGatewayConfig(): ModelGatewayConfig | null {
 export function getLlmSettingsFormDefaults(): LlmUserSettings {
   const saved = loadLlmUserSettings();
   const mode = normalizeMode(saved?.mode ?? envMode());
-  const forcedSaasProxyUrl = isSaasHostedMode() ? envProxyUrl() : '';
+  const forcedSaasProxyUrl = forcedBrowserProxyUrl();
   return {
     proxyUrl: (forcedSaasProxyUrl || saved?.proxyUrl || envProxyUrl()).trim(),
     baseUrl: forcedSaasProxyUrl ? '' : (saved?.baseUrl ?? envBaseUrl()).trim(),

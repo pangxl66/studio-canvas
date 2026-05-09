@@ -360,8 +360,29 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   const quotaCost = quotaCostForFeature(feature, body);
   const inputChars = bodyInputChars(body);
   const model = normalizeModel(body.model, feature);
+
+  console.log(
+    'LLM chat request received',
+    JSON.stringify({
+      feature,
+      model,
+      requestedModel: body.model?.trim() || null,
+      inputChars,
+    }),
+  );
+
   const quotaReservation = await reserveQuota(serviceClient, userId, quotaCost);
   if (quotaReservation.ok === false) {
+    console.warn(
+      'LLM quota reservation failed',
+      JSON.stringify({
+        feature,
+        model,
+        quotaCost,
+        remaining: quotaReservation.remaining,
+        message: sanitizeError(quotaReservation.message),
+      }),
+    );
     await writeUsage(serviceClient, {
       user_id: userId,
       project_id: body.projectId ?? null,

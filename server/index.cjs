@@ -682,6 +682,16 @@ async function handleLlmChat(req, res) {
   const inChars = inputChars(body);
   const model = normalizeModel(body.model, feature);
 
+  console.log(
+    'LLM chat request received',
+    JSON.stringify({
+      feature,
+      model,
+      requestedModel: String(body.model || '').trim() || null,
+      inputChars: inChars,
+    }),
+  );
+
   try {
     await ensureUserRows(auth.serviceClient, auth.user);
   } catch (error) {
@@ -691,6 +701,16 @@ async function handleLlmChat(req, res) {
 
   const reservation = await reserveQuota(auth.serviceClient, auth.userId, cost);
   if (!reservation.ok) {
+    console.warn(
+      'LLM quota reservation failed',
+      JSON.stringify({
+        feature,
+        model,
+        cost,
+        remaining: reservation.remaining,
+        message: sanitizeError(reservation.message),
+      }),
+    );
     await writeUsage(auth.serviceClient, {
       user_id: auth.userId,
       project_id: body.projectId || null,
