@@ -42,6 +42,13 @@ function sendJson(res, status, payload) {
   res.end(JSON.stringify(payload));
 }
 
+function sendText(res, status, message) {
+  res.statusCode = status;
+  res.setHeader('content-type', 'text/plain; charset=utf-8');
+  res.setHeader('cache-control', 'no-store');
+  res.end(message);
+}
+
 function sanitizeError(raw) {
   return String(raw || '')
     .replace(/sk-[A-Za-z0-9_-]{6,}/g, 'sk-***')
@@ -60,6 +67,14 @@ async function readJsonBody(req) {
   const raw = Buffer.concat(chunks).toString('utf8').trim();
   if (!raw) return {};
   return JSON.parse(raw);
+}
+
+async function readRawBody(req) {
+  const chunks = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
 }
 
 function getBearerToken(req) {
@@ -129,6 +144,72 @@ async function ensureUserRows(serviceClient, user) {
 
 function hasLlmUpstream() {
   return Boolean(env('LLM_PROXY_URL') || env('LLM_BASE_URL'));
+}
+
+function buildProxyHeaders(req, upstreamUrl) {
+  const headers = new Headers();
+  for (const [key, value] of Object.entries(req.headers)) {
+    const lowerKey = key.toLowerCase();
+    if (
+      lowerKey === 'host' ||
+      lowerKey === 'connection' ||
+      lowerKey === 'content-length' ||
+      lowerKey === 'accept-encoding'
+    ) {
+      continue;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) headers.append(key, item);
+      continue;
+    }
+    if (value !== undefined) headers.set(key, String(value));
+  }
+  headers.set('host', upstreamUrl.host);
+  return headers;
+}
+
+function copyProxyResponseHeaders(upstreamResponse, res) {
+  upstreamResponse.headers.forEach((value, key) => {
+    const lowerKey = key.toLowerCase();
+    if (
+      lowerKey === 'connection' ||
+      lowerKey === 'content-encoding' ||
+      lowerKey === 'content-length' ||
+      lowerKey === 'transfer-encoding'
+    ) {
+      return;
+    }
+    res.setHeader(key, value);
+  });
+}
+
+async function handleSupabaseProxy(req, res, url) {
+  const supabaseUrl = env('SUPABASE_URL');
+  if (!supabaseUrl) {
+    sendJson(res, 500, { error: { message: 'SUPABASE_URL is missing.' } });
+    return;
+  }
+
+  const upstreamPath = url.pathname.replace(/^\/supabase\/?/, '/');
+  const upstreamUrl = new URL(`${upstreamPath}${url.search}`, supabaseUrl);
+  const method = req.method || 'GET';
+  const body = method === 'GET' || method === 'HEAD' ? undefined : await readRawBody(req);
+
+  try {
+    const upstreamResponse = await fetch(upstreamUrl, {
+      body,
+      headers: buildProxyHeaders(req, upstreamUrl),
+      method,
+      redirect: 'manual',
+    });
+    const buffer = Buffer.from(await upstreamResponse.arrayBuffer());
+    res.statusCode = upstreamResponse.status;
+    copyProxyResponseHeaders(upstreamResponse, res);
+    res.setHeader('cache-control', 'no-store');
+    res.end(buffer);
+  } catch (error) {
+    sendText(res, 502, sanitizeError(error) || 'Supabase proxy request failed.');
+  }
 }
 
 function normalizeBaseUrl(baseUrl) {
@@ -702,6 +783,10 @@ async function route(req, res) {
     }
     if (url.pathname === '/api/llm/chat') {
       await handleLlmChat(req, res);
+      return;
+    }
+    if (url.pathname === '/supabase' || url.pathname.startsWith('/supabase/')) {
+      await handleSupabaseProxy(req, res, url);
       return;
     }
     if (url.pathname.startsWith('/api/')) {

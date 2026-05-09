@@ -1,6 +1,6 @@
 import { createClient, type Session, type SupabaseClient, type User } from '@supabase/supabase-js';
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL?.trim() ?? '';
+const rawSupabaseUrl = import.meta.env.VITE_SUPABASE_URL?.trim() ?? '';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim() ?? '';
 const saasMock = import.meta.env.VITE_SAAS_MOCK?.trim().toLowerCase() ?? '';
 const MOCK_AUTH_KEY = 'studio_canvas_saas_mock_auth_v1';
@@ -8,6 +8,17 @@ const MOCK_AUTH_KEY = 'studio_canvas_saas_mock_auth_v1';
 export const STUDIO_AUTH_MOCK_EVENT = 'studio-auth-mock-change';
 
 let cachedClient: SupabaseClient | null = null;
+
+function normalizeSupabaseUrl(value: string): string {
+  if (!value) return '';
+  if (/^https?:\/\//i.test(value)) return value;
+  if (value.startsWith('/') && typeof window !== 'undefined') {
+    return `${window.location.origin}${value}`;
+  }
+  return value;
+}
+
+const supabaseUrl = normalizeSupabaseUrl(rawSupabaseUrl);
 
 export type AuthSnapshot = {
   session: Session | null;
