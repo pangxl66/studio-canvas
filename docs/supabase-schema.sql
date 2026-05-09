@@ -5,7 +5,7 @@ create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   email text,
   display_name text,
-  plan text not null default 'free',
+  plan text not null default $$free$$,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -21,7 +21,7 @@ create table if not exists public.credit_wallets (
 create table if not exists public.projects (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
-  name text not null default '未命名工程',
+  name text not null default $$Untitled Project$$,
   snapshot jsonb not null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
@@ -41,7 +41,7 @@ create table if not exists public.usage_events (
   output_chars int not null default 0,
   estimated_tokens int not null default 0,
   quota_cost int not null default 1,
-  status text not null default 'success',
+  "status" text not null default $$success$$,
   error_message text,
   created_at timestamptz not null default now()
 );
@@ -54,7 +54,7 @@ create table if not exists public.subscriptions (
   provider text,
   provider_customer_id text,
   provider_subscription_id text,
-  status text not null default 'inactive',
+  "status" text not null default $$inactive$$,
   current_period_end timestamptz,
   updated_at timestamptz not null default now()
 );
