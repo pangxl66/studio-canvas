@@ -6,14 +6,19 @@ import {
   DEFAULT_DEEP_LLM_MODEL,
   DEFAULT_FAST_LLM_MODEL,
   DEFAULT_LLM_TIMEOUT_MS,
+  getAvailableLocalLlmProviders,
   getLlmSettingsFormDefaults,
   getResolvedLlmGatewayConfig,
+  getSelectedLlmProvider,
   pipelineModeForLlmMode,
   pipelineModeNeedsGateway,
+  saveSelectedLlmProvider,
   saveLlmUserSettings,
   type LlmMode,
+  type LlmProvider,
   type LlmUserSettings,
 } from '@/config/llmSettings';
+import { isSaasMockEnabled } from '@/services/authClient';
 
 export const STUDIO_OPEN_SETTINGS_EVENT = 'studio:open-settings';
 export const STUDIO_SETTINGS_CHANGED_EVENT = 'studio:settings-changed';
@@ -66,11 +71,41 @@ function LlmModeButtons({
   );
 }
 
+function LlmProviderButtons({
+  value,
+  options,
+  onChange,
+}: {
+  value: LlmProvider;
+  options: Array<{ id: LlmProvider; label: string; configured: boolean }>;
+  onChange: (next: LlmProvider) => void;
+}) {
+  return (
+    <div className="studio-run-mode-toggle studio-run-provider-toggle" role="group" aria-label="API provider switch">
+      {options.map((option) => (
+        <button
+          key={option.id}
+          type="button"
+          className={`studio-run-mode-toggle__btn ${value === option.id ? 'studio-run-mode-toggle__btn--active' : ''}`}
+          disabled={!option.configured}
+          title={option.configured ? `Use ${option.label}` : `${option.label} is not configured in .env.local`}
+          onClick={() => onChange(option.id)}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function StudioSettings() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<LlmUserSettings>(() => getLlmSettingsFormDefaults());
   const [savedHint, setSavedHint] = useState<string | null>(null);
   const [quickLlmMode, setQuickLlmMode] = useState<LlmMode>(() => getLlmSettingsFormDefaults().mode);
+  const [selectedProvider, setSelectedProvider] = useState<LlmProvider>(() => getSelectedLlmProvider());
+  const localProviderOptions = useMemo(() => getAvailableLocalLlmProviders(), []);
+  const showProviderSwitch = isSaasMockEnabled() && localProviderOptions.some((option) => option.configured);
 
   const gatewayReady = useMemo(() => getResolvedLlmGatewayConfig() != null, [open, savedHint, quickLlmMode]);
   const gatewayRequired = pipelineModeNeedsGateway(pipelineModeForLlmMode(form.mode));
@@ -88,6 +123,7 @@ export function StudioSettings() {
     const onChanged = () => {
       const defaults = getLlmSettingsFormDefaults();
       setQuickLlmMode(defaults.mode);
+      setSelectedProvider(getSelectedLlmProvider());
       if (!open) return;
       setForm(defaults);
     };
@@ -122,6 +158,16 @@ export function StudioSettings() {
         ? `已切换到 Deep：后续任务优先使用深度模型，当前模型为 ${activeModel}。`
         : `已切换到 Fast：后续任务优先使用快速模式，当前模型为 ${activeModel}。`,
     );
+  }, []);
+
+  const onProviderChange = useCallback((nextProvider: LlmProvider) => {
+    saveSelectedLlmProvider(nextProvider);
+    const defaults = getLlmSettingsFormDefaults();
+    setSelectedProvider(nextProvider);
+    setQuickLlmMode(defaults.mode);
+    setForm(defaults);
+    setSavedHint(`API switched to ${nextProvider === 'deepseek' ? 'DeepSeek' : 'GPT'}.`);
+    window.dispatchEvent(new Event(STUDIO_SETTINGS_CHANGED_EVENT));
   }, []);
 
   const onSave = useCallback(() => {
@@ -165,6 +211,16 @@ export function StudioSettings() {
     <>
       <Panel position="top-right" className="studio-run-mode-panel-anchor">
         <div className="studio-run-mode-panel nodrag nopan">
+          {showProviderSwitch ? (
+            <div className="studio-settings-quick-group">
+              <span className="studio-settings-quick-label">API</span>
+              <LlmProviderButtons
+                value={selectedProvider}
+                options={localProviderOptions}
+                onChange={onProviderChange}
+              />
+            </div>
+          ) : null}
           <div className="studio-settings-quick-group">
             <span className="studio-settings-quick-label">模式</span>
             <LlmModeButtons value={quickLlmMode} onChange={onQuickLlmModeChange} />

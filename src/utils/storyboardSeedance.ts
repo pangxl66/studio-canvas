@@ -166,6 +166,8 @@ const GENERIC_ENTITY_STOPWORDS = new Set([
   '出口',
   '危险',
 ]);
+const MAX_SEEDANCE_TOTAL_DURATION_SEC = 15;
+const MIN_SEGMENT_DURATION_SEC = 0.3;
 
 function uniq(values: string[]): string[] {
   return [...new Set(values.map((item) => item.trim()).filter(Boolean))];
@@ -346,19 +348,37 @@ export function expandMergedMembers(shot: StoryboardShot): StoryboardShot[] {
   return members?.length ? members.map((member) => ({ ...member })) : [{ ...shot, mergedMembers: undefined }];
 }
 
-export function estimateShotDurationSec(shot: StoryboardShot): number {
+function clampDurationSec(value: number, max = MAX_SEEDANCE_TOTAL_DURATION_SEC): number {
+  if (!Number.isFinite(value)) return 1;
+  return Math.min(max, Math.max(1, Math.round(value)));
+}
+
+function estimateSingleShotDurationSec(shot: StoryboardShot): number {
   if (typeof shot.durationSec === 'number' && Number.isFinite(shot.durationSec)) {
-    return Math.max(1, Math.round(shot.durationSec));
+    return clampDurationSec(shot.durationSec);
   }
+  const text = `${shot.type} ${shot.movement} ${shot.description} ${shot.content} ${shot.action ?? ''} ${shot.sound ?? ''} ${shot.note ?? ''}`;
+  if (/插针|特写|细节|脚底|手部|眼部|刀锋|瞬间|一瞬|短促|甩拍/.test(text)) return 1.5;
+  if (PURSUIT_HINT_RE.test(text) || /冲|跃|闪|扑|刺|砍|追|跑|逼近|压上/.test(text)) return 2;
+  if (DIALOGUE_HINT_RE.test(text) || shot.content.trim()) return 3;
+  if (CLOSE_HINT_RE.test(text)) return 2;
+  return 2.5;
+}
+
+function estimateMergedShotDurationSec(members: StoryboardShot[]): number {
+  if (!members.length) return 1;
+  const rawTotal = members.reduce((sum, member) => sum + estimateSingleShotDurationSec(member), 0);
+  const densityFactor = members.length <= 1 ? 1 : Math.max(0.72, 0.94 - (members.length - 2) * 0.035);
+  const minTotal = Math.min(MAX_SEEDANCE_TOTAL_DURATION_SEC, members.length * MIN_SEGMENT_DURATION_SEC);
+  return clampDurationSec(Math.max(minTotal, rawTotal * densityFactor));
+}
+
+export function estimateShotDurationSec(shot: StoryboardShot): number {
   const members = expandMergedMembers(shot);
   if (members.length > 1) {
-    return members.reduce((sum, member) => sum + estimateShotDurationSec(member), 0);
+    return estimateMergedShotDurationSec(members);
   }
-  const text = `${shot.description} ${shot.content} ${shot.action ?? ''} ${shot.sound ?? ''} ${shot.note ?? ''}`;
-  if (PURSUIT_HINT_RE.test(text)) return 5;
-  if (DIALOGUE_HINT_RE.test(text) || shot.content.trim()) return 4;
-  if (CLOSE_HINT_RE.test(text)) return 3;
-  return 4;
+  return estimateSingleShotDurationSec(shot);
 }
 
 function mergeTextParts(parts: string[]): string {
@@ -398,7 +418,7 @@ export function mergeStoryboardShotSlice(shots: StoryboardShot[]): StoryboardSho
     content,
     sceneRef: first.sceneRef,
     action: action || undefined,
-    durationSec: slice.reduce((sum, shot) => sum + estimateShotDurationSec(shot), 0),
+    durationSec: estimateMergedShotDurationSec(slice),
     note: note || undefined,
     mergedMembers: members,
   };
@@ -887,34 +907,78 @@ function buildFocusPriority(
   };
 }
 
+function distributeSegmentDurations(members: StoryboardShot[], totalSec: number): number[] {
+  if (!members.length) return [];
+  const safeTotal = Math.min(MAX_SEEDANCE_TOTAL_DURATION_SEC, Math.max(1, totalSec));
+  const minSum = members.length * MIN_SEGMENT_DURATION_SEC;
+  if (minSum >= safeTotal) {
+    return members.map(() => safeTotal / members.length);
+  }
+  const weights = members.map((member) => Math.max(MIN_SEGMENT_DURATION_SEC, estimateSingleShotDurationSec(member)));
+  const weightTotal = weights.reduce((sum, weight) => sum + weight, 0) || members.length;
+  const rawDurations = weights.map((weight) => Math.max(MIN_SEGMENT_DURATION_SEC, (weight / weightTotal) * safeTotal));
+  const rawTotal = rawDurations.reduce((sum, duration) => sum + duration, 0) || safeTotal;
+  const normalized = rawDurations.map((duration) => (duration / rawTotal) * safeTotal);
+  return normalized.map((duration) => Math.round(duration * 10) / 10);
+}
+
+function allocateTimingSegments(shot: StoryboardShot): Array<{
+  member: StoryboardShot;
+  start: number;
+  end: number;
+  durationSec: number;
+}> {
+  const members = expandMergedMembers(shot);
+  if (members.length <= 1) return [];
+  const totalSec = estimateShotDurationSec(shot);
+  const durations = distributeSegmentDurations(members, totalSec);
+  let cursor = 0;
+  return members.map((member, index) => {
+    const start = Number(cursor.toFixed(1));
+    const end =
+      index === members.length - 1
+        ? totalSec
+        : Math.min(totalSec, Number((cursor + (durations[index] ?? 0)).toFixed(1)));
+    cursor = end;
+    return {
+      member,
+      start,
+      end,
+      durationSec: Math.max(MIN_SEGMENT_DURATION_SEC, Number((end - start).toFixed(1))),
+    };
+  });
+}
+
 function splitTimeSlices(shot: StoryboardShot, members: StoryboardShot[], coreEvent: string, relationAfter: string): TimeSlice[] {
   if (members.length > 1) {
-    const total = members.reduce((sum, member) => sum + estimateShotDurationSec(member), 0);
-    const first = members[0];
-    const last = members[members.length - 1];
-    const middle = members.slice(1, -1);
-    const firstDur = estimateShotDurationSec(first);
-    const lastDur = estimateShotDurationSec(last);
-    const middleDur = Math.max(1, total - firstDur - lastDur);
+    const timingSegments = allocateTimingSegments(shot);
+    const firstSegment = timingSegments[0];
+    const lastSegment = timingSegments[timingSegments.length - 1];
+    const middleSegments = timingSegments.slice(1, -1);
+    const first = firstSegment?.member ?? members[0];
+    const last = lastSegment?.member ?? members[members.length - 1];
+    const middleRange = middleSegments.length
+      ? formatTimingRange(firstSegment?.end ?? 1, lastSegment?.start ?? estimateShotDurationSec(shot))
+      : `${formatTimingSecond(firstSegment?.end ?? 1)}秒节点`;
     return [
       {
         label: '事件成立',
-        range: `0-${firstDur}s`,
+        range: formatTimingRange(firstSegment?.start ?? 0, firstSegment?.end ?? 1),
         text: summarizeText(first.description || coreEvent, 30),
       },
       {
         label: '信息压入',
-        range: `${firstDur}-${firstDur + middleDur}s`,
+        range: middleRange,
         text: summarizeText(
-          middle.length
-            ? middle.map((member) => firstClause(member.description)).join(' / ')
+          middleSegments.length
+            ? middleSegments.map((segment) => firstClause(segment.member.description)).join(' / ')
             : firstClause(shot.action?.trim() || shot.description),
           34,
         ),
       },
       {
         label: '结果钉住',
-        range: `${Math.max(0, total - lastDur)}-${total}s`,
+        range: formatTimingRange(lastSegment?.start ?? 0, lastSegment?.end ?? estimateShotDurationSec(shot)),
         text: summarizeText(firstClause(last.description) || relationAfter, 30),
       },
     ];
@@ -938,14 +1002,9 @@ function splitTimeSlices(shot: StoryboardShot, members: StoryboardShot[], coreEv
 }
 
 function buildTimingSegments(shot: StoryboardShot): TimingSegment[] {
-  const members = expandMergedMembers(shot);
-  if (members.length <= 1) return [];
-  let cursor = 0;
-  return members.map((member) => {
-    const durationSec = estimateShotDurationSec(member);
-    const start = cursor;
-    const end = cursor + durationSec;
-    cursor = end;
+  const allocatedSegments = allocateTimingSegments(shot);
+  if (!allocatedSegments.length) return [];
+  return allocatedSegments.map(({ member, start, end, durationSec }) => {
     const text =
       summarizeText(firstClause(member.description), 22) ||
       summarizeText(firstClause(member.action?.trim() || ''), 22) ||
@@ -1299,7 +1358,7 @@ export function buildCopyToJimengPrompt(shot: StoryboardShot, pack: PromptShotPa
 export function buildStoryboardPromptText(shot: StoryboardShot, pack: PromptShotPack): string {
   const profile = buildSemanticProfile(shot, pack);
   const body = [
-    `镜头身份：镜号#${profile.shotId} | ${profile.durationSec}秒 | 类型:${profile.shotType} | 方案:${profile.shotPlan} | 节奏:${profile.shotTempo}`,
+    `镜头身份：镜号#${profile.shotId} | ${profile.durationSec}秒`,
     `挂载：${profile.mountTokens.map((item) => `|@=${item}|`).join(' ')}`,
     `镜头命题：${profile.proposition}`,
     `场面机制：主事件=${profile.mainEvent}；戏剧功能=${profile.dramaticFunction}；关系变化=before ${profile.relationBefore} -> transition ${profile.relationTransition} -> after ${profile.relationAfter}`,
@@ -1375,7 +1434,7 @@ export function buildSeedanceCard(shot: StoryboardShot, pack: PromptShotPack): s
   void soundSyncText;
   void soundSyncCompact;
 
-  const header = `【分镜${profile.shotId}|${profile.durationSec}秒|类型:${profile.shotType}|方案:${profile.shotPlan}|档位:LITE|节奏:${profile.shotTempo}】`;
+  const header = `【分镜${profile.shotId} | ${profile.durationSec}秒】`;
   const sections: CardSection[] = [
     {
       heading: '挂载',

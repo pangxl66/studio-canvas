@@ -408,8 +408,6 @@ function buildRuleSeedanceCard(
           .map((member, idx) => `镜头${idx + 1}：${member.description}${member.content ? `；对白：${member.content}` : ''}`)
           .join('\n')
       : `起始状态：${shot.description}\n变化节点：${shot.action?.trim() || shot.content.trim() || '推进关键动作'}\n结果状态：落在最关键的情绪或信息结果上`;
-  const rhythm =
-    members.length > 1 ? '蓄势/转势/爆发' : (shot.note?.includes('收束') ? '收束' : '蓄势/转势');
   const durationSec = typeof shot.durationSec === 'number' ? shot.durationSec : estimateShotDurationSec(shot);
   const startText = shot.description;
   const changeText = shot.action?.trim() || shot.content.trim() || '关系在动作推进中被改写';
@@ -427,7 +425,7 @@ function buildRuleSeedanceCard(
     : '无背景音乐，以环境底噪、动作声、衣料摩擦声或空间回响维持势能。';
   const mustShowLines = mustShow.map((item) => `- ${item}`).join('\n');
   return [
-    `【分镜${String(shot.id).padStart(2, '0')} | ${durationSec}秒 | 类型:${members.length > 1 ? 'B' : 'A'} | 方案:空间压迫与动作接力 | 档位:LTE | 节奏:${rhythm}】`,
+    `【分镜${String(shot.id).padStart(2, '0')} | ${durationSec}秒】`,
     '',
     '挂载:',
     `@角色=${pack.character_asset_ids?.join(', ') || '文字生成版，无素材'} | @场景=${pack.scene_asset_ids?.join(', ') || '文字生成版，无素材'} | @道具=${mustShow.slice(2).join('、')}`,
