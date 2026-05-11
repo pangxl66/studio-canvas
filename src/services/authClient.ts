@@ -113,10 +113,10 @@ export async function getAuthSnapshot(): Promise<AuthSnapshot> {
   };
 }
 
-export async function sendLoginLink(email: string): Promise<void> {
+export async function sendLoginCode(email: string): Promise<void> {
+  const normalizedEmail = email.trim();
+
   if (isSaasMockEnabled()) {
-    localStorage.setItem(MOCK_AUTH_KEY, email.trim());
-    window.dispatchEvent(new Event(STUDIO_AUTH_MOCK_EVENT));
     return;
   }
 
@@ -126,7 +126,7 @@ export async function sendLoginLink(email: string): Promise<void> {
   }
 
   const { error } = await client.auth.signInWithOtp({
-    email,
+    email: normalizedEmail,
     options: {
       emailRedirectTo: window.location.origin,
     },
@@ -135,6 +135,37 @@ export async function sendLoginLink(email: string): Promise<void> {
   if (error) {
     throw error;
   }
+}
+
+export async function verifyLoginCode(email: string, token: string): Promise<Session | null> {
+  const normalizedEmail = email.trim();
+  const normalizedToken = token.trim();
+
+  if (isSaasMockEnabled()) {
+    if (!normalizedEmail || !normalizedToken) {
+      throw new Error('请输入邮箱和验证码。');
+    }
+    localStorage.setItem(MOCK_AUTH_KEY, normalizedEmail);
+    window.dispatchEvent(new Event(STUDIO_AUTH_MOCK_EVENT));
+    return getMockAuthSnapshot().session;
+  }
+
+  const client = getSupabaseClient();
+  if (!client) {
+    throw new Error('Supabase 尚未配置，无法登录。');
+  }
+
+  const { data, error } = await client.auth.verifyOtp({
+    email: normalizedEmail,
+    token: normalizedToken,
+    type: 'email',
+  });
+
+  if (error) {
+    throw error;
+  }
+
+  return data.session;
 }
 
 export async function signOut(): Promise<void> {

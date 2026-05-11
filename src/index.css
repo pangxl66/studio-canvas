@@ -6365,6 +6365,12 @@ body,
   gap: 12px;
 }
 
+.auth-card__form--verify {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(148, 163, 184, 0.16);
+}
+
 .auth-card__label {
   color: #99f6e4;
   font-size: 13px;
@@ -6386,6 +6392,11 @@ body,
 .auth-card__input:focus {
   border-color: rgba(125, 211, 252, 0.72);
   box-shadow: 0 0 0 4px rgba(14, 165, 233, 0.16);
+}
+
+.auth-card__input--code {
+  letter-spacing: 0.18em;
+  text-align: center;
 }
 
 .auth-card__button {
@@ -6410,6 +6421,27 @@ body,
 .auth-card__button:disabled {
   cursor: progress;
   opacity: 0.72;
+}
+
+.auth-card__secondary-button {
+  min-height: 46px;
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.54);
+  color: #cbd5e1;
+  font-size: 14px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.auth-card__secondary-button:hover:not(:disabled) {
+  border-color: rgba(45, 212, 191, 0.5);
+  color: #f8fafc;
+}
+
+.auth-card__secondary-button:disabled {
+  cursor: progress;
+  opacity: 0.62;
 }
 
 .auth-card__message {
