@@ -16,8 +16,32 @@ interface AuthGateProps {
   children: ReactNode;
 }
 
+const SEND_CODE_COOLDOWN_SECONDS = 60;
+
 function userLabel(user: User | null): string {
   return user?.email ?? '已登录用户';
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error ?? '');
+}
+
+function isEmailRateLimitError(error: unknown): boolean {
+  return getErrorMessage(error).toLowerCase().includes('email rate limit');
+}
+
+function getLoginErrorMessage(error: unknown, fallback: string): string {
+  const rawMessage = getErrorMessage(error);
+  const normalizedMessage = rawMessage.toLowerCase();
+
+  if (normalizedMessage.includes('email rate limit')) {
+    return '邮箱验证码发送太频繁了，请稍等 1 分钟后再试。正式上线建议配置 Supabase 自定义 SMTP，避免内置邮件额度限制。';
+  }
+  if (normalizedMessage.includes('otp') || normalizedMessage.includes('token')) {
+    return '验证码无效或已过期，请重新发送验证码。';
+  }
+
+  return rawMessage || fallback;
 }
 
 export function AuthGate({ children }: AuthGateProps) {
@@ -26,8 +50,21 @@ export function AuthGate({ children }: AuthGateProps) {
   const [email, setEmail] = useState('');
   const [verificationCode, setVerificationCode] = useState('');
   const [codeSentTo, setCodeSentTo] = useState('');
+  const [sendCooldown, setSendCooldown] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [message, setMessage] = useState('');
+
+  useEffect(() => {
+    if (sendCooldown <= 0) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setSendCooldown((value) => Math.max(0, value - 1));
+    }, 1000);
+
+    return () => window.clearTimeout(timer);
+  }, [sendCooldown]);
 
   useEffect(() => {
     if (!isSaasAuthEnabled()) {
@@ -78,6 +115,11 @@ export function AuthGate({ children }: AuthGateProps) {
 
   const handleSendCode = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (sendCooldown > 0) {
+      setMessage(`验证码刚刚发送过，请 ${sendCooldown} 秒后再重发。`);
+      return;
+    }
+
     const nextEmail = email.trim();
     if (!nextEmail) {
       setMessage('请输入邮箱。');
@@ -90,9 +132,19 @@ export function AuthGate({ children }: AuthGateProps) {
       await sendLoginCode(nextEmail);
       setCodeSentTo(nextEmail);
       setVerificationCode('');
-      setMessage(isSaasMockEnabled() ? '测试登录已启用，输入任意验证码即可进入。' : '验证码已发送，请到邮箱里查看。');
+      if (!isSaasMockEnabled()) {
+        setSendCooldown(SEND_CODE_COOLDOWN_SECONDS);
+      }
+      setMessage(
+        isSaasMockEnabled()
+          ? '测试登录已启用，输入任意验证码即可进入。'
+          : `验证码已发送，请到邮箱里查看。${SEND_CODE_COOLDOWN_SECONDS} 秒后可以重新发送。`,
+      );
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : '发送验证码失败。');
+      if (isEmailRateLimitError(error)) {
+        setSendCooldown(SEND_CODE_COOLDOWN_SECONDS);
+      }
+      setMessage(getLoginErrorMessage(error, '发送验证码失败。'));
     } finally {
       setIsSubmitting(false);
     }
@@ -123,7 +175,7 @@ export function AuthGate({ children }: AuthGateProps) {
       }
       setMessage('');
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : '验证码验证失败。');
+      setMessage(getLoginErrorMessage(error, '验证码验证失败。'));
     } finally {
       setIsSubmitting(false);
     }
@@ -179,8 +231,14 @@ export function AuthGate({ children }: AuthGateProps) {
               type="email"
               value={email}
             />
-            <button className="auth-card__button" disabled={isSubmitting} type="submit">
-              {isSubmitting ? '正在发送...' : codeSentTo ? '重新发送验证码' : '发送验证码'}
+            <button className="auth-card__button" disabled={isSubmitting || sendCooldown > 0} type="submit">
+              {isSubmitting
+                ? '正在发送...'
+                : sendCooldown > 0
+                  ? `${sendCooldown} 秒后可重发`
+                  : codeSentTo
+                    ? '重新发送验证码'
+                    : '发送验证码'}
             </button>
           </form>
 
