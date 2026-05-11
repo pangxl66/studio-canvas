@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const https = require('node:https');
 const http = require('node:http');
 const path = require('node:path');
+const zlib = require('node:zlib');
 const { createClient } = require('@supabase/supabase-js');
 
 const rootDir = path.resolve(__dirname, '..');
@@ -1153,6 +1154,22 @@ function serveStatic(req, res) {
   if (filePath !== path.join(distDir, 'index.html')) {
     res.setHeader('cache-control', 'public, max-age=31536000, immutable');
   }
+  const stat = fs.statSync(filePath);
+  const acceptsGzip = /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''));
+  const shouldGzip = acceptsGzip && /\.(?:html|js|css|json|svg)$/i.test(filePath);
+  if (req.method === 'HEAD') {
+    if (!shouldGzip) res.setHeader('content-length', stat.size);
+    if (shouldGzip) res.setHeader('content-encoding', 'gzip');
+    res.end();
+    return;
+  }
+  if (shouldGzip) {
+    res.setHeader('content-encoding', 'gzip');
+    res.setHeader('vary', 'Accept-Encoding');
+    fs.createReadStream(filePath).pipe(zlib.createGzip()).pipe(res);
+    return;
+  }
+  res.setHeader('content-length', stat.size);
   fs.createReadStream(filePath).pipe(res);
 }
 
