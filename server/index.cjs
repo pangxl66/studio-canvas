@@ -1158,15 +1158,23 @@ function serveStatic(req, res) {
   const acceptsGzip = /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''));
   const shouldGzip = acceptsGzip && /\.(?:html|js|css|json|svg)$/i.test(filePath);
   if (req.method === 'HEAD') {
-    if (!shouldGzip) res.setHeader('content-length', stat.size);
-    if (shouldGzip) res.setHeader('content-encoding', 'gzip');
+    if (shouldGzip) {
+      const gzipped = zlib.gzipSync(fs.readFileSync(filePath));
+      res.setHeader('content-encoding', 'gzip');
+      res.setHeader('vary', 'Accept-Encoding');
+      res.setHeader('content-length', gzipped.length);
+    } else {
+      res.setHeader('content-length', stat.size);
+    }
     res.end();
     return;
   }
   if (shouldGzip) {
+    const gzipped = zlib.gzipSync(fs.readFileSync(filePath));
     res.setHeader('content-encoding', 'gzip');
     res.setHeader('vary', 'Accept-Encoding');
-    fs.createReadStream(filePath).pipe(zlib.createGzip()).pipe(res);
+    res.setHeader('content-length', gzipped.length);
+    res.end(gzipped);
     return;
   }
   res.setHeader('content-length', stat.size);
