@@ -217,6 +217,36 @@ async function getAuthedContext(req) {
   }
 }
 
+function normalizeEmail(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function configuredAdminEmails() {
+  return env('ADMIN_EMAILS')
+    .split(/[\s,;]+/)
+    .map(normalizeEmail)
+    .filter(Boolean);
+}
+
+function isAdminUser(user) {
+  const email = normalizeEmail(user?.email);
+  return Boolean(email && configuredAdminEmails().includes(email));
+}
+
+async function getAdminContext(req) {
+  const auth = await getAuthedContext(req);
+  if (auth.error) return auth;
+
+  const admins = configuredAdminEmails();
+  if (!admins.length) {
+    return { error: { status: 403, message: '管理员功能未启用：请先在服务器 .env 配置 ADMIN_EMAILS。' } };
+  }
+  if (!isAdminUser(auth.user)) {
+    return { error: { status: 403, message: '当前账号不是管理员，无法管理额度。' } };
+  }
+  return auth;
+}
+
 async function ensureUserRows(serviceClient, user) {
   await Promise.all([
     serviceClient.from('profiles').upsert(
@@ -586,6 +616,204 @@ async function handleCreditStatus(req, res) {
   }
 }
 
+function normalizeUsageEvent(row) {
+  return {
+    createdAt: row.created_at || null,
+    errorMessage: row.error_message || null,
+    estimatedTokens: Number(row.estimated_tokens || 0),
+    feature: row.feature || '',
+    inputChars: Number(row.input_chars || 0),
+    model: row.model || '',
+    outputChars: Number(row.output_chars || 0),
+    quotaCost: Number(row.quota_cost || 0),
+    status: row.status || '',
+  };
+}
+
+async function readAdminCreditDetails(serviceClient, email) {
+  const normalizedEmail = normalizeEmail(email);
+  const { data: profile, error: profileError } = await serviceClient
+    .from('profiles')
+    .select('id,email,display_name,plan')
+    .ilike('email', normalizedEmail)
+    .maybeSingle();
+
+  if (profileError) {
+    throw new Error(profileError.message || '读取用户资料失败。');
+  }
+  if (!profile?.id) {
+    return { notFound: true };
+  }
+
+  const { data: wallet, error: walletError } = await serviceClient
+    .from('credit_wallets')
+    .select('monthly_quota,remaining_quota,reset_at,updated_at')
+    .eq('user_id', profile.id)
+    .maybeSingle();
+
+  if (walletError) {
+    throw new Error(walletError.message || '读取用户额度失败。');
+  }
+
+  let nextWallet = wallet;
+  if (!nextWallet) {
+    const { error: createWalletError } = await serviceClient.from('credit_wallets').upsert(
+      {
+        monthly_quota: DEFAULT_MONTHLY_QUOTA,
+        remaining_quota: DEFAULT_MONTHLY_QUOTA,
+        user_id: profile.id,
+      },
+      { onConflict: 'user_id', ignoreDuplicates: true },
+    );
+    if (createWalletError) {
+      throw new Error(createWalletError.message || '创建用户额度失败。');
+    }
+    const { data: createdWallet, error: readCreatedError } = await serviceClient
+      .from('credit_wallets')
+      .select('monthly_quota,remaining_quota,reset_at,updated_at')
+      .eq('user_id', profile.id)
+      .maybeSingle();
+    if (readCreatedError || !createdWallet) {
+      throw new Error(readCreatedError?.message || '读取新额度失败。');
+    }
+    nextWallet = createdWallet;
+  }
+
+  const { data: usageEvents, error: usageError } = await serviceClient
+    .from('usage_events')
+    .select('feature,model,input_chars,output_chars,estimated_tokens,quota_cost,status,error_message,created_at')
+    .eq('user_id', profile.id)
+    .order('created_at', { ascending: false })
+    .limit(20);
+
+  if (usageError) {
+    throw new Error(usageError.message || '读取调用记录失败。');
+  }
+
+  return {
+    usageEvents: (usageEvents || []).map(normalizeUsageEvent),
+    user: {
+      displayName: profile.display_name || null,
+      email: profile.email || normalizedEmail,
+      plan: profile.plan || 'free',
+      userId: profile.id,
+    },
+    wallet: {
+      monthlyQuota: Number(nextWallet.monthly_quota || 0),
+      remainingQuota: Number(nextWallet.remaining_quota || 0),
+      resetAt: nextWallet.reset_at || null,
+      updatedAt: nextWallet.updated_at || null,
+    },
+  };
+}
+
+function readCreditAmount(value) {
+  const amount = Number.parseInt(String(value ?? ''), 10);
+  if (!Number.isFinite(amount) || amount < 0 || amount > 9999) {
+    return null;
+  }
+  return amount;
+}
+
+async function handleAdminCredits(req, res, url) {
+  if (req.method !== 'GET' && req.method !== 'POST') {
+    sendJson(res, 405, { error: { message: 'Method not allowed.' } });
+    return;
+  }
+
+  const auth = await getAdminContext(req);
+  if (auth.error) {
+    sendJson(res, auth.error.status, { error: { message: auth.error.message } });
+    return;
+  }
+
+  try {
+    if (req.method === 'GET') {
+      const email = normalizeEmail(url.searchParams.get('email'));
+      if (!email) {
+        sendJson(res, 400, { error: { message: '请输入要查询的用户邮箱。' } });
+        return;
+      }
+      const details = await readAdminCreditDetails(auth.serviceClient, email);
+      if (details.notFound) {
+        sendJson(res, 404, { error: { message: '未找到该邮箱用户。请确认对方已经登录过一次。' } });
+        return;
+      }
+      sendJson(res, 200, details);
+      return;
+    }
+
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      sendJson(res, 400, { error: { message: '请求体不是合法 JSON。' } });
+      return;
+    }
+
+    const email = normalizeEmail(body.email);
+    const action = String(body.action || '').trim();
+    if (!email) {
+      sendJson(res, 400, { error: { message: '请输入要操作的用户邮箱。' } });
+      return;
+    }
+
+    const details = await readAdminCreditDetails(auth.serviceClient, email);
+    if (details.notFound) {
+      sendJson(res, 404, { error: { message: '未找到该邮箱用户。请确认对方已经登录过一次。' } });
+      return;
+    }
+
+    const currentMonthly = Number(details.wallet.monthlyQuota || 0);
+    const currentRemaining = Number(details.wallet.remainingQuota || 0);
+    let nextMonthly = currentMonthly;
+    let nextRemaining = currentRemaining;
+
+    if (action === 'reset') {
+      nextMonthly = DEFAULT_MONTHLY_QUOTA;
+      nextRemaining = DEFAULT_MONTHLY_QUOTA;
+    } else if (action === 'add') {
+      const amount = readCreditAmount(body.amount);
+      if (!amount) {
+        sendJson(res, 400, { error: { message: '增加次数必须是 1-9999 的整数。' } });
+        return;
+      }
+      nextMonthly = currentMonthly + amount;
+      nextRemaining = currentRemaining + amount;
+    } else if (action === 'set') {
+      const amount = readCreditAmount(body.amount);
+      if (amount === null) {
+        sendJson(res, 400, { error: { message: '设置次数必须是 0-9999 的整数。' } });
+        return;
+      }
+      nextMonthly = amount;
+      nextRemaining = amount;
+    } else {
+      sendJson(res, 400, { error: { message: '未知操作，请使用 add、reset 或 set。' } });
+      return;
+    }
+
+    const { error: updateError } = await auth.serviceClient
+      .from('credit_wallets')
+      .update({
+        monthly_quota: nextMonthly,
+        remaining_quota: nextRemaining,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('user_id', details.user.userId);
+
+    if (updateError) {
+      sendJson(res, 500, { error: { message: updateError.message || '更新额度失败。' } });
+      return;
+    }
+
+    const nextDetails = await readAdminCreditDetails(auth.serviceClient, email);
+    sendJson(res, 200, nextDetails);
+  } catch (error) {
+    sendJson(res, 500, { error: { message: sanitizeError(error) || '管理员额度操作失败。' } });
+  }
+}
+
 async function handleProjects(req, res) {
   const auth = await getAuthedContext(req);
   if (auth.error) {
@@ -936,6 +1164,10 @@ async function route(req, res) {
     }
     if (url.pathname === '/api/credits/status') {
       await handleCreditStatus(req, res);
+      return;
+    }
+    if (url.pathname === '/api/admin/credits') {
+      await handleAdminCredits(req, res, url);
       return;
     }
     if (url.pathname === '/api/projects') {

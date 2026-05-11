@@ -72,10 +72,12 @@ VITE_SAAS_MOCK=false
 VITE_SUPABASE_URL=你的 Supabase Project URL
 VITE_SUPABASE_ANON_KEY=你的 Supabase anon public key
 VITE_LLM_PROXY_URL=/api/llm/chat
+VITE_ADMIN_TOOLS=false
 
 SUPABASE_URL=你的 Supabase Project URL
 SUPABASE_ANON_KEY=你的 Supabase anon public key
 SUPABASE_SERVICE_ROLE_KEY=你的 Supabase service_role key
+ADMIN_EMAILS=你的管理员邮箱
 
 LLM_BASE_URL=https://api.openai.com/v1
 LLM_API_KEY=你的模型 API Key

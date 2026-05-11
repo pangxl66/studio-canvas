@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { AdminCreditPanel } from '@/components/AdminCreditPanel';
 import {
   fetchCreditStatus,
   STUDIO_CREDIT_REFRESH_EVENT,
@@ -14,15 +15,22 @@ function planLabel(plan: string): string {
 
 function quotaText(status: CreditStatus | null): string {
   if (!status) {
-    return '额度读取中';
+    return '读取中';
   }
   return `${status.remainingQuota}/${status.monthlyQuota}`;
+}
+
+function isAdminToolsEnabled(): boolean {
+  const raw = (import.meta.env.VITE_ADMIN_TOOLS ?? '').trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes';
 }
 
 export function CreditStatusPill() {
   const [status, setStatus] = useState<CreditStatus | null>(null);
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(true);
+  const [isAdminPanelOpen, setIsAdminPanelOpen] = useState(false);
+  const adminToolsEnabled = isAdminToolsEnabled();
 
   const refresh = useCallback(async () => {
     setIsLoading(true);
@@ -61,10 +69,27 @@ export function CreditStatusPill() {
   }, [refresh]);
 
   return (
-    <div className="credit-status-pill nodrag nopan" title={error || '当前账号剩余额度'}>
-      <span className="credit-status-pill__label">{status ? planLabel(status.plan) : 'Quota'}</span>
-      <strong>{isLoading && !status ? '...' : quotaText(status)}</strong>
-      {error ? <span className="credit-status-pill__error">!</span> : null}
-    </div>
+    <>
+      <div className="credit-status-pill nodrag nopan" title={error || '当前账号剩余额度'}>
+        <span className="credit-status-pill__label">{status ? planLabel(status.plan) : 'Quota'}</span>
+        <strong>{isLoading && !status ? '...' : quotaText(status)}</strong>
+        {adminToolsEnabled ? (
+          <button
+            className="credit-status-pill__admin"
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              setIsAdminPanelOpen(true);
+            }}
+          >
+            管理
+          </button>
+        ) : null}
+        {error ? <span className="credit-status-pill__error">!</span> : null}
+      </div>
+      {isAdminPanelOpen ? (
+        <AdminCreditPanel onChanged={() => void refresh()} onClose={() => setIsAdminPanelOpen(false)} />
+      ) : null}
+    </>
   );
 }
