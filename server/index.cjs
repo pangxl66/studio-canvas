@@ -604,6 +604,7 @@ async function handleCreditStatus(req, res) {
     sendJson(res, 200, {
       displayName: profile?.display_name || null,
       email: profile?.email || auth.user.email || null,
+      isAdmin: isAdminUser(auth.user),
       monthlyQuota: Number(wallet.monthly_quota || 0),
       plan: profile?.plan || 'free',
       remainingQuota: Number(wallet.remaining_quota || 0),

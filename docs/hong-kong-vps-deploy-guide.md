@@ -76,6 +76,7 @@ LLM_DEEP_MODEL=gpt-5.5
 不要填写 `VITE_LLM_API_KEY` 或 `VITE_LLM_BASE_URL`，模型密钥只能放在服务端。
 
 这里的 `VITE_SUPABASE_URL=/supabase` 表示浏览器先请求香港服务器，再由香港服务器转发到 Supabase，避免国内浏览器直接访问 `*.supabase.co` 时出现 `Failed to fetch`。
+`ADMIN_EMAILS` 用来控制右上角额度管理入口；多个管理员邮箱可以用英文逗号分隔。
 
 ## 6. 启动网站
 

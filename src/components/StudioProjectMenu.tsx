@@ -1,7 +1,6 @@
 import { Panel } from '@xyflow/react';
 import { saveAs } from 'file-saver';
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
-import { STUDIO_OPEN_SETTINGS_EVENT } from '@/components/StudioSettings';
 import { isSaasAuthEnabled } from '@/services/authClient';
 import {
   getCloudProject,
@@ -388,11 +387,6 @@ export function StudioProjectMenu() {
     closeMenus();
   }, [closeMenus, createNewProject, currentProjectName, refreshProjectData, rememberRecent]);
 
-  const openSettings = useCallback(() => {
-    window.dispatchEvent(new Event(STUDIO_OPEN_SETTINGS_EVENT));
-    closeMenus();
-  }, [closeMenus]);
-
   const currentSummaryText = useMemo(
     () => `${nodeCount} 个节点 · ${edgeCount} 条连线`,
     [edgeCount, nodeCount],
@@ -669,9 +663,6 @@ export function StudioProjectMenu() {
                 </div>
               ) : null}
             </div>
-            <button type="button" className="studio-project-menu__item" onClick={openSettings}>
-              <span>模型设置</span>
-            </button>
           </div>
         ) : null}
       </div>

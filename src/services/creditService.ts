@@ -5,6 +5,7 @@ export const STUDIO_CREDIT_REFRESH_EVENT = 'studio-credit-refresh';
 export type CreditStatus = {
   displayName: string | null;
   email: string | null;
+  isAdmin?: boolean;
   monthlyQuota: number;
   plan: string;
   remainingQuota: number;

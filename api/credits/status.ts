@@ -42,6 +42,19 @@ function getBearerToken(req: IncomingMessage): string {
   return match?.[1]?.trim() ?? '';
 }
 
+function normalizeEmail(value: unknown): string {
+  return String(value ?? '').trim().toLowerCase();
+}
+
+function configuredAdminEmails(): string[] {
+  return env('ADMIN_EMAILS').split(/[\s,;]+/).map(normalizeEmail).filter(Boolean);
+}
+
+function isAdminUser(user: AuthedUser): boolean {
+  const email = normalizeEmail(user.email);
+  return Boolean(email && configuredAdminEmails().includes(email));
+}
+
 function getAuthClients(token: string): { authClient: AnySupabaseClient; serviceClient: AnySupabaseClient } {
   const supabaseUrl = env('SUPABASE_URL');
   const supabaseAnonKey = env('SUPABASE_ANON_KEY');
@@ -122,6 +135,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     json(res, 200, {
       displayName: profile?.display_name ?? null,
       email: profile?.email ?? user.email ?? null,
+      isAdmin: isAdminUser(user),
       monthlyQuota: Number(wallet.monthly_quota ?? 0),
       plan: profile?.plan ?? 'free',
       remainingQuota: Number(wallet.remaining_quota ?? 0),

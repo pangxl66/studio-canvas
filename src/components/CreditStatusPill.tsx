@@ -30,7 +30,7 @@ export function CreditStatusPill() {
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [isAdminPanelOpen, setIsAdminPanelOpen] = useState(false);
-  const adminToolsEnabled = isAdminToolsEnabled();
+  const adminToolsEnabled = isAdminToolsEnabled() || Boolean(status?.isAdmin);
 
   const refresh = useCallback(async () => {
     setIsLoading(true);
