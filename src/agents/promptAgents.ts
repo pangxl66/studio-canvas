@@ -1,4 +1,5 @@
 import {
+  PROMPT_CARD_LENGTH_BUDGET_RULE,
   PROMPT_CARD_HEADER_RULE,
   PROMPT_CARD_SECTION_HEADINGS,
   PROMPT_COPY_CHAR_LIMIT_RULE,
@@ -49,7 +50,7 @@ const REQUIRED_NEGATIVE_GROUPS = [
   },
 ] as const;
 const MAX_PROMPT_CHARS = 2500;
-const MAX_SEEDANCE_CARD_CHARS = 1800;
+const MAX_SEEDANCE_CARD_CHARS = 2500;
 const SEEDANCE_PROMPT_SECTION_INDEX = 9;
 const SEEDANCE_OPTIONAL_SECTION_INDICES = new Set<number>();
 const MOUNT_TOKEN_RE = /\|@=([^|\n]+)\|/g;
@@ -803,6 +804,8 @@ function outputNeedsCompressionRepair(output: PromptOutput): boolean {
   return (output.shotPrompts ?? []).some((pack) => {
     const prompt = String(pack.prompt ?? '').trim();
     if (prompt && Array.from(prompt).length > MAX_PROMPT_CHARS) return true;
+    const seedanceCard = String(pack.seedanceCard ?? '').trim();
+    if (seedanceCard && Array.from(seedanceCard).length > MAX_SEEDANCE_CARD_CHARS) return true;
     return false;
   });
 }
@@ -827,7 +830,25 @@ function sanitizePromptOutputEllipsis(output: PromptOutput): PromptOutput {
   };
 }
 
+function validatePromptPackContent(pack: PromptShotPack): void {
+  const prompt = String(pack.prompt ?? '');
+  if (Array.from(prompt).length > MAX_PROMPT_CHARS) {
+    throw new Error(`Prompt 输出超出字数限制：镜头 ${pack.shot_id} 的提示词超过 2500 字。`);
+  }
+  assertPromptBodyV2(pack.shot_id, prompt);
+  const seedanceCard = String(pack.seedanceCard ?? '').trim();
+  if (!seedanceCard) {
+    throw new Error(`Prompt 模型返回：镜头 ${pack.shot_id} 缺少 seedanceCard。`);
+  }
+  if (Array.from(seedanceCard).length > MAX_SEEDANCE_CARD_CHARS) {
+    throw new Error(`Prompt 输出超出字数限制：镜头 ${pack.shot_id} 的 seedanceCard 超过 2500 字。`);
+  }
+}
+
 function validatePromptCoverage(output: PromptOutput, sourceStoryboard: StoryboardOutput | null): void {
+  for (const pack of output.shotPrompts ?? []) {
+    validatePromptPackContent(pack);
+  }
   if (!sourceStoryboard?.shots?.length) return;
   const expected = sourceStoryboard.shots.map((shot) => String(shot.id));
   const actual = output.shotPrompts?.map((shot) => shot.shot_id) ?? [];
@@ -841,15 +862,6 @@ function validatePromptCoverage(output: PromptOutput, sourceStoryboard: Storyboa
   for (const id of expectedSet) {
     if (!actualSet.has(id)) {
       throw new Error('Prompt 输出镜头编号不完整：未覆盖镜头表中的全部镜头。');
-    }
-  }
-  for (const pack of output.shotPrompts ?? []) {
-    if (Array.from(pack.prompt).length > MAX_PROMPT_CHARS) {
-      throw new Error(`Prompt 输出超出字数限制：镜头 ${pack.shot_id} 的提示词超过 2500 字。`);
-    }
-    assertPromptBodyV2(pack.shot_id, pack.prompt);
-    if (!String(pack.seedanceCard ?? '').trim()) {
-      throw new Error(`Prompt 模型返回：镜头 ${pack.shot_id} 缺少 seedanceCard。`);
     }
   }
 }
@@ -874,6 +886,7 @@ function buildPromptUserMessage(
     PROMPT_CARD_HEADER_RULE,
     PROMPT_MOUNT_TOKEN_RULE,
     PROMPT_COPY_CHAR_LIMIT_RULE,
+    PROMPT_CARD_LENGTH_BUDGET_RULE,
     PROMPT_LOCAL_COMPRESSION_RULE,
     PROMPT_TIMING_SYSTEM_RULE,
     'negative 与每个 shot 的 negative_prompt 必须显式包含：background music / bgm、subtitle / subtitles / text overlay、ui / hud / interface overlay。',
@@ -889,7 +902,8 @@ function buildPromptUserMessage(
     '“【目标物Must-Show】”“【参照/覆盖/稳帧】”“【声画同步】”“【微表情】”“【文戏附加】”“【钉子4行】”不得缺失。',
     '',
     '【定稿依据】若 Input 含 JSON 字段 `shots`，其中每条镜头的 `description`、`content` 均视为最终定稿，生成时必须逐镜落实。',
-    '【同场合并】若某条镜头含 `mergedMembers`，对应项中的 `prompt` 与 `seedanceCard` 都要明确写出镜头1 / 镜头2 / 镜头3 的连续推进。',
+    '【同场合并】若某条镜头含 `mergedMembers`，对应项中的 `prompt` 与 `seedanceCard` 都要按实际子镜头数量连续推进。',
+    '【覆盖纠偏】mergedMembers 的镜头1 / 镜头2 / 镜头3 只是编号示例，不是固定三镜；必须按实际子镜头数量完整编号到最后一个，14 个子镜头就写到镜头14。',
     sourceShotHints,
     '',
     '【资产占位 ID】请为各 shot 写入 `character_asset_ids` / `scene_asset_ids`；没有真实 ID 时可留空数组，但键不可缺失。',
@@ -923,6 +937,7 @@ function buildCoverageRepairUserMessage(
     '3. 每个 shot 都必须带完整 seedanceCard，不得缺少固定栏位。',
     `4. “挂载”必须符合这条规则：${PROMPT_MOUNT_TOKEN_RULE}`,
     `5. “提示词(复制到即梦)”必须符合这条规则：${PROMPT_COPY_CHAR_LIMIT_RULE}`,
+    `5a. seedanceCard 总篇幅必须符合这条规则：${PROMPT_CARD_LENGTH_BUDGET_RULE}`,
     '6. prompt 本体必须是压缩后的执行文本，不得逐条复述栏目标题。',
     '7. 空镜/无人物镜头不得出现眼神、微表情、角色朝向等人物描述。',
     '8. 不得返回解释文本、markdown 或半截 JSON。',
@@ -955,6 +970,7 @@ function buildCompressionRepairUserMessage(
     '',
     '【本次修订目标】',
     PROMPT_COPY_CHAR_LIMIT_RULE,
+    PROMPT_CARD_LENGTH_BUDGET_RULE,
     PROMPT_LOCAL_COMPRESSION_RULE,
     '禁止简单截断，禁止在结尾补 `...` 或 `…`，禁止删除固定标题，禁止把同一句原文重复灌入多个模块。',
     '如果某些信息必须压缩，优先压缩非核心模块，而不是删掉镜头命题、主事件、关系变化、空间切割、焦点顺序、结果位和 Must-Show。',
@@ -995,6 +1011,7 @@ function buildPromptUserMessageV2(
     PROMPT_CARD_HEADER_RULE,
     PROMPT_MOUNT_TOKEN_RULE,
     PROMPT_COPY_CHAR_LIMIT_RULE,
+    PROMPT_CARD_LENGTH_BUDGET_RULE,
     PROMPT_LOCAL_COMPRESSION_RULE,
     PROMPT_TIMING_SYSTEM_RULE,
     'prompt body must not end with `...` or a unicode ellipsis; it must close on a complete result beat.',
@@ -1009,7 +1026,8 @@ function buildPromptUserMessageV2(
     '“钉子4行”必须严格四行。',
     '',
     '【定稿依据】若 Input 含 JSON 字段 `shots`，其中每条镜头的 `description`、`content` 均视为最终定稿，生成时必须逐镜落实。',
-    '【同场合并】若某条镜头含 `mergedMembers`，对应项中的 `prompt` 与 `seedanceCard` 都要明确写出镜头1 / 镜头2 / 镜头3 的连续推进。',
+    '【同场合并】若某条镜头含 `mergedMembers`，对应项中的 `prompt` 与 `seedanceCard` 都要按实际子镜头数量连续推进。',
+    '【覆盖纠偏】mergedMembers 的镜头1 / 镜头2 / 镜头3 只是编号示例，不是固定三镜；必须按实际子镜头数量完整编号到最后一个，14 个子镜头就写到镜头14。',
     sourceShotHints,
     '',
     '【资产占位 ID】请为各 shot 写入 `character_asset_ids` / `scene_asset_ids`；没有真实 ID 时可留空数组，但键不可缺失。',
@@ -1041,6 +1059,7 @@ function buildCoverageRepairUserMessageV2(
     '3. 每个 shot 都必须带完整 seedanceCard，不得缺少固定栏位。',
     `4. “挂载”必须符合这条规则：${PROMPT_MOUNT_TOKEN_RULE}`,
     `5. “提示词”必须符合这条规则：${PROMPT_COPY_CHAR_LIMIT_RULE}`,
+    `5a. seedanceCard 总篇幅必须符合这条规则：${PROMPT_CARD_LENGTH_BUDGET_RULE}`,
     '6. “构图锚点”必须写出前景 / 中景 / 后景 / 焦点落点。',
     '7. “灯光布置与基调”必须写出光源、明暗关系、层次分配、灯光任务。',
     '8. “连续性约束”必须使用必须 / 不能 / 先 / 再 / 最后 / 始终保持这类硬约束语气。',
@@ -1077,6 +1096,7 @@ function buildCompressionRepairUserMessageV2(
     '',
     '【本次修订目标】',
     PROMPT_COPY_CHAR_LIMIT_RULE,
+    PROMPT_CARD_LENGTH_BUDGET_RULE,
     PROMPT_LOCAL_COMPRESSION_RULE,
     '禁止简单截断，禁止在结尾补 `...` 或 `…`，禁止删除固定标题，禁止把同一句原文重复灌入多个模块。',
     '如果某些信息必须压缩，优先压缩非核心模块，而不是删掉构图前中后景、灯光任务、连续性约束、提示词和钉子4行。',
@@ -1115,6 +1135,7 @@ function buildPromptUserMessageV3(
     PROMPT_CARD_HEADER_RULE,
     PROMPT_MOUNT_TOKEN_RULE,
     PROMPT_COPY_CHAR_LIMIT_RULE,
+    PROMPT_CARD_LENGTH_BUDGET_RULE,
     PROMPT_LOCAL_COMPRESSION_RULE,
     PROMPT_TIMING_SYSTEM_RULE,
     'prompt body must not end with `...` or a unicode ellipsis; it must close on a complete result beat.',
@@ -1132,9 +1153,10 @@ function buildPromptUserMessageV3(
     '“钉子4行”必须严格四行。',
     '',
     '【定稿依据】若 Input 含 JSON 字段 `shots`，其中每条镜头的 `description`、`content`、`type`、`movement`、`sceneRef`、`action`、`durationSec`、`note` 均视为最终定稿，生成时必须逐镜落实。',
-    '【同场合并】若某条镜头含 `mergedMembers`，对应项中的 `prompt` 与 `seedanceCard` 都要明确写出镜头1 / 镜头2 / 镜头3 的连续推进。',
+    '【同场合并】若某条镜头含 `mergedMembers`，对应项中的 `prompt` 与 `seedanceCard` 都要按实际子镜头数量连续推进。',
     '【时长判断】先判断这一条镜头真正需要几秒，再写内容；不要先写满 15 秒再去塞动作。',
     '【时长分配】如果镜头很短，3 秒或 5 秒都可以；如果是连续动作组，再在总时长内合理分配给每个子镜头，但只在“摄影机动态参数”里展开写秒数。',
+    '【覆盖纠偏】mergedMembers 的镜头1 / 镜头2 / 镜头3 只是编号示例，不是固定三镜；必须按实际子镜头数量完整编号到最后一个，14 个子镜头就写到镜头14。',
     sourceShotHints,
     modeHints,
     '',
@@ -1217,6 +1239,7 @@ function buildCoverageRepairUserMessageV3(
     '3. 每个 shot 都必须带完整 seedanceCard，不得缺少固定栏位。',
     `4. “挂载”必须符合这条规则：${PROMPT_MOUNT_TOKEN_RULE}`,
     `5. “提示词”必须符合这条规则：${PROMPT_COPY_CHAR_LIMIT_RULE}`,
+    `5a. seedanceCard 总篇幅必须符合这条规则：${PROMPT_CARD_LENGTH_BUDGET_RULE}`,
     `6. 时长规划必须符合这条规则：${PROMPT_TIMING_SYSTEM_RULE}`,
     '7. negative 与每个 shot 的 negative_prompt 都必须显式包含：background music / bgm、subtitle / subtitles / text overlay、ui / hud / interface overlay。',
     '8. “构图锚点”必须写出前景 / 中景 / 后景 / 焦点落点。',
@@ -1257,6 +1280,7 @@ function buildCompressionRepairUserMessageV3(
     '',
     '【本次修订目标】',
     PROMPT_COPY_CHAR_LIMIT_RULE,
+    PROMPT_CARD_LENGTH_BUDGET_RULE,
     PROMPT_LOCAL_COMPRESSION_RULE,
     PROMPT_TIMING_SYSTEM_RULE,
     '禁止简单截断，禁止在结尾补 `...` 或 `…`，禁止删除固定标题，禁止把同一句原文重复灌入多个模块。',
