@@ -103,6 +103,92 @@ function sanitizeError(raw: unknown): string {
     .slice(0, 500);
 }
 
+function parseJsonObject(raw: unknown): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(String(raw ?? '')) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function extractUpstreamErrorText(raw: unknown): string {
+  const parsed = parseJsonObject(raw);
+  const rawError = parsed?.error;
+  const error = rawError && typeof rawError === 'object' && !Array.isArray(rawError) ? rawError as Record<string, unknown> : null;
+  const parts = [
+    stringValue(error?.message),
+    stringValue(error?.code),
+    stringValue(error?.type),
+    stringValue(parsed?.message),
+    stringValue(parsed?.code),
+    stringValue(parsed?.type),
+    String(raw ?? ''),
+  ].filter((part) => part.trim());
+  return sanitizeError(parts.join(' '));
+}
+
+function classifyUpstreamError(status: number, raw: unknown): string {
+  const text = extractUpstreamErrorText(raw);
+  const lower = text.toLowerCase();
+
+  if (/concurrency|too many concurrent|并发/.test(lower)) {
+    return '模型服务并发已达上限：上游当前太忙，请稍后再试。';
+  }
+  if (/rate.?limit|too many requests|request limit|请求过于频繁|限流/.test(lower)) {
+    return '模型服务限流：请求过于频繁，请稍后再试。';
+  }
+  if (
+    /insufficient[_ -]?quota|quota[_ -]?exceeded|tokenstatusexhausted|credit|billing|balance|prepaid|余额|额度不足|账户.*不足/.test(lower) ||
+    status === 402
+  ) {
+    return '模型服务额度不足：上游模型账户余额或额度不足，请更换可用 Key 或充值后重试。';
+  }
+  if (
+    /invalid.?api.?key|api key.*invalid|incorrect api key|invalid authorization|authentication|unauthorized|鉴权|认证失败/.test(lower) ||
+    status === 401
+  ) {
+    return '模型服务鉴权失败：API Key 无效或未正确配置，请检查服务器 .env。';
+  }
+  if (
+    /permission|forbidden|access denied|not have access|unsupported_country_region_territory|无权|权限|地区|国家/.test(lower) ||
+    status === 403
+  ) {
+    return '模型服务权限不足：当前 Key 无权访问该模型，或当前服务器地区不被上游支持。';
+  }
+  if (/model.*not found|unknown model|model.*does not exist|invalid model|模型.*不存在|模型.*无效/.test(lower)) {
+    return '模型名称不可用：当前配置的模型不存在或账号未开通，请检查 LLM_MODEL。';
+  }
+  if (/context.?length|maximum context|max tokens|too many tokens|token.*exceed|context_length_exceeded|上下文|输入过长/.test(lower)) {
+    return '模型输入过长：当前内容超出模型上下文限制，请减少输入或拆分镜头后再试。';
+  }
+  if (status >= 500) {
+    return '模型服务暂时不可用：上游服务异常，请稍后再试。';
+  }
+  if (status === 400) {
+    return `模型请求参数无效：请检查模型名、Base URL 或请求格式。${text ? ` 上游返回：${text.slice(0, 220)}` : ''}`;
+  }
+  return `模型服务返回异常：HTTP ${status}${text ? `，${text.slice(0, 220)}` : ''}`;
+}
+
+function classifyLlmRequestException(error: unknown): string {
+  if (error instanceof Error && error.name === 'AbortError') {
+    return '模型请求超时：上游响应时间过长，请稍后重试。';
+  }
+  const text = sanitizeError(error);
+  if (/LLM upstream env is missing/i.test(text)) {
+    return '模型服务未配置：服务器缺少 LLM_BASE_URL 或 LLM_API_KEY。';
+  }
+  if (/fetch failed|network|econn|enotfound|etimedout|connection|socket/i.test(text)) {
+    return '无法访问模型服务：请检查 LLM_BASE_URL、服务器网络或上游服务状态。';
+  }
+  return text || '模型请求失败。';
+}
+
 async function readBody(req: IncomingMessage): Promise<ChatRequestBody> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
@@ -406,6 +492,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     const rawText = await upstreamResponse.text();
     const outputChars = extractOutputChars(rawText);
     const isOk = upstreamResponse.ok;
+    const failureMessage = isOk ? undefined : classifyUpstreamError(upstreamResponse.status, rawText);
 
     await writeUsage(serviceClient, {
       user_id: userId,
@@ -417,7 +504,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       estimated_tokens: estimateTokens(inputChars, isOk ? outputChars : 0),
       quota_cost: isOk ? quotaCost : 0,
       status: isOk ? 'success' : 'failed',
-      error_message: isOk ? undefined : sanitizeError(rawText),
+      error_message: failureMessage,
     });
 
     if (!isOk) {
@@ -431,6 +518,13 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         }),
       );
       await refundQuota(serviceClient, userId, quotaCost);
+      json(res, upstreamResponse.status, {
+        error: {
+          message: failureMessage,
+          upstreamStatus: upstreamResponse.status,
+        },
+      });
+      return;
     }
 
     res.statusCode = upstreamResponse.status;
@@ -442,10 +536,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     res.end(rawText);
   } catch (error) {
     await refundQuota(serviceClient, userId, quotaCost);
-    const errorMessage =
-      error instanceof Error && error.name === 'AbortError'
-        ? '模型请求超时，请稍后重试。'
-        : sanitizeError(error) || '模型请求失败。';
+    const errorMessage = classifyLlmRequestException(error);
     await writeUsage(serviceClient, {
       user_id: userId,
       project_id: body.projectId ?? null,

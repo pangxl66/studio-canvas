@@ -168,23 +168,37 @@ function mapApiErrorMessage(status: number, bodySnippet: string): string | null 
   const text = sanitizeGatewayText(bodySnippet);
   if (!text) return null;
 
+  if (/^(模型服务|模型请求|无法访问|站内)/.test(text)) {
+    return text;
+  }
+  if (/当前剩余|本次需要|站内次数|站内额度/.test(text) || (status === 402 && /额度不足/.test(text))) {
+    return text;
+  }
   if (/Concurrency limit exceeded|too many concurrent|concurrency limit|并发.*上限/i.test(text)) {
-    return '模型服务并发已达上限，请稍后重试。';
+    return '模型服务并发已达上限：上游当前太忙，请稍后再试。';
   }
-  if (/rate limit|too many requests|请求过于频繁/i.test(text)) {
-    return '模型服务限流，请稍后重试。';
+  if (/rate limit|too many requests|request limit|请求过于频繁|限流/i.test(text)) {
+    return '模型服务限流：请求过于频繁，请稍后再试。';
   }
-  if (/TokenStatusExhausted|quota|insufficient_quota|credit|额度已用尽/i.test(text)) {
-    return '模型服务额度不足，请更换可用 Key 或检查上游账户余额。';
+  if (
+    /TokenStatusExhausted|insufficient[_ -]?quota|quota[_ -]?exceeded|quota|credit|billing|balance|prepaid|余额|额度不足|账户.*不足/i.test(
+      text,
+    ) ||
+    status === 402
+  ) {
+    return '模型服务额度不足：上游模型账户余额或额度不足，请更换可用 Key 或充值后重试。';
   }
-  if (/invalid.?api.?key|api key.*invalid|key.*invalid|unauthorized/i.test(text)) {
-    return '模型服务鉴权失败，请检查 API Key 是否正确。';
+  if (/invalid.?api.?key|api key.*invalid|key.*invalid|incorrect api key|authentication|unauthorized|鉴权|认证失败/i.test(text)) {
+    return '模型服务鉴权失败：API Key 无效或未正确配置，请检查服务器 .env。';
   }
-  if (/permission|forbidden|no permission|access denied/i.test(text) || status === 403) {
-    return '模型服务权限不足，当前账号或 Key 无权访问该模型。';
+  if (/permission|forbidden|no permission|access denied|not have access|unsupported_country_region_territory|无权|权限|地区|国家/i.test(text) || status === 403) {
+    return '模型服务权限不足：当前 Key 无权访问该模型，或当前服务器地区不被上游支持。';
   }
-  if (/model.*not found|unknown model|does not exist/i.test(text)) {
-    return '模型名称无效，请检查当前模型配置。';
+  if (/model.*not found|unknown model|does not exist|invalid model|模型.*不存在|模型.*无效/i.test(text)) {
+    return '模型名称不可用：当前配置的模型不存在或账号未开通，请检查模型设置。';
+  }
+  if (/context.?length|maximum context|max tokens|too many tokens|token.*exceed|context_length_exceeded|上下文|输入过长/i.test(text)) {
+    return '模型输入过长：当前内容超出模型上下文限制，请减少输入或拆分镜头后再试。';
   }
   return null;
 }
@@ -299,17 +313,20 @@ function mapHttpToFriendly(status: number, bodySnippet: string): string {
   if (mapped) return mapped;
   const snippet = sanitizeGatewayText(bodySnippet);
 
+  if (status === 402) {
+    return '模型服务额度不足：上游模型账户余额或额度不足，请更换可用 Key 或充值后重试。';
+  }
   if (status === 401 || status === 403) {
-    return `模型请求鉴权失败，请检查 Key、代理或上游权限配置。${snippet ? ` 服务端返回：${snippet.slice(0, 240)}` : ''}`;
+    return `模型请求鉴权失败：请检查 Key、代理或上游权限配置。${snippet ? ` 服务端返回：${snippet.slice(0, 240)}` : ''}`;
   }
   if (status === 429) {
-    return '模型服务限流或额度不足，请稍后重试。';
+    return '模型服务限流：请求过于频繁，请稍后再试。';
   }
   if (status >= 500) {
-    return '模型服务暂时不可用，请稍后重试。';
+    return '模型服务暂时不可用：上游服务异常，请稍后再试。';
   }
   if (status === 400) {
-    return `模型请求参数无效，请检查模型名、代理地址或请求格式。${snippet ? ` 服务端返回：${snippet.slice(0, 240)}` : ''}`;
+    return `模型请求参数无效：请检查模型名、Base URL 或请求格式。${snippet ? ` 服务端返回：${snippet.slice(0, 240)}` : ''}`;
   }
   return `HTTP ${status}${snippet ? ` - ${snippet.slice(0, 200)}` : ''}`;
 }
