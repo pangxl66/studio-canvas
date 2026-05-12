@@ -166,6 +166,7 @@ export function saveSelectedLlmProvider(provider: LlmProvider): void {
 }
 
 export function getAvailableLocalLlmProviders(): Array<{ id: LlmProvider; label: string; configured: boolean }> {
+  const hostedProxyReady = Boolean(forcedBrowserProxyUrl());
   const providers: Array<{ id: LlmProvider; label: string }> = [
     { id: 'gpt', label: 'GPT' },
     { id: 'deepseek', label: 'DeepSeek' },
@@ -173,7 +174,7 @@ export function getAvailableLocalLlmProviders(): Array<{ id: LlmProvider; label:
 
   return providers.map((provider) => ({
     ...provider,
-    configured: hasUsableGatewaySettings(getProviderEnvSettings(provider.id)),
+    configured: hostedProxyReady || hasUsableGatewaySettings(getProviderEnvSettings(provider.id)),
   }));
 }
 
@@ -253,6 +254,7 @@ export function getResolvedLlmGatewayConfig(): ModelGatewayConfig | null {
   const saved = loadLlmUserSettings();
   const forcedSaasProxyUrl = forcedBrowserProxyUrl();
   const preferLocalEnv = shouldPreferLocalEnvGateway();
+  const selectedProvider = getSelectedLlmProvider();
   const providerEnvSettings = getActiveProviderEnvSettings();
   const proxyUrl = (forcedSaasProxyUrl || (preferLocalEnv ? providerEnvSettings.proxyUrl : saved?.proxyUrl || envProxyUrl())).trim();
   const baseUrl = (preferLocalEnv ? providerEnvSettings.baseUrl : saved?.baseUrl ?? envBaseUrl()).trim();
@@ -275,6 +277,7 @@ export function getResolvedLlmGatewayConfig(): ModelGatewayConfig | null {
     baseUrl: forcedSaasProxyUrl ? undefined : baseUrl || undefined,
     apiKey: forcedSaasProxyUrl ? undefined : apiKey || undefined,
     model: mode === 'deep' ? deepModel : fastModel,
+    provider: selectedProvider,
     timeoutMs,
   };
 }

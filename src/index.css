@@ -603,11 +603,12 @@ body,
 
 /* 左下角：执行模式 + 设置 */
 .studio-run-mode-panel-anchor {
-  margin: 52px 12px 0 0;
+  margin: 14px 260px 0 0;
   pointer-events: auto;
 }
 
 .studio-run-mode-panel {
+  max-width: min(520px, calc(100vw - 28px));
   padding: 6px;
   border-radius: 14px;
   border: 1px solid var(--border);
@@ -618,6 +619,16 @@ body,
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+@media (max-width: 860px) {
+  .studio-run-mode-panel-anchor {
+    margin: 100px 12px 0 0;
+  }
+
+  .studio-run-mode-panel {
+    justify-content: flex-end;
+  }
 }
 
 .studio-run-mode-settings-btn {

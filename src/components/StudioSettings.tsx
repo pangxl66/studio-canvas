@@ -18,7 +18,6 @@ import {
   type LlmProvider,
   type LlmUserSettings,
 } from '@/config/llmSettings';
-import { isSaasMockEnabled } from '@/services/authClient';
 
 export const STUDIO_OPEN_SETTINGS_EVENT = 'studio:open-settings';
 export const STUDIO_SETTINGS_CHANGED_EVENT = 'studio:settings-changed';
@@ -88,7 +87,7 @@ function LlmProviderButtons({
           type="button"
           className={`studio-run-mode-toggle__btn ${value === option.id ? 'studio-run-mode-toggle__btn--active' : ''}`}
           disabled={!option.configured}
-          title={option.configured ? `Use ${option.label}` : `${option.label} is not configured in .env.local`}
+          title={option.configured ? `Use ${option.label}` : `${option.label} is not configured`}
           onClick={() => onChange(option.id)}
         >
           {option.label}
@@ -105,9 +104,9 @@ export function StudioSettings() {
   const [quickLlmMode, setQuickLlmMode] = useState<LlmMode>(() => getLlmSettingsFormDefaults().mode);
   const [selectedProvider, setSelectedProvider] = useState<LlmProvider>(() => getSelectedLlmProvider());
   const localProviderOptions = useMemo(() => getAvailableLocalLlmProviders(), []);
-  const showProviderSwitch = isSaasMockEnabled() && localProviderOptions.some((option) => option.configured);
+  const showProviderSwitch = localProviderOptions.some((option) => option.configured);
 
-  const gatewayReady = useMemo(() => getResolvedLlmGatewayConfig() != null, [open, savedHint, quickLlmMode]);
+  const gatewayReady = useMemo(() => getResolvedLlmGatewayConfig() != null, [open, savedHint, quickLlmMode, selectedProvider]);
   const gatewayRequired = pipelineModeNeedsGateway(pipelineModeForLlmMode(form.mode));
 
   const openModal = useCallback(() => {

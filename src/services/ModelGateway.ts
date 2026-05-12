@@ -7,6 +7,7 @@ export type ModelGatewayConfig = {
   baseUrl?: string;
   apiKey?: string;
   model?: string;
+  provider?: 'gpt' | 'deepseek';
   timeoutMs?: number;
 };
 
@@ -347,6 +348,9 @@ async function requestLLMOnce(
       { role: 'user', content: params.userPrompt },
     ],
   };
+  if (config.provider) {
+    body.provider = config.provider;
+  }
   if (typeof params.maxOutputTokens === 'number' && Number.isFinite(params.maxOutputTokens) && params.maxOutputTokens > 0) {
     body.max_tokens = Math.floor(params.maxOutputTokens);
   }
@@ -548,6 +552,9 @@ async function requestLLMStreamOnce(
       { role: 'user', content: params.userPrompt },
     ],
   };
+  if (config.provider) {
+    body.provider = config.provider;
+  }
   if (typeof params.maxOutputTokens === 'number' && Number.isFinite(params.maxOutputTokens) && params.maxOutputTokens > 0) {
     body.max_tokens = Math.floor(params.maxOutputTokens);
   }

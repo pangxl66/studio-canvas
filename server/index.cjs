@@ -38,6 +38,40 @@ function env(name) {
   return String(process.env[name] || '').trim();
 }
 
+function normalizeProvider(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'deepseek') return 'deepseek';
+  if (raw === 'gpt') return 'gpt';
+  return '';
+}
+
+function providerEnvPrefix(provider) {
+  if (provider === 'deepseek') return 'DEEPSEEK';
+  if (provider === 'gpt') return 'GPT';
+  return '';
+}
+
+function envForProvider(provider, name) {
+  const prefix = providerEnvPrefix(provider);
+  if (prefix) {
+    const providerValue = env(`${prefix}_${name}`);
+    if (providerValue) return providerValue;
+  }
+  return env(name);
+}
+
+function defaultModelForProvider(provider) {
+  return provider === 'deepseek' ? 'deepseek-chat' : DEFAULT_MODEL;
+}
+
+function hasProviderLlmApiKey(provider) {
+  return Boolean(envForProvider(provider, 'LLM_API_KEY'));
+}
+
+function hasProviderLlmUpstream(provider) {
+  return Boolean(envForProvider(provider, 'LLM_PROXY_URL') || envForProvider(provider, 'LLM_BASE_URL'));
+}
+
 function sendJson(res, status, payload) {
   res.statusCode = status;
   res.setHeader('content-type', 'application/json; charset=utf-8');
@@ -269,7 +303,7 @@ async function ensureUserRows(serviceClient, user) {
 }
 
 function hasLlmUpstream() {
-  return Boolean(env('LLM_PROXY_URL') || env('LLM_BASE_URL'));
+  return hasProviderLlmUpstream('') || hasProviderLlmUpstream('gpt') || hasProviderLlmUpstream('deepseek');
 }
 
 function buildProxyHeaders(req, body) {
@@ -378,10 +412,10 @@ function normalizeBaseUrl(baseUrl) {
   return normalized;
 }
 
-function getUpstreamUrl() {
-  const proxyUrl = env('LLM_PROXY_URL');
+function getUpstreamUrl(provider = '') {
+  const proxyUrl = envForProvider(provider, 'LLM_PROXY_URL');
   if (proxyUrl) return proxyUrl;
-  const baseUrl = env('LLM_BASE_URL');
+  const baseUrl = envForProvider(provider, 'LLM_BASE_URL');
   if (!baseUrl) return '';
   return `${normalizeBaseUrl(baseUrl)}/chat/completions`;
 }
@@ -413,19 +447,19 @@ function quotaCostForFeature(feature, body) {
   return 1;
 }
 
-function configuredModelForFeature(feature) {
+function configuredModelForFeature(feature, provider = '') {
   const normalizedFeature = String(feature || '').trim();
   if (normalizedFeature === 'text-polish') {
-    return env('LLM_FAST_MODEL') || env('LLM_MODEL');
+    return envForProvider(provider, 'LLM_FAST_MODEL') || envForProvider(provider, 'LLM_MODEL');
   }
   if (normalizedFeature === 'prompt-review') {
-    return env('LLM_DEEP_MODEL') || env('LLM_MODEL');
+    return envForProvider(provider, 'LLM_DEEP_MODEL') || envForProvider(provider, 'LLM_MODEL');
   }
-  return env('LLM_MODEL');
+  return envForProvider(provider, 'LLM_MODEL');
 }
 
-function normalizeModel(model, feature) {
-  return configuredModelForFeature(feature) || String(model || '').trim() || DEFAULT_MODEL;
+function normalizeModel(model, feature, provider = '') {
+  return configuredModelForFeature(feature, provider) || String(model || '').trim() || defaultModelForProvider(provider);
 }
 
 function validateChatBody(body) {
@@ -442,11 +476,11 @@ function validateChatBody(body) {
   return null;
 }
 
-function buildUpstreamBody(body) {
+function buildUpstreamBody(body, provider = '') {
   const maxTokens = body.max_tokens || body.maxOutputTokens;
   const upstreamBody = {
     messages: body.messages,
-    model: normalizeModel(body.model, body.feature),
+    model: normalizeModel(body.model, body.feature, provider),
     stream: body.stream === true,
     temperature: typeof body.temperature === 'number' ? body.temperature : 0.35,
   };
@@ -504,9 +538,9 @@ async function writeUsage(serviceClient, usage) {
   await serviceClient.from('usage_events').insert(usage);
 }
 
-async function callUpstream(body) {
-  const upstreamUrl = getUpstreamUrl();
-  const apiKey = env('LLM_API_KEY');
+async function callUpstream(body, provider = '') {
+  const upstreamUrl = getUpstreamUrl(provider);
+  const apiKey = envForProvider(provider, 'LLM_API_KEY');
   if (!upstreamUrl || !apiKey) {
     throw new Error('LLM upstream env is missing.');
   }
@@ -520,7 +554,7 @@ async function callUpstream(body) {
         authorization: `Bearer ${apiKey}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify(buildUpstreamBody(body)),
+      body: JSON.stringify(buildUpstreamBody(body, provider)),
       signal: controller.signal,
     });
   } finally {
@@ -562,7 +596,7 @@ async function handleHealth(req, res) {
     return;
   }
   const checks = {
-    llmApiKey: Boolean(env('LLM_API_KEY')),
+    llmApiKey: hasProviderLlmApiKey('') || hasProviderLlmApiKey('gpt') || hasProviderLlmApiKey('deepseek'),
     llmUpstream: hasLlmUpstream(),
     supabaseAnonKey: Boolean(env('SUPABASE_ANON_KEY')),
     supabaseServiceRoleKey: Boolean(env('SUPABASE_SERVICE_ROLE_KEY')),
@@ -1003,14 +1037,16 @@ async function handleLlmChat(req, res) {
   }
 
   const feature = String(body.feature || '').trim() || 'llm-chat';
+  const provider = normalizeProvider(body.provider);
   const cost = quotaCostForFeature(feature, body);
   const inChars = inputChars(body);
-  const model = normalizeModel(body.model, feature);
+  const model = normalizeModel(body.model, feature, provider);
 
   console.log(
     'LLM chat request received',
     JSON.stringify({
       feature,
+      provider: provider || null,
       model,
       requestedModel: String(body.model || '').trim() || null,
       inputChars: inChars,
@@ -1030,6 +1066,7 @@ async function handleLlmChat(req, res) {
       'LLM quota reservation failed',
       JSON.stringify({
         feature,
+        provider: provider || null,
         model,
         cost,
         remaining: reservation.remaining,
@@ -1053,7 +1090,7 @@ async function handleLlmChat(req, res) {
   }
 
   try {
-    const upstreamResponse = await callUpstream(body);
+    const upstreamResponse = await callUpstream(body, provider);
     const rawText = await upstreamResponse.text();
     const outChars = outputChars(rawText);
     const isOk = upstreamResponse.ok;
@@ -1076,6 +1113,7 @@ async function handleLlmChat(req, res) {
         JSON.stringify({
           status: upstreamResponse.status,
           model,
+          provider: provider || null,
           feature,
           body: sanitizeError(rawText),
         }),
