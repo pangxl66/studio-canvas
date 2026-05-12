@@ -96,7 +96,10 @@ type NodeGalleryItem = {
   disabled?: boolean;
 };
 
-const PANE_GALLERY_ITEMS: NodeGalleryItem[] = [
+const HIDE_TEMPORARY_NODE_ENTRIES = true;
+const HIDDEN_PANE_GALLERY_KINDS = new Set<CreateNodeKind>(['writing', 'image_node', 'storyboard_file_node']);
+
+const PANE_GALLERY_ITEMS_BASE: NodeGalleryItem[] = [
   {
     id: 'text_node',
     kind: 'text_node',
@@ -170,6 +173,10 @@ const PANE_GALLERY_ITEMS: NodeGalleryItem[] = [
     icon: '表',
   },
 ];
+
+const PANE_GALLERY_ITEMS: NodeGalleryItem[] = PANE_GALLERY_ITEMS_BASE.filter(
+  (item) => !(HIDE_TEMPORARY_NODE_ENTRIES && item.kind != null && HIDDEN_PANE_GALLERY_KINDS.has(item.kind)),
+);
 
 /** 涓?Miro / Tapnow 涓€鑷达細骞崇Щ涓庢斁缃妭鐐瑰潎鏃犺竟鐣岄檺鍒?*/
 const INFINITE_EXTENT: CoordinateExtent = [
@@ -866,26 +873,28 @@ export function StudioCanvas() {
               >
                 创建文本卡片
               </button>
-              <button
-                type="button"
-                className="node-picker__btn"
-                onClick={() => {
-                  const p = nodePicker;
-                  const nid = completeConnectionMenuPick({
-                    fromNodeId: p.fromNodeId,
-                    fromHandleId: p.fromHandleId,
-                    fromHandleType: p.fromHandleType,
-                    pick: 'writing',
-                    flowPosition: { x: p.flowX, y: p.flowY },
-                  });
-                  if (nid) {
-                    setNodePicker(null);
-                    focusNode(nid, { openDetail: true });
-                  }
-                }}
-              >
-                创建编剧部
-              </button>
+              {!HIDE_TEMPORARY_NODE_ENTRIES ? (
+                <button
+                  type="button"
+                  className="node-picker__btn"
+                  onClick={() => {
+                    const p = nodePicker;
+                    const nid = completeConnectionMenuPick({
+                      fromNodeId: p.fromNodeId,
+                      fromHandleId: p.fromHandleId,
+                      fromHandleType: p.fromHandleType,
+                      pick: 'writing',
+                      flowPosition: { x: p.flowX, y: p.flowY },
+                    });
+                    if (nid) {
+                      setNodePicker(null);
+                      focusNode(nid, { openDetail: true });
+                    }
+                  }}
+                >
+                  创建编剧部
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="node-picker__btn"
@@ -996,8 +1005,6 @@ export function StudioCanvas() {
           <button type="button" className="node-picker__btn" onClick={() => createNodeFromPaneMenu('text_node')}>
             创建文本卡片
           </button>
-          <button type="button" className="node-picker__btn" onClick={() => createNodeFromPaneMenu('writing')}>
-            创建编剧部          </button>
           <button type="button" className="node-picker__btn" onClick={() => createNodeFromPaneMenu('storyboard')}>
             创建分镜部          </button>
           <button type="button" className="node-picker__btn" onClick={() => createNodeFromPaneMenu('prompt')}>

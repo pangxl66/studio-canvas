@@ -40,40 +40,43 @@ export type WorkflowAgentSession = {
   updatedAt: number;
 };
 
+const QUICK_PROMPT_HINT =
+  /快速模式|quick|直接生成提示词|直出提示词|单镜头|单条提示词|只做提示词|不做分镜|跳过分镜|prompt/i;
+const STORYBOARD_HINT = /分镜|镜头表|多镜头|组合镜头|连续动作|镜头组|先拆镜头|先做镜头/i;
+const SCRIPT_HINT = /这是剧本|剧本文本|分场剧本|场次表|台词|对白|场景|镜头|分镜|内景|外景/i;
+const NOVEL_HINT = /这是小说|小说正文|长篇小说|小说片段|原文|正文|章节/i;
+
 export function detectWorkflowAgentMode(text: string): WorkflowAgentMode {
-  const raw = text.toLowerCase();
-  if (
-    raw.includes('快速模式') ||
-    raw.includes('quick') ||
-    raw.includes('直接生成提示词') ||
-    raw.includes('直出提示词')
-  ) {
-    return 'quick';
-  }
+  const raw = text.trim();
+  if (!raw) return 'standard';
+  if (QUICK_PROMPT_HINT.test(raw)) return 'quick';
+
+  // Short scene ideas are usually better handled as a single prompt first.
+  if (raw.length <= 80 && !STORYBOARD_HINT.test(raw)) return 'quick';
+
   return 'standard';
 }
 
 export function detectWorkflowAgentInputType(text: string): WorkflowAgentInputType {
   const raw = text.trim();
   if (!raw) return 'unknown';
-  if (/这是小说|小说正文|长篇小说|小说片段/.test(raw)) return 'novel';
-  if (/这是剧本|剧本文本|分场剧本|场次表/.test(raw)) return 'script';
+  if (SCRIPT_HINT.test(raw)) return 'script';
+  if (NOVEL_HINT.test(raw)) return 'novel';
 
-  const looksLikeScript =
-    /(^|\n)\s*[△▲◆]|(屋内|屋外|内景|外景|日|夜|晨|晚)/.test(raw) ||
-    /镜头|分镜|场景|场次|对白|台词/.test(raw);
-  if (looksLikeScript) return 'script';
+  const looksLikeSceneText = /[\u4e00-\u9fff]{2,}/.test(raw) || /[，。！？；、,.!?;]/.test(raw) || raw.length >= 6;
+  if (looksLikeSceneText) return 'script';
 
-  if (raw.length >= 120) return 'novel';
   return 'unknown';
 }
 
 export function resolveWorkflowRoute(
-  inputType: WorkflowAgentInputType,
+  _inputType: WorkflowAgentInputType,
   mode: WorkflowAgentMode,
 ): WorkflowAgentRoute {
-  if (inputType === 'novel') return 'novel_to_script_to_storyboard_to_prompt';
   if (mode === 'quick') return 'script_to_prompt_quick';
+
+  // The current product hides the writing department from normal use, so the
+  // global agent now routes long text directly into storyboard/shot-list first.
   return 'script_to_storyboard_to_prompt';
 }
 
@@ -84,12 +87,12 @@ export function detectWorkflowAgentIntent(
   const raw = text.trim();
   if (!raw) return 'chat';
 
-  if (/重新开始|重来|新任务|reset/i.test(raw)) return 'restart';
+  if (/重新开始|重来|新任务|清空流程|reset/i.test(raw)) return 'restart';
   if (/完成|结束|收尾|done/i.test(raw)) return 'complete';
-  if (/确认分镜|确认当前分镜|就按这个分镜|继续生成提示词|转提示词/.test(raw)) {
+  if (/确认分镜|确认当前分镜|就按这个分镜|进入提示词|继续生成提示词|转提示词|生成\s*prompt/i.test(raw)) {
     return 'confirm_storyboard';
   }
-  if (/调整分镜|修改分镜|改一下分镜|增加一个分镜|删掉一个分镜|补一个分镜/.test(raw)) {
+  if (/调整分镜|修改分镜|改一下分镜|增加一个分镜|删掉一个分镜|补一个分镜|更新镜头表/.test(raw)) {
     return 'adjust_storyboard';
   }
   if (/继续|下一步|往下走|生成分镜|开始分镜|生成提示词|开始提示词/.test(raw)) {
@@ -105,7 +108,7 @@ export function stageLabel(state: WorkflowAgentState): string {
     case 'INIT':
       return '初始化';
     case 'SCRIPT_READY':
-      return '剧本就绪';
+      return '文本就绪';
     case 'STORYBOARD_GENERATED':
       return '分镜已生成';
     case 'STORYBOARD_ADJUSTED':
@@ -113,7 +116,7 @@ export function stageLabel(state: WorkflowAgentState): string {
     case 'STORYBOARD_CONFIRMED':
       return '分镜已确认';
     case 'PROMPT_GENERATED':
-      return '提示词已生成';
+      return 'Prompt 已生成';
     case 'COMPLETED':
       return '流程完成';
     case 'FAILED':
@@ -126,11 +129,11 @@ export function stageLabel(state: WorkflowAgentState): string {
 export function routeLabel(route: WorkflowAgentRoute): string {
   switch (route) {
     case 'novel_to_script_to_storyboard_to_prompt':
-      return '小说 → 剧本 → 分镜 → 提示词';
+      return '长文本 -> 分镜/镜头表 -> Prompt';
     case 'script_to_storyboard_to_prompt':
-      return '剧本 → 分镜 → 提示词';
+      return '文本 -> 分镜/镜头表 -> Prompt';
     case 'script_to_prompt_quick':
-      return '剧本 → 提示词（快速）';
+      return '文本 -> 单镜头 Prompt';
     default:
       return route;
   }
@@ -141,23 +144,24 @@ export function buildWorkflowAgentStartMessage(args: {
   route: WorkflowAgentRoute;
   mode: WorkflowAgentMode;
 }): string {
-  const inputLabel = args.inputType === 'novel' ? '小说/长文本' : '剧本';
-  const modeLabel = args.mode === 'quick' ? '快速模式' : '标准模式';
+  const inputLabel =
+    args.inputType === 'novel' ? '长文本/故事素材' : args.inputType === 'script' ? '镜头文本/剧本文本' : '未分类文本';
+  const modeLabel = args.mode === 'quick' ? '单镜头快速模式' : '分镜标准模式';
   return `已识别输入为${inputLabel}，Agent 将按「${routeLabel(args.route)}」推进，当前处于${modeLabel}。`;
 }
 
 export function buildWorkflowAgentStageHint(session: WorkflowAgentSession): string {
   switch (session.state) {
     case 'SCRIPT_READY':
-      return '剧本阶段已经完成。你可以继续让 Agent 进入分镜，或者先人工微调剧本。';
+      return '文本已经进入流程。下一步可以生成分镜/镜头表，也可以改走单镜头 Prompt。';
     case 'STORYBOARD_GENERATED':
-      return '分镜已经生成。你可以先调整分镜，也可以直接确认并进入提示词阶段。';
+      return '分镜/镜头表已经生成。你可以先调整镜头表，也可以确认后进入 Prompt 节点。';
     case 'STORYBOARD_ADJUSTED':
-      return '分镜已经被人工或聊天修改过。确认后就可以进入提示词阶段。';
+      return '镜头表已经调整过。确认后就可以让 Prompt 节点读取最新镜头内容。';
     case 'STORYBOARD_CONFIRMED':
-      return '分镜已确认，现在可以开始生成提示词。';
+      return '分镜已确认，现在可以开始生成 Prompt。';
     case 'PROMPT_GENERATED':
-      return '提示词已经生成完成。你可以继续微调提示词，或者结束这轮流程。';
+      return 'Prompt 已生成完成。你可以继续用审核节点微调，或者结束这一轮流程。';
     case 'COMPLETED':
       return '这一轮流程已经完成。你可以直接开始下一轮任务。';
     case 'FAILED':

@@ -10,7 +10,6 @@ import { useStudioStore } from '@/store/useStudioStore';
 
 export function StudioWelcomePanel() {
   const nodeCount = useStudioStore((state) => state.nodes.length);
-  const addDepartmentNode = useStudioStore((state) => state.addDepartmentNode);
   const addTextNode = useStudioStore((state) => state.addTextNode);
   const focusNode = useStudioStore((state) => state.focusNode);
   const [dismissed, setDismissed] = useState(false);
@@ -20,11 +19,6 @@ export function StudioWelcomePanel() {
   const configReady = getResolvedLlmGatewayConfig() != null;
   const gatewayRequired = pipelineModeNeedsGateway(pipelineMode);
   const modeReady = !gatewayRequired || configReady;
-
-  const createWritingNode = useCallback(() => {
-    const id = addDepartmentNode('writing', { x: 320, y: 220 });
-    focusNode(id);
-  }, [addDepartmentNode, focusNode]);
 
   const createTextCard = useCallback(() => {
     const id = addTextNode('', { x: 120, y: 250 });
@@ -66,7 +60,7 @@ export function StudioWelcomePanel() {
           <span className="studio-welcome-panel__step-no">3</span>
           <div>
             <strong>让节点接力工作</strong>
-            <p>先过编剧，再接分镜和 Prompt。你也可以导入 Excel 分镜表，或者用图片表格识别快速起稿。</p>
+            <p>先放入文本素材，再接分镜和 Prompt。你也可以导入 Excel 分镜表，或者用图片表格识别快速起稿。</p>
           </div>
         </div>
       </div>
@@ -77,9 +71,6 @@ export function StudioWelcomePanel() {
         </button>
         <button type="button" className="studio-welcome-panel__secondary" onClick={createTextCard}>
           创建文本卡片
-        </button>
-        <button type="button" className="studio-welcome-panel__secondary" onClick={createWritingNode}>
-          创建编剧节点
         </button>
       </div>
 
