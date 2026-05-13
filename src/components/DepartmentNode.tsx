@@ -178,6 +178,7 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
 
   const handlePlay = useCallback(
     (e: React.MouseEvent) => {
+      e.preventDefault();
       e.stopPropagation();
       if (data.onExecute) {
         void data.onExecute();
@@ -230,6 +231,7 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
 
   const handleRegenerate = useCallback(
     (e: MouseEvent) => {
+      e.preventDefault();
       e.stopPropagation();
       regenerateNode(id);
     },
@@ -281,6 +283,8 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
               type="button"
               className="dept-node__play nodrag nopan"
               disabled={!hasInputFeed}
+              onPointerDown={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
               onClick={handlePlay}
               title={hasInputFeed ? '执行任务' : '请先连接输入源'}
               aria-label={hasInputFeed ? '执行任务' : '请先连接输入源'}
@@ -292,6 +296,8 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
             <button
               type="button"
               className="dept-node__regen nodrag nopan"
+              onPointerDown={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
               onClick={handleRegenerate}
               title="重新生成"
               aria-label="重新生成"
