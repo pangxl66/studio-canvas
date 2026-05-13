@@ -13,7 +13,13 @@ function normalizeSupabaseUrl(value: string): string {
   const raw = value.trim();
   if (!raw) return '';
   if (/^https?:\/\//i.test(raw)) return raw.replace(/\/+$/, '');
-  if (raw.startsWith('/')) return raw.replace(/\/+$/, '') || '/';
+  if (raw.startsWith('/')) {
+    const pathUrl = raw.replace(/\/+$/, '') || '/';
+    if (typeof window !== 'undefined') {
+      return new URL(pathUrl, window.location.origin).toString().replace(/\/+$/, '');
+    }
+    return pathUrl;
+  }
   return `https://${raw}`.replace(/\/+$/, '');
 }
 
