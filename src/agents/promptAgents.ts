@@ -51,12 +51,65 @@ const REQUIRED_NEGATIVE_GROUPS = [
 ] as const;
 const MAX_PROMPT_CHARS = 2500;
 const MAX_SEEDANCE_CARD_CHARS = 2500;
+const MIN_SEEDANCE2_SEGMENTED_CARD_CHARS = 1500;
+const MAX_SEEDANCE2_SEGMENTED_CARD_CHARS = 3000;
+const SEEDANCE2_SEGMENTED_PROMPT_MARKER = 'Seedance2.0 分段式提示词助手';
+const SEEDANCE2_SEGMENTED_FORMAT = 'seedance2_segmented_15s_v1';
+const SEEDANCE2_SEGMENTED_HEADINGS = [
+  '# 【全局视觉与美学基调】',
+  '# 【人物与场景设定】',
+  '# 【剧本与动作时间线】',
+  '# 【生成约束与负面提示词】',
+] as const;
 const SEEDANCE_PROMPT_SECTION_INDEX = 9;
 const SEEDANCE_OPTIONAL_SECTION_INDICES = new Set<number>();
 const MOUNT_TOKEN_RE = /\|@=([^|\n]+)\|/g;
 const STRUCTURED_FIELD_NOISE_RE = /文字生成版|无素材|角色资产|场景资产|半空中袖|口一翻/;
 const ACTION_FRAGMENT_TOKEN_RE =
   /^(?:探头|探身|回头|转身|抬手|收枪|落锁|关门|开口|低声|沉声|冷声|停在|停住|看见|看向|望向|闪身|逼近|后撤|甩袖|翻腕)$/;
+const SEEDANCE2_UI_RENDER_PARAM_RE = /\b(?:4k|8k|1080p|720p|fps)\b|分辨率|帧率|画幅比例|aspect\s*ratio/i;
+
+type PromptStyleMode = 'studioCanvas' | 'seedance2Segmented';
+
+function inferPromptStyleMode(executionSystemPrompt?: string): PromptStyleMode {
+  return executionSystemPrompt?.includes(SEEDANCE2_SEGMENTED_PROMPT_MARKER)
+    ? 'seedance2Segmented'
+    : 'studioCanvas';
+}
+
+function isSeedance2SegmentedStyle(styleMode: PromptStyleMode): boolean {
+  return styleMode === 'seedance2Segmented';
+}
+
+function getMaxSeedanceCardChars(styleMode: PromptStyleMode): number {
+  return isSeedance2SegmentedStyle(styleMode)
+    ? MAX_SEEDANCE2_SEGMENTED_CARD_CHARS
+    : MAX_SEEDANCE_CARD_CHARS;
+}
+
+function normalizeSeedance2CardText(value: string): string {
+  return value.replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function getSeedance2RenderableContent(card: string): string {
+  const negativeHeadingIndex = card.indexOf(SEEDANCE2_SEGMENTED_HEADINGS[3]);
+  return negativeHeadingIndex >= 0 ? card.slice(0, negativeHeadingIndex) : card;
+}
+
+function withSeedance2StyleSystemOverride(systemPrompt?: string): string | undefined {
+  if (!systemPrompt) return systemPrompt;
+  return [
+    systemPrompt,
+    '',
+    '[Seedance2.0 style override]',
+    `Active prompt style skill: ${SEEDANCE2_SEGMENTED_PROMPT_MARKER}.`,
+    'Keep the outer PromptOutput JSON contract unchanged.',
+    'For every shotPrompts[i].seedanceCard, use only the Seedance2.0 four Markdown modules:',
+    SEEDANCE2_SEGMENTED_HEADINGS.join('\n'),
+    'Do not use the default Studio Canvas card fields such as 挂载 / 相机位置 / 提示词 / 钉子4行 in seedanceCard.',
+    'Each seedanceCard must be 1500-3000 Chinese characters and must contain a continuous [00.0s - 15.0s] timeline.',
+  ].join('\n');
+}
 
 function looksNoisyStructuredToken(token: string): boolean {
   const trimmed = token.trim();
@@ -779,7 +832,115 @@ function findSourceShot(sourceStoryboard: StoryboardOutput | null, pack: PromptS
   );
 }
 
-function normalizePromptOutput(output: PromptOutput, sourceStoryboard: StoryboardOutput | null): PromptOutput {
+type Seedance2TimelineInterval = { start: number; end: number };
+
+function parseSeedance2TimelineIntervals(card: string): Seedance2TimelineInterval[] {
+  const intervals: Seedance2TimelineInterval[] = [];
+  const pattern = /\[(\d{2})\.(\d)s?\s*-\s*(\d{2})\.(\d)s?\]/g;
+  for (const match of card.matchAll(pattern)) {
+    intervals.push({
+      start: Number(match[1]) + Number(match[2]) / 10,
+      end: Number(match[3]) + Number(match[4]) / 10,
+    });
+  }
+  return intervals;
+}
+
+function assertContinuousFifteenSecondTimeline(shotId: string, card: string): void {
+  const intervals = parseSeedance2TimelineIntervals(card);
+  if (!intervals.length) {
+    throw new Error(`Seedance2.0 prompt for shot ${shotId} must include timestamp ranges like [00.0s - 02.5s].`);
+  }
+
+  const tolerance = 0.05;
+  let cursor = 0;
+  for (const interval of intervals) {
+    if (interval.end <= interval.start) {
+      throw new Error(`Seedance2.0 prompt for shot ${shotId} has an invalid timeline interval.`);
+    }
+    if (Math.abs(interval.start - cursor) > tolerance) {
+      throw new Error(`Seedance2.0 prompt for shot ${shotId} timeline must be continuous from 00.0s.`);
+    }
+    cursor = interval.end;
+  }
+
+  if (Math.abs(cursor - 15) > tolerance) {
+    throw new Error(`Seedance2.0 prompt for shot ${shotId} timeline must end exactly at 15.0s.`);
+  }
+}
+
+function assertSeedance2SegmentedCard(shotId: string, seedanceCard: string): string {
+  const card = normalizeSeedance2CardText(seedanceCard);
+  if (!card) {
+    throw new Error(`Seedance2.0 prompt for shot ${shotId} is missing seedanceCard.`);
+  }
+  if (!card.startsWith(SEEDANCE2_SEGMENTED_HEADINGS[0])) {
+    throw new Error(`Seedance2.0 prompt for shot ${shotId} must start with ${SEEDANCE2_SEGMENTED_HEADINGS[0]}.`);
+  }
+
+  const length = Array.from(card).length;
+  if (length < MIN_SEEDANCE2_SEGMENTED_CARD_CHARS || length > MAX_SEEDANCE2_SEGMENTED_CARD_CHARS) {
+    throw new Error(
+      `Seedance2.0 prompt for shot ${shotId} must be ${MIN_SEEDANCE2_SEGMENTED_CARD_CHARS}-${MAX_SEEDANCE2_SEGMENTED_CARD_CHARS} Chinese characters.`,
+    );
+  }
+
+  let previousIndex = -1;
+  for (const heading of SEEDANCE2_SEGMENTED_HEADINGS) {
+    const index = card.indexOf(heading);
+    if (index < 0) {
+      throw new Error(`Seedance2.0 prompt for shot ${shotId} is missing heading: ${heading}.`);
+    }
+    if (index <= previousIndex) {
+      throw new Error(`Seedance2.0 prompt for shot ${shotId} headings are out of order.`);
+    }
+    previousIndex = index;
+  }
+
+  const oldStudioCanvasFields = [
+    '挂载',
+    '相机位置',
+    '相机朝向',
+    '角色朝向',
+    '构图锚点',
+    '灯光布置与基调',
+    '起幅',
+    '落幅',
+    '连续性约束',
+    '摄影机动态参数',
+    '镜头参数',
+    '插针',
+    '甩拍',
+    '慢镜头',
+    '微表情',
+    '钉子4行',
+  ];
+  const leakedOldField = oldStudioCanvasFields.find((field) =>
+    new RegExp(`(^|\\n)\\s*(?:#{1,6}\\s*)?【?${field}】?\\s*[:：]?`).test(card),
+  );
+  if (leakedOldField) {
+    throw new Error(`Seedance2.0 prompt for shot ${shotId} must not include old Studio Canvas field: ${leakedOldField}.`);
+  }
+
+  const requiredTerms = ['镜头机位', '视觉画面', '[前景]', '[主体]', '[背景]', '听觉声效'];
+  const missingTerms = requiredTerms.filter((term) => !card.includes(term));
+  if (missingTerms.length) {
+    throw new Error(`Seedance2.0 prompt for shot ${shotId} is missing required timeline terms: ${missingTerms.join(', ')}.`);
+  }
+  if (SEEDANCE2_UI_RENDER_PARAM_RE.test(getSeedance2RenderableContent(card))) {
+    throw new Error(`Seedance2.0 prompt for shot ${shotId} must not include UI render parameters.`);
+  }
+
+  assertContinuousFifteenSecondTimeline(shotId, card);
+
+  return card;
+}
+
+function normalizePromptOutput(
+  output: PromptOutput,
+  sourceStoryboard: StoryboardOutput | null,
+  styleMode: PromptStyleMode = 'studioCanvas',
+): PromptOutput {
   const shotPrompts = (output.shotPrompts ?? []).map((pack, index) => {
     const sourceShot = findSourceShot(sourceStoryboard, pack, index);
     return {
@@ -787,25 +948,40 @@ function normalizePromptOutput(output: PromptOutput, sourceStoryboard: Storyboar
       shot_id: sourceShot ? String(sourceShot.id) : pack.shot_id,
       prompt: String(pack.prompt ?? '').replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim(),
       seedanceCard:
-        typeof pack.seedanceCard === 'string' ? tightenSeedanceCard(pack.seedanceCard) : '',
+        typeof pack.seedanceCard === 'string'
+          ? isSeedance2SegmentedStyle(styleMode)
+            ? normalizeSeedance2CardText(pack.seedanceCard)
+            : tightenSeedanceCard(pack.seedanceCard)
+          : '',
     };
   });
   return {
     ...output,
     parameters: {
       ...output.parameters,
-      format: output.parameters.format || 'sd2_storyboard_dense_v2',
+      format: isSeedance2SegmentedStyle(styleMode)
+        ? SEEDANCE2_SEGMENTED_FORMAT
+        : output.parameters.format || 'sd2_storyboard_dense_v2',
     },
     shotPrompts,
   };
 }
 
-function outputNeedsCompressionRepair(output: PromptOutput): boolean {
+function outputNeedsCompressionRepair(output: PromptOutput, styleMode: PromptStyleMode = 'studioCanvas'): boolean {
   return (output.shotPrompts ?? []).some((pack) => {
     const prompt = String(pack.prompt ?? '').trim();
     if (prompt && Array.from(prompt).length > MAX_PROMPT_CHARS) return true;
     const seedanceCard = String(pack.seedanceCard ?? '').trim();
-    if (seedanceCard && Array.from(seedanceCard).length > MAX_SEEDANCE_CARD_CHARS) return true;
+    const seedanceCardLength = Array.from(seedanceCard).length;
+    if (seedanceCard && seedanceCardLength > getMaxSeedanceCardChars(styleMode)) return true;
+    if (isSeedance2SegmentedStyle(styleMode)) {
+      if (!seedanceCard) return true;
+      if (seedanceCardLength < MIN_SEEDANCE2_SEGMENTED_CARD_CHARS) return true;
+      if (!seedanceCard.startsWith(SEEDANCE2_SEGMENTED_HEADINGS[0])) return true;
+      if (SEEDANCE2_SEGMENTED_HEADINGS.some((heading) => !seedanceCard.includes(heading))) return true;
+      if (['镜头机位', '视觉画面', '[前景]', '[主体]', '[背景]', '听觉声效'].some((term) => !seedanceCard.includes(term))) return true;
+      if (!parseSeedance2TimelineIntervals(seedanceCard).length) return true;
+    }
     return false;
   });
 }
@@ -830,7 +1006,7 @@ function sanitizePromptOutputEllipsis(output: PromptOutput): PromptOutput {
   };
 }
 
-function validatePromptPackContent(pack: PromptShotPack): void {
+function validatePromptPackContent(pack: PromptShotPack, styleMode: PromptStyleMode = 'studioCanvas'): void {
   const prompt = String(pack.prompt ?? '');
   if (Array.from(prompt).length > MAX_PROMPT_CHARS) {
     throw new Error(`Prompt 输出超出字数限制：镜头 ${pack.shot_id} 的提示词超过 2500 字。`);
@@ -840,14 +1016,22 @@ function validatePromptPackContent(pack: PromptShotPack): void {
   if (!seedanceCard) {
     throw new Error(`Prompt 模型返回：镜头 ${pack.shot_id} 缺少 seedanceCard。`);
   }
+  if (isSeedance2SegmentedStyle(styleMode)) {
+    assertSeedance2SegmentedCard(pack.shot_id, seedanceCard);
+    return;
+  }
   if (Array.from(seedanceCard).length > MAX_SEEDANCE_CARD_CHARS) {
     throw new Error(`Prompt 输出超出字数限制：镜头 ${pack.shot_id} 的 seedanceCard 超过 2500 字。`);
   }
 }
 
-function validatePromptCoverage(output: PromptOutput, sourceStoryboard: StoryboardOutput | null): void {
+function validatePromptCoverage(
+  output: PromptOutput,
+  sourceStoryboard: StoryboardOutput | null,
+  styleMode: PromptStyleMode = 'studioCanvas',
+): void {
   for (const pack of output.shotPrompts ?? []) {
-    validatePromptPackContent(pack);
+    validatePromptPackContent(pack, styleMode);
   }
   if (!sourceStoryboard?.shots?.length) return;
   const expected = sourceStoryboard.shots.map((shot) => String(shot.id));
@@ -1300,6 +1484,212 @@ function buildCompressionRepairUserMessageV3(
   ].filter(Boolean).join('\n');
 }
 
+function buildSeedance2OutputSkeleton(): string {
+  return JSON.stringify(
+    {
+      system: SEEDANCE2_SEGMENTED_PROMPT_MARKER,
+      userTemplate: '{{input}}',
+      negative: DEFAULT_NEG,
+      parameters: {
+        engine: 'seedance',
+        aspect: '16:9',
+        format: SEEDANCE2_SEGMENTED_FORMAT,
+      },
+      shotPrompts: [
+        {
+          shot_id: '1',
+          prompt: '15.0秒 Seedance2.0 分段式视听提示词摘要。',
+          negative_prompt: DEFAULT_NEG,
+          dimensions: {},
+          character_asset_ids: [],
+          scene_asset_ids: [],
+          seedanceCard: [
+            '# 【全局视觉与美学基调】',
+            '- **美学风格**：明确真人实拍、2D 动漫、3D 动画、水墨或其他视觉流派，并说明底层质感。',
+            '- **镜头与景深**：说明镜头语言、焦平面、景深、焦外虚化或对应风格的空间规律。',
+            '- **色彩与光照**：说明主光源方向、色温、明暗层次与整体基调。',
+            '',
+            '# 【人物与场景设定】',
+            '- **人物设定**：写人物外观、服饰材质、状态、微观表情基础。',
+            '- **场景设定**：写场景空间结构、材质、天气、道具与环境声源。',
+            '',
+            '# 【剧本与动作时间线】',
+            '- **[00.0s - 15.0s]**',
+            '  - **镜头机位**：明确景别、机位和运镜。',
+            '  - **视觉画面**：',
+            '    - **[前景]**：镜头与主体之间的遮挡、失焦物或空气层。',
+            '    - **[主体]**：焦平面内的角色、动作、表情、材质交互。',
+            '    - **[背景]**：主体后的环境纵深、光斑、空间信息。',
+            '  - **听觉声效**：仅写对白轨与环境音效轨（Foley），禁止音乐轨。',
+            '',
+            '# 【生成约束与负面提示词】',
+            '- **绝对禁止项**：禁止背景音乐、BGM、配乐、旋律、字幕、UI、HUD、水印、logo、分辨率、帧率、画幅比例、瞬移、反关节、面部崩坏、光影逻辑冲突。',
+          ].join('\n'),
+        },
+      ],
+    },
+    null,
+    2,
+  );
+}
+
+function buildSeedance2SourceShotHints(sourceStoryboard: StoryboardOutput | null): string {
+  if (!sourceStoryboard?.shots?.length) return '';
+  return [
+    `【源镜头总数】${sourceStoryboard.shots.length}`,
+    `【源镜头编号】${sourceStoryboard.shots.map((shot) => shot.id).join(', ')}`,
+    '若输入是单个分镜，生成 1 条 shotPrompts。',
+    '若输入是多个独立分镜，shotPrompts 数量必须与源镜头数量一致，每条都是独立的 15.0 秒切片。',
+    '若输入是 mergedMembers 组合镜头，只输出 1 条组合 shotPrompt，但 seedanceCard 的时间线必须覆盖全部子镜头并仍然严格收束在 15.0 秒内。',
+  ].join('\n');
+}
+
+function buildSeedance2PromptRules(sourceStoryboard: StoryboardOutput | null): string {
+  const modeHints = buildPromptModeHints(sourceStoryboard);
+  return [
+    `【当前启用技能】${SEEDANCE2_SEGMENTED_PROMPT_MARKER}。`,
+    '你必须返回 PromptOutput JSON，不要 Markdown 包裹，不要解释，不要输出分析过程。',
+    '外层 JSON 字段必须包含：system、userTemplate、negative、parameters、shotPrompts。',
+    'shotPrompts 必须是非空数组；每条必须包含 shot_id、prompt、negative_prompt、dimensions、character_asset_ids、scene_asset_ids、seedanceCard。',
+    'prompt 字段只写可复制执行的简短摘要，不要复述 seedanceCard 四大模块。',
+    `parameters.format 必须写为 ${SEEDANCE2_SEGMENTED_FORMAT}。`,
+    '',
+    '【seedanceCard 结构硬规则】',
+    'seedanceCard 第一个字符必须是：# 【全局视觉与美学基调】。',
+    'seedanceCard 必须只使用以下四个一级 Markdown 标题，顺序不能变：',
+    SEEDANCE2_SEGMENTED_HEADINGS.join('\n'),
+    '禁止混入默认 Studio Canvas 字段：挂载、相机位置、相机朝向、角色朝向、构图锚点、灯光布置与基调、起幅、落幅、连续性约束、提示词、摄影机动态参数、镜头参数、插针 / 甩拍 / 慢镜头、微表情、钉子4行。',
+    `每个 seedanceCard 字数必须控制在 ${MIN_SEEDANCE2_SEGMENTED_CARD_CHARS}-${MAX_SEEDANCE2_SEGMENTED_CARD_CHARS} 个中文字符之间。`,
+    '',
+    '【15 秒时间轴硬规则】',
+    '每个 seedanceCard 都是一个 15.0 秒切片，总时长必须严格等于 15.0 秒。',
+    '【剧本与动作时间线】中的时间戳必须使用 `[00.0s - 02.5s]` 这种格式，连续推进，无空档、无重叠、不能超过 15.0s。',
+    '可以根据分镜动作密度自动切成 3-7 个时间段；短动作不要硬塞成拖沓长动作，而是在 15 秒内用镜头、微表情、空间层次、环境反馈和声效细节完成节奏分配。',
+    '如果源分镜有多个子镜头，必须在 15 秒内合理分配每个子镜头时长，而不是让总时长超过 15 秒。',
+    '',
+    '【空间、光学与声音硬规则】',
+    '【剧本与动作时间线】每个时间段必须包含：镜头机位、视觉画面、听觉声效。',
+    '视觉画面必须严格写出 [前景]、[主体]、[背景] 三层，不得缺失任意一层。',
+    '必须写美学风格、镜头景深、色彩光照、人物/场景设定、常识校验后的动作、微观表情或材质交互。',
+    '禁止背景音乐、BGM、配乐、旋律；只允许对白轨和环境音效轨（Foley）。',
+    '禁止分辨率、帧率、画幅比例、控制台参数、字幕、UI、HUD、水印、logo。',
+    '动作必须符合重力、惯性、摩擦力和人体工学，不得瞬移、反关节、无因果破坏。',
+    '',
+    '【输出收尾硬规则】',
+    'seedanceCard 必须在【生成约束与负面提示词】模块内自然结束。',
+    '不得追加当前切片进度、当前场景状态、下一步指令、继续、Next 等与视频提示词无关的连载说明。',
+    '',
+    buildSeedance2SourceShotHints(sourceStoryboard),
+    modeHints,
+  ].filter(Boolean).join('\n');
+}
+
+function buildPromptUserMessageSeedance2(
+  brief: string,
+  assetRefs: unknown,
+  sourceStoryboard: StoryboardOutput | null,
+): string {
+  return [
+    buildSeedance2PromptRules(sourceStoryboard),
+    '',
+    '【输出 JSON 参考骨架】',
+    buildSeedance2OutputSkeleton(),
+    '',
+    '【资产占位 ID】',
+    JSON.stringify(assetRefs, null, 2),
+    '',
+    sourceStoryboard ? ['【源镜头表】', JSON.stringify(sourceStoryboard, null, 2), ''].join('\n') : '',
+    '【原始 Input】',
+    brief.trim() || '（空）',
+  ].filter(Boolean).join('\n');
+}
+
+function buildStructureRepairUserMessageSeedance2(
+  brief: string,
+  assetRefs: unknown,
+  sourceStoryboard: StoryboardOutput | null,
+  invalidOutput: unknown,
+  failureReason?: string,
+): string {
+  return [
+    failureReason ? `[Previous failure] ${failureReason}` : '',
+    '上一次返回不符合 Seedance2.0 技能或 PromptOutput JSON 协议。请只返回完整 JSON。',
+    buildSeedance2PromptRules(sourceStoryboard),
+    '',
+    '【输出 JSON 参考骨架】',
+    buildSeedance2OutputSkeleton(),
+    '',
+    '【资产占位 ID】',
+    JSON.stringify(assetRefs, null, 2),
+    '',
+    sourceStoryboard ? ['【源镜头表】', JSON.stringify(sourceStoryboard, null, 2), ''].join('\n') : '',
+    '【上一次错误输出】',
+    JSON.stringify(invalidOutput, null, 2),
+    '',
+    '【原始 Input】',
+    brief.trim() || '（空）',
+  ].filter(Boolean).join('\n');
+}
+
+function buildCoverageRepairUserMessageSeedance2(
+  brief: string,
+  assetRefs: unknown,
+  sourceStoryboard: StoryboardOutput,
+  invalidOutput: PromptOutput,
+  failureReason?: string,
+): string {
+  return [
+    failureReason ? `[Previous failure] ${failureReason}` : '',
+    '上一次 PromptOutput 没有完整覆盖源分镜，或 seedanceCard 不符合 Seedance2.0 四模块 15 秒规范。请重写完整 JSON。',
+    buildSeedance2PromptRules(sourceStoryboard),
+    '',
+    `【必须覆盖的镜头总数】${sourceStoryboard.shots.length}`,
+    `【必须覆盖的镜头编号】${sourceStoryboard.shots.map((shot) => shot.id).join(', ')}`,
+    `【上一次返回的镜头编号】${(invalidOutput.shotPrompts ?? []).map((shot) => shot.shot_id).join(', ')}`,
+    '',
+    '【资产占位 ID】',
+    JSON.stringify(assetRefs, null, 2),
+    '',
+    '【源镜头表】',
+    JSON.stringify(sourceStoryboard, null, 2),
+    '',
+    '【上一次不合格输出】',
+    JSON.stringify(invalidOutput, null, 2),
+    '',
+    '【原始 Input】',
+    brief.trim() || '（空）',
+  ].filter(Boolean).join('\n');
+}
+
+function buildCompressionRepairUserMessageSeedance2(
+  brief: string,
+  assetRefs: unknown,
+  sourceStoryboard: StoryboardOutput | null,
+  draftOutput: PromptOutput,
+): string {
+  return [
+    '上一次 PromptOutput 的语义基本可用，但 Seedance2.0 技能规范仍不合格。请在不改变源分镜事实的前提下重写完整 JSON。',
+    buildSeedance2PromptRules(sourceStoryboard),
+    '',
+    '【本次修订目标】',
+    `每个 seedanceCard 必须在 ${MIN_SEEDANCE2_SEGMENTED_CARD_CHARS}-${MAX_SEEDANCE2_SEGMENTED_CARD_CHARS} 个中文字符之间。`,
+    '如果低于 1500 字，优先扩写空间景深、材质细节、微观表情、物理声效和常识动作反馈。',
+    '如果高于 3000 字，优先删除重复形容、重复动作说明和非关键环境铺陈，不得删除四大模块、时间轴、[前景]/[主体]/[背景]、听觉声效和负面约束。',
+    '时间线必须重新校验为严格 15.0 秒，不能超过 15 秒，也不能少于 15 秒。',
+    '不得退回默认 Studio Canvas 字段。',
+    '',
+    '【资产占位 ID】',
+    JSON.stringify(assetRefs, null, 2),
+    '',
+    sourceStoryboard ? ['【源镜头表】', JSON.stringify(sourceStoryboard, null, 2), ''].join('\n') : '',
+    '【待修订的当前输出】',
+    JSON.stringify(draftOutput, null, 2),
+    '',
+    '【原始 Input】',
+    brief.trim() || '（空）',
+  ].filter(Boolean).join('\n');
+}
+
 async function invokePromptOutputWithStructureRepair(params: {
   systemPrompt: string;
   userPrompt: string;
@@ -1353,8 +1743,14 @@ export async function runPromptEmployee(
   onDelta?: (delta: string, accumulated: string) => void,
   signal?: AbortSignal,
 ): Promise<PromptOutput> {
+  const styleMode = inferPromptStyleMode(executionSystemPrompt);
+  const useSeedance2Segmented = isSeedance2SegmentedStyle(styleMode);
+  const styleExecutionSystemPrompt = useSeedance2Segmented
+    ? withSeedance2StyleSystemOverride(executionSystemPrompt)
+    : executionSystemPrompt;
+
   return runPromptGenerationPipeline(
-    { brief, approvedAssets, executionSystemPrompt, onDelta, signal },
+    { brief, approvedAssets, executionSystemPrompt: styleExecutionSystemPrompt, onDelta, signal },
     {
       defaultNegative: DEFAULT_NEG,
       departmentSystemPrompt: PROMPT_DEPT_AGENT_SYSTEM,
@@ -1362,14 +1758,24 @@ export async function runPromptEmployee(
       timingSystemRule: PROMPT_TIMING_SYSTEM_RULE,
       resolveAssetRefs: promptAssetRefsFromApproved,
       parseSourceStoryboard: tryParseStoryboardFromInputText,
-      buildGenerationUserMessage: buildPromptUserMessageV3,
-      buildStructureRepairUserMessage: buildStructureRepairUserMessageV3,
-      buildCompressionRepairUserMessage: buildCompressionRepairUserMessageV3,
-      buildCoverageRepairUserMessage: buildCoverageRepairUserMessageV3,
+      buildGenerationUserMessage: useSeedance2Segmented
+        ? buildPromptUserMessageSeedance2
+        : buildPromptUserMessageV3,
+      buildStructureRepairUserMessage: useSeedance2Segmented
+        ? buildStructureRepairUserMessageSeedance2
+        : buildStructureRepairUserMessageV3,
+      buildCompressionRepairUserMessage: useSeedance2Segmented
+        ? buildCompressionRepairUserMessageSeedance2
+        : buildCompressionRepairUserMessageV3,
+      buildCoverageRepairUserMessage: useSeedance2Segmented
+        ? buildCoverageRepairUserMessageSeedance2
+        : buildCoverageRepairUserMessageV3,
       invokeWithStructureRepair: invokePromptOutputWithStructureRepair,
-      outputNeedsCompressionRepair,
-      normalizeOutput: normalizePromptOutput,
-      validateCoverage: validatePromptCoverage,
+      outputNeedsCompressionRepair: (output) => outputNeedsCompressionRepair(output, styleMode),
+      normalizeOutput: (output, sourceStoryboard) =>
+        normalizePromptOutput(output, sourceStoryboard, styleMode),
+      validateCoverage: (output, sourceStoryboard) =>
+        validatePromptCoverage(output, sourceStoryboard, styleMode),
       sanitizeEllipsis: sanitizePromptOutputEllipsis,
     },
   );

@@ -1,6 +1,9 @@
 /** 与 src/skills 下子目录名一致 */
 export type SkillFolder = 'writing' | 'storyboard' | 'prompt';
 
+/** 技能在节点里的插槽职责。Prompt 节点会把 style 作为唯一主规范槽。 */
+export type SkillSlotKind = 'style' | 'enhancement';
+
 export type SkillExportExtensionCapability =
   | 'writing_download'
   | 'storyboard_shotlist'
@@ -27,6 +30,8 @@ export type SkillFileRecord = {
   description: string;
   version: string;
   system_instruction: string;
+  /** 可选：Prompt 节点用它区分“主规范槽”和普通增强技能 */
+  slot?: SkillSlotKind;
   /** 可选：详情面板 Header 动态导出按钮 */
   export_extensions?: SkillExportExtension[];
 };

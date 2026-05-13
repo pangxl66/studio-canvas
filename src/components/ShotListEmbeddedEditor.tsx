@@ -8,6 +8,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { reindexStoryboardShotIds, tryParseStoryboardOutput } from '@/agents/storyboardAgents';
 import {
   blankShot,
@@ -25,6 +26,11 @@ import {
 import { makeShotListItemOutputHandleId, parseShotListItemOutputHandleId } from '@/utils/shotListWire';
 
 type EditableField = 'sceneRef' | 'type' | 'movement' | 'description' | 'content' | 'sound' | 'note';
+type ShotListContextMenuState = {
+  x: number;
+  y: number;
+  action: 'isolate' | 'showAll';
+} | null;
 
 const TRASH_ICON = (
   <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden>
@@ -134,6 +140,7 @@ function ShotCanvasRow({
         className="shot-list-canvas__td shot-list-canvas__td--check"
         onPointerDown={(event) => {
           stopCanvas(event);
+          if (event.button !== 0) return;
           onSelectGesture(rowIdx, {
             ctrlKey: event.ctrlKey,
             shiftKey: event.shiftKey,
@@ -150,6 +157,7 @@ function ShotCanvasRow({
           onChange={() => undefined}
           onPointerDown={(event) => {
             stopCanvas(event);
+            if (event.button !== 0) return;
             onSelectGesture(rowIdx, {
               ctrlKey: event.ctrlKey,
               shiftKey: event.shiftKey,
@@ -169,6 +177,7 @@ function ShotCanvasRow({
           }`}
           onPointerDown={(event) => {
             stopCanvas(event);
+            if (event.button !== 0) return;
             onSelectGesture(rowIdx, {
               ctrlKey: event.ctrlKey,
               shiftKey: event.shiftKey,
@@ -438,6 +447,7 @@ function ShotCanvasRow({
             aria-label={`选择输出 ${shotNoLabel}`}
             onPointerDown={(event) => {
               stopCanvas(event);
+              if (event.button !== 0) return;
               onSelectGesture(rowIdx, {
                 ctrlKey: event.ctrlKey,
                 shiftKey: event.shiftKey,
@@ -491,10 +501,13 @@ export function ShotListEmbeddedEditor({
   const shots = output?.shots ?? [];
 
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
+  const [isolatedRows, setIsolatedRows] = useState<number[]>([]);
+  const [contextMenu, setContextMenu] = useState<ShotListContextMenuState>(null);
   const [hoveredWireId, setHoveredWireId] = useState<string | null>(null);
   const [batchSceneRef, setBatchSceneRef] = useState('');
   const [batchSound, setBatchSound] = useState('');
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const refreshFrameRef = useRef<number | null>(null);
   const selectionAnchorRef = useRef<number | null>(null);
   const dragSelectRef = useRef<{
@@ -522,6 +535,15 @@ export function ShotListEmbeddedEditor({
         .map((index) => shots[index]?.wireId ?? String(shots[index]?.id ?? ''))
         .filter((wireId) => wireId.trim() !== ''),
     [selected, shots],
+  );
+  const isolatedRowSet = useMemo(() => new Set(isolatedRows), [isolatedRows]);
+  const isolationActive = isolatedRows.length > 0;
+  const visibleRows = useMemo(
+    () =>
+      shots
+        .map((shot, rowIdx) => ({ shot, rowIdx }))
+        .filter(({ rowIdx }) => !isolationActive || isolatedRowSet.has(rowIdx)),
+    [isolatedRowSet, isolationActive, shots],
   );
 
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -592,12 +614,33 @@ export function ShotListEmbeddedEditor({
   }, [shots.length]);
 
   useEffect(() => {
+    setIsolatedRows((prev) => prev.filter((rowIdx) => rowIdx >= 0 && rowIdx < shots.length));
+  }, [shots.length]);
+
+  useEffect(() => {
     setShotListSelectedWires(id, selectedWireIds);
   }, [id, selectedWireIds, setShotListSelectedWires]);
 
   useEffect(() => {
     scheduleHandleRefresh();
-  }, [scheduleHandleRefresh, selectedWireIds, shots.length, viewportHeight]);
+  }, [scheduleHandleRefresh, selectedWireIds, shots.length, viewportHeight, visibleRows.length]);
+
+  useEffect(() => {
+    if (!contextMenu) return undefined;
+    const onPointerDown = (event: PointerEvent) => {
+      if (contextMenuRef.current?.contains(event.target as Node)) return;
+      setContextMenu(null);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setContextMenu(null);
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [contextMenu]);
 
   useEffect(() => {
     const onResize = () => scheduleHandleRefresh();
@@ -779,6 +822,40 @@ export function ShotListEmbeddedEditor({
     e.stopPropagation();
   }, []);
 
+  const openShotListContextMenu = useCallback(
+    (event: ReactMouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (isolationActive) {
+        setContextMenu({ x: event.clientX, y: event.clientY, action: 'showAll' });
+        return;
+      }
+      const validSelectedRows = Array.from(selected).filter(
+        (rowIdx) => rowIdx >= 0 && rowIdx < shots.length,
+      );
+      if (validSelectedRows.length === 0) {
+        setContextMenu(null);
+        return;
+      }
+      setContextMenu({ x: event.clientX, y: event.clientY, action: 'isolate' });
+    },
+    [isolationActive, selected, shots.length],
+  );
+
+  const isolateSelectedRows = useCallback(() => {
+    const nextRows = Array.from(selected)
+      .filter((rowIdx) => rowIdx >= 0 && rowIdx < shots.length)
+      .sort((a, b) => a - b);
+    if (nextRows.length === 0) return;
+    setIsolatedRows(nextRows);
+    setContextMenu(null);
+  }, [selected, shots.length]);
+
+  const showAllRows = useCallback(() => {
+    setIsolatedRows([]);
+    setContextMenu(null);
+  }, []);
+
   const hasSelection = selected.size >= 1;
   const scrollViewportHeight = Math.max(220, (viewportHeight ?? 560) - 210);
 
@@ -817,11 +894,17 @@ export function ShotListEmbeddedEditor({
       className="shot-list-canvas__root nodrag nopan nowheel"
       onPointerDown={stopCanvas}
       onMouseDown={stopCanvas}
+      onContextMenu={openShotListContextMenu}
     >
       {decisionStrip}
       {hasSelection ? (
         <div className="shot-list-canvas__toolbar">
           <span className="shot-list-canvas__toolbar-hint">已选 {selected.size} 行</span>
+          {isolationActive ? (
+            <span className="shot-list-canvas__toolbar-hint">
+              单独显示 {visibleRows.length}/{shots.length} 行
+            </span>
+          ) : null}
           <label className="shot-list-canvas__batch-field">
             <span className="shot-list-canvas__batch-label">场景</span>
             <input
@@ -929,6 +1012,11 @@ export function ShotListEmbeddedEditor({
           >
             同场合并
           </button>
+          {isolationActive ? (
+            <span className="shot-list-canvas__toolbar-hint">
+              单独显示 {visibleRows.length}/{shots.length} 行，右键可显示全部
+            </span>
+          ) : null}
           <span className="shot-list-canvas__toolbar-hint">勾选至少 2 行（须连续）后可手动合并</span>
           <button
             type="button"
@@ -986,7 +1074,7 @@ export function ShotListEmbeddedEditor({
             </tr>
           </thead>
           <tbody>
-            {shots.map((sh, rowIdx) => (
+            {visibleRows.map(({ shot: sh, rowIdx }) => (
               <ShotCanvasRow
                 key={sh.id}
                 sh={sh}
@@ -1007,6 +1095,43 @@ export function ShotListEmbeddedEditor({
           </tbody>
         </table>
       </div>
+      {contextMenu
+        ? createPortal(
+            <div
+              ref={contextMenuRef}
+              className="shot-list-canvas__context-menu nodrag nopan nowheel"
+              style={{ left: contextMenu.x, top: contextMenu.y }}
+              role="menu"
+              onPointerDown={stopCanvas}
+              onMouseDown={stopCanvas}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+              }}
+            >
+              {contextMenu.action === 'isolate' ? (
+                <button
+                  type="button"
+                  className="shot-list-canvas__context-item"
+                  role="menuitem"
+                  onClick={isolateSelectedRows}
+                >
+                  单独显示已选分镜
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="shot-list-canvas__context-item"
+                  role="menuitem"
+                  onClick={showAllRows}
+                >
+                  显示全部分镜
+                </button>
+              )}
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

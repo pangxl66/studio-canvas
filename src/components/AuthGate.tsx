@@ -7,6 +7,7 @@ import {
   isSaasAuthEnabled,
   isSaasMockEnabled,
   sendLoginCode,
+  signInWithTestInvite,
   signOut,
   STUDIO_AUTH_MOCK_EVENT,
   verifyLoginCode,
@@ -26,16 +27,12 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error ?? '');
 }
 
-function isEmailRateLimitError(error: unknown): boolean {
-  return getErrorMessage(error).toLowerCase().includes('email rate limit');
-}
-
 function getLoginErrorMessage(error: unknown, fallback: string): string {
   const rawMessage = getErrorMessage(error);
   const normalizedMessage = rawMessage.toLowerCase();
 
   if (normalizedMessage.includes('email rate limit')) {
-    return '邮箱验证码发送太频繁了，请稍等 1 分钟后再试。正式上线建议配置 Supabase 自定义 SMTP，避免内置邮件额度限制。';
+    return '邮箱验证码发送太频繁了，请稍后再试。正式上线建议配置 Supabase 自定义 SMTP，避免内置邮件额度限制。';
   }
   if (normalizedMessage.includes('otp') || normalizedMessage.includes('token')) {
     return '验证码无效或已过期，请重新发送验证码。';
@@ -49,62 +46,58 @@ export function AuthGate({ children }: AuthGateProps) {
   const [isLoading, setIsLoading] = useState(isSaasAuthEnabled());
   const [email, setEmail] = useState('');
   const [verificationCode, setVerificationCode] = useState('');
+  const [inviteCode, setInviteCode] = useState('');
+  const [authMode, setAuthMode] = useState<'email' | 'invite'>('email');
   const [codeSentTo, setCodeSentTo] = useState('');
   const [sendCooldown, setSendCooldown] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [message, setMessage] = useState('');
 
   useEffect(() => {
-    if (sendCooldown <= 0) {
-      return;
-    }
-
-    const timer = window.setTimeout(() => {
-      setSendCooldown((value) => Math.max(0, value - 1));
+    if (sendCooldown <= 0) return;
+    const timer = window.setInterval(() => {
+      setSendCooldown((value) => Math.max(value - 1, 0));
     }, 1000);
-
-    return () => window.clearTimeout(timer);
+    return () => window.clearInterval(timer);
   }, [sendCooldown]);
 
   useEffect(() => {
-    if (!isSaasAuthEnabled()) {
-      return;
-    }
+    if (!isSaasAuthEnabled()) return;
 
     const client = getSupabaseClient();
     let isMounted = true;
+
     const syncAuthSnapshot = () => {
       void getAuthSnapshot().then((snapshot) => {
-        if (isMounted) {
-          setSession(snapshot.session);
-        }
+        if (isMounted) setSession(snapshot.session);
       });
     };
 
     getAuthSnapshot()
       .then((snapshot) => {
-        if (!isMounted) return;
-        setSession(snapshot.session);
+        if (isMounted) setSession(snapshot.session);
       })
       .catch((error) => {
-        if (!isMounted) return;
-        setMessage(error instanceof Error ? error.message : '读取登录状态失败。');
+        if (isMounted) setMessage(getLoginErrorMessage(error, '读取登录状态失败。'));
       })
       .finally(() => {
-        if (isMounted) {
-          setIsLoading(false);
-        }
+        if (isMounted) setIsLoading(false);
       });
 
     const { data } =
       client?.auth.onAuthStateChange((_event, nextSession) => {
-        setSession(nextSession);
+        if (nextSession) {
+          setSession(nextSession);
+        } else {
+          syncAuthSnapshot();
+        }
       }) ?? {};
+
     window.addEventListener(STUDIO_AUTH_MOCK_EVENT, syncAuthSnapshot);
 
     return () => {
       isMounted = false;
-      data?.subscription.unsubscribe();
+      data?.subscription?.unsubscribe();
       window.removeEventListener(STUDIO_AUTH_MOCK_EVENT, syncAuthSnapshot);
     };
   }, []);
@@ -113,38 +106,24 @@ export function AuthGate({ children }: AuthGateProps) {
     return <>{children}</>;
   }
 
+  const currentUser = session?.user ?? null;
+
   const handleSendCode = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (sendCooldown > 0) {
-      setMessage(`验证码刚刚发送过，请 ${sendCooldown} 秒后再重发。`);
-      return;
-    }
-
-    const nextEmail = email.trim();
-    if (!nextEmail) {
-      setMessage('请输入邮箱。');
-      return;
-    }
+    if (isSubmitting || sendCooldown > 0) return;
 
     setIsSubmitting(true);
     setMessage('');
+
     try {
-      await sendLoginCode(nextEmail);
-      setCodeSentTo(nextEmail);
+      await sendLoginCode(email);
+      setCodeSentTo(email.trim());
       setVerificationCode('');
-      if (!isSaasMockEnabled()) {
-        setSendCooldown(SEND_CODE_COOLDOWN_SECONDS);
-      }
-      setMessage(
-        isSaasMockEnabled()
-          ? '测试登录已启用，输入任意验证码即可进入。'
-          : `验证码已发送，请到邮箱里查看。${SEND_CODE_COOLDOWN_SECONDS} 秒后可以重新发送。`,
-      );
+      setSendCooldown(SEND_CODE_COOLDOWN_SECONDS);
+      setMessage(isSaasMockEnabled() ? '测试登录已启用，输入任意验证码即可进入。' : '验证码已发送，请到邮箱查看后填入。');
     } catch (error) {
-      if (isEmailRateLimitError(error)) {
-        setSendCooldown(SEND_CODE_COOLDOWN_SECONDS);
-      }
-      setMessage(getLoginErrorMessage(error, '发送验证码失败。'));
+      setSendCooldown(SEND_CODE_COOLDOWN_SECONDS);
+      setMessage(getLoginErrorMessage(error, '验证码发送失败。'));
     } finally {
       setIsSubmitting(false);
     }
@@ -152,30 +131,35 @@ export function AuthGate({ children }: AuthGateProps) {
 
   const handleVerifyCode = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const nextEmail = codeSentTo || email.trim();
-    const nextCode = verificationCode.trim();
-    if (!nextEmail) {
-      setMessage('请先填写邮箱。');
-      return;
-    }
-    if (!nextCode) {
-      setMessage('请输入邮箱验证码。');
-      return;
-    }
 
     setIsSubmitting(true);
     setMessage('');
+
     try {
-      const nextSession = await verifyLoginCode(nextEmail, nextCode);
-      if (nextSession) {
-        setSession(nextSession);
-      } else {
-        const snapshot = await getAuthSnapshot();
-        setSession(snapshot.session);
-      }
+      const nextSession = await verifyLoginCode(codeSentTo || email, verificationCode);
+      setSession(nextSession);
       setMessage('');
+      setVerificationCode('');
     } catch (error) {
       setMessage(getLoginErrorMessage(error, '验证码验证失败。'));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleTestInvite = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    setIsSubmitting(true);
+    setMessage('');
+
+    try {
+      const nextSession = await signInWithTestInvite(email, inviteCode);
+      setSession(nextSession);
+      setInviteCode('');
+      setMessage('');
+    } catch (error) {
+      setMessage(getLoginErrorMessage(error, '测试邀请码登录失败。'));
     } finally {
       setIsSubmitting(false);
     }
@@ -187,8 +171,11 @@ export function AuthGate({ children }: AuthGateProps) {
     try {
       await signOut();
       setSession(null);
+      setCodeSentTo('');
+      setVerificationCode('');
+      setInviteCode('');
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : '退出登录失败。');
+      setMessage(getLoginErrorMessage(error, '退出登录失败。'));
     } finally {
       setIsSubmitting(false);
     }
@@ -206,81 +193,151 @@ export function AuthGate({ children }: AuthGateProps) {
     );
   }
 
-  if (!session) {
+  if (!currentUser) {
+    const canSendCode = !isSubmitting && sendCooldown <= 0;
+    const hasSentCode = Boolean(codeSentTo);
+
     return (
       <main className="auth-gate">
         <section className="auth-card">
           <p className="auth-card__eyebrow">Studio Canvas Cloud</p>
           <h1 className="auth-card__title">登录后进入在线工作区</h1>
           <p className="auth-card__copy">
-            网站版会把工程保存到云端，并通过后端代理安全调用 LLM。现在使用邮箱验证码登录：先接收验证码，再输入验证码进入工作区。
+            网站版会把工程保存到云端，并通过后端代理安全调用 LLM。可以使用邮箱验证码登录，也可以临时使用测试邀请码进入。
           </p>
 
-          <form className="auth-card__form" onSubmit={handleSendCode}>
-            <label className="auth-card__label" htmlFor="studio-auth-email">
-              邮箱
-            </label>
-            <input
-              autoComplete="email"
-              className="auth-card__input"
-              disabled={isSubmitting}
-              id="studio-auth-email"
-              inputMode="email"
-              onChange={(event) => setEmail(event.target.value)}
-              placeholder="you@example.com"
-              type="email"
-              value={email}
-            />
-            <button className="auth-card__button" disabled={isSubmitting || sendCooldown > 0} type="submit">
-              {isSubmitting
-                ? '正在发送...'
-                : sendCooldown > 0
-                  ? `${sendCooldown} 秒后可重发`
-                  : codeSentTo
-                    ? '重新发送验证码'
-                    : '发送验证码'}
+          <div className="auth-card__mode-tabs" role="tablist" aria-label="登录方式">
+            <button
+              aria-selected={authMode === 'email'}
+              className={`auth-card__mode-tab ${authMode === 'email' ? 'is-active' : ''}`}
+              onClick={() => {
+                setAuthMode('email');
+                setMessage('');
+              }}
+              role="tab"
+              type="button"
+            >
+              邮箱验证码
             </button>
-          </form>
+            <button
+              aria-selected={authMode === 'invite'}
+              className={`auth-card__mode-tab ${authMode === 'invite' ? 'is-active' : ''}`}
+              onClick={() => {
+                setAuthMode('invite');
+                setMessage('');
+              }}
+              role="tab"
+              type="button"
+            >
+              测试邀请码
+            </button>
+          </div>
 
-          {codeSentTo ? (
-            <form className="auth-card__form auth-card__form--verify" onSubmit={handleVerifyCode}>
-              <label className="auth-card__label" htmlFor="studio-auth-code">
-                验证码
-              </label>
-              <input
-                autoComplete="one-time-code"
-                className="auth-card__input auth-card__input--code"
-                disabled={isSubmitting}
-                id="studio-auth-code"
-                inputMode="numeric"
-                maxLength={8}
-                onChange={(event) => setVerificationCode(event.target.value.replace(/\s/g, ''))}
-                placeholder="输入邮箱验证码"
-                value={verificationCode}
-              />
-              <button className="auth-card__button" disabled={isSubmitting} type="submit">
-                {isSubmitting ? '正在验证...' : '验证并进入'}
-              </button>
-              <button
-                className="auth-card__secondary-button"
-                disabled={isSubmitting}
-                type="button"
-                onClick={() => {
-                  setCodeSentTo('');
-                  setVerificationCode('');
-                  setMessage('');
-                }}
-              >
-                换一个邮箱
-              </button>
-            </form>
+          {authMode === 'email' ? (
+            <>
+              <form className="auth-card__form" onSubmit={handleSendCode}>
+                <label className="auth-card__label" htmlFor="studio-auth-email">
+                  邮箱
+                </label>
+                <input
+                  autoComplete="email"
+                  className="auth-card__input"
+                  disabled={isSubmitting}
+                  id="studio-auth-email"
+                  inputMode="email"
+                  onChange={(event) => setEmail(event.target.value)}
+                  placeholder="you@example.com"
+                  required
+                  type="email"
+                  value={email}
+                />
+                <button className="auth-card__button" disabled={!canSendCode} type="submit">
+                  {isSubmitting ? '正在发送...' : sendCooldown > 0 ? `${sendCooldown} 秒后可重发` : hasSentCode ? '重新发送验证码' : '发送验证码'}
+                </button>
+              </form>
+
+              {hasSentCode ? (
+                <form className="auth-card__form auth-card__form--verify" onSubmit={handleVerifyCode}>
+                  <label className="auth-card__label" htmlFor="studio-auth-code">
+                    验证码
+                  </label>
+                  <input
+                    autoComplete="one-time-code"
+                    className="auth-card__input auth-card__input--code"
+                    disabled={isSubmitting}
+                    id="studio-auth-code"
+                    inputMode="numeric"
+                    maxLength={8}
+                    onChange={(event) => setVerificationCode(event.target.value.replace(/\s/g, ''))}
+                    placeholder="输入邮箱验证码"
+                    required
+                    value={verificationCode}
+                  />
+                  <button className="auth-card__button" disabled={isSubmitting} type="submit">
+                    {isSubmitting ? '正在验证...' : '验证并进入'}
+                  </button>
+                  <button
+                    className="auth-card__secondary-button"
+                    disabled={isSubmitting}
+                    type="button"
+                    onClick={() => {
+                      setCodeSentTo('');
+                      setVerificationCode('');
+                      setMessage('');
+                    }}
+                  >
+                    换一个邮箱
+                  </button>
+                </form>
+              ) : null}
+            </>
+          ) : null}
+
+          {authMode === 'invite' ? (
+            <>
+              <form className="auth-card__form" onSubmit={handleTestInvite}>
+                <label className="auth-card__label" htmlFor="studio-invite-email">
+                  邮箱
+                </label>
+                <input
+                  autoComplete="email"
+                  className="auth-card__input"
+                  disabled={isSubmitting}
+                  id="studio-invite-email"
+                  inputMode="email"
+                  onChange={(event) => setEmail(event.target.value)}
+                  placeholder="you@example.com"
+                  required
+                  type="email"
+                  value={email}
+                />
+                <label className="auth-card__label" htmlFor="studio-test-invite-code">
+                  测试邀请码
+                </label>
+                <input
+                  autoComplete="off"
+                  className="auth-card__input auth-card__input--code"
+                  disabled={isSubmitting}
+                  id="studio-test-invite-code"
+                  onChange={(event) => setInviteCode(event.target.value)}
+                  placeholder="输入测试邀请码"
+                  required
+                  type="password"
+                  value={inviteCode}
+                />
+                <button className="auth-card__button" disabled={isSubmitting} type="submit">
+                  {isSubmitting ? '正在进入...' : '使用测试邀请码进入'}
+                </button>
+              </form>
+              <p className="auth-card__hint">测试入口用于临时给朋友体验，不占用邮箱验证码额度；测试用户暂不支持云端保存工程。</p>
+            </>
           ) : null}
 
           {message ? <p className="auth-card__message">{message}</p> : null}
 
           <p className="auth-card__hint">
-            如果还没有 Supabase 项目，请先按文档执行 <code>docs/supabase-schema.sql</code> 并配置{' '}
-            <code>VITE_SUPABASE_URL</code> 与 <code>VITE_SUPABASE_ANON_KEY</code>。
+            如果还没有 Supabase 项目，请先按文档执行 <code>docs/supabase-schema.sql</code> 并配置 <code>VITE_SUPABASE_URL</code> 与{' '}
+            <code>VITE_SUPABASE_ANON_KEY</code>。
           </p>
         </section>
       </main>
@@ -290,7 +347,7 @@ export function AuthGate({ children }: AuthGateProps) {
   return (
     <>
       <div className="auth-session-pill nodrag nopan">
-        <span>{userLabel(session.user)}</span>
+        <span>{userLabel(currentUser)}</span>
         <button disabled={isSubmitting} type="button" onClick={() => void handleSignOut()}>
           退出
         </button>

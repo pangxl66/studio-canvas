@@ -4,12 +4,15 @@ import type {
   SkillExportWritingTemplate,
   SkillFileRecord,
   SkillFolder,
+  SkillSlotKind,
 } from '@/types/skill';
 
 type SkillJson = {
   name?: string;
   description?: string;
   version?: string;
+  slot?: unknown;
+  prompt_slot?: unknown;
   system_instruction?: string;
   export_extensions?: unknown;
   activation?: {
@@ -31,6 +34,8 @@ const EXPORT_CAPS = new Set<SkillExportExtensionCapability>([
 ]);
 
 const WRITING_TPL = new Set<SkillExportWritingTemplate>(['standard', 'vertical_short', 'hollywood']);
+const PROMPT_STYLE_SLOT_ALIASES = new Set(['style', 'prompt_style', 'prompt-style', 'spec', 'structure', '规范']);
+const ENHANCEMENT_SLOT_ALIASES = new Set(['enhancement', 'enhance', 'addon', '增强']);
 
 function normalizeStringList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
@@ -93,6 +98,19 @@ function parseExportExtensions(raw: unknown): SkillExportExtension[] | undefined
   return out.length ? out : undefined;
 }
 
+function parseSkillSlot(mod: SkillJson, folder: SkillFolder): SkillSlotKind | undefined {
+  const raw =
+    typeof mod.slot === 'string'
+      ? mod.slot.trim().toLowerCase()
+      : typeof mod.prompt_slot === 'string'
+        ? mod.prompt_slot.trim().toLowerCase()
+        : '';
+  if (!raw) return undefined;
+  if (folder === 'prompt' && PROMPT_STYLE_SLOT_ALIASES.has(raw)) return 'style';
+  if (ENHANCEMENT_SLOT_ALIASES.has(raw)) return 'enhancement';
+  return undefined;
+}
+
 function parseFolderAndBase(pathKey: string): { folder: SkillFolder; base: string } | null {
   const norm = pathKey.replace(/\\/g, '/');
   const m = norm.match(/skills\/(writing|storyboard|prompt)\/([^/]+)\.json$/i);
@@ -109,6 +127,7 @@ function normalizeSkill(mod: SkillJson, id: string, folder: SkillFolder, fileNam
   const system_instruction = buildStructuredInstruction(mod);
   if (!name || !system_instruction) return null;
   const export_extensions = parseExportExtensions(mod.export_extensions);
+  const slot = parseSkillSlot(mod, folder);
   return {
     id,
     folder,
@@ -117,20 +136,26 @@ function normalizeSkill(mod: SkillJson, id: string, folder: SkillFolder, fileNam
     description,
     version: version || '0.0.0',
     system_instruction,
+    ...(slot ? { slot } : {}),
     ...(export_extensions ? { export_extensions } : {}),
   };
 }
 
 const rawModules = import.meta.glob<{ default: SkillJson }>('../skills/**/*.json', { eager: true });
 
+export const DEFAULT_PROMPT_STYLE_SKILL_ID = 'prompt/studio_canvas_prompt_spec_v1';
+
 const registry = new Map<string, SkillFileRecord>();
 const allSkills: SkillFileRecord[] = [];
 const HIDDEN_SKILL_IDS = new Set<string>([
+  'prompt/storyboard-to-sd20-prompt',
   'prompt/storyboard_prompt_translator_v1',
   'prompt/jimeng_prompt_generator_v1',
 ]);
 const SKILL_ID_ALIASES = new Map<string, string>([
-  ['prompt/jimeng_prompt_generator_v1', 'prompt/storyboard-to-sd20-prompt'],
+  ['prompt/jimeng_prompt_generator_v1', DEFAULT_PROMPT_STYLE_SKILL_ID],
+  ['prompt/storyboard-to-sd20-prompt', DEFAULT_PROMPT_STYLE_SKILL_ID],
+  ['prompt/storyboard_prompt_translator_v1', DEFAULT_PROMPT_STYLE_SKILL_ID],
 ]);
 
 for (const [pathKey, mod] of Object.entries(rawModules)) {
@@ -185,6 +210,23 @@ export function getSkillById(id: string): SkillFileRecord | undefined {
   return registry.get(resolveSkillAlias(id));
 }
 
+function isPromptStyleSkillRecord(skill: SkillFileRecord | undefined): boolean {
+  return skill?.folder === 'prompt' && skill.slot === 'style';
+}
+
+export function isPromptStyleSkillId(id: string): boolean {
+  return isPromptStyleSkillRecord(registry.get(resolveSkillAlias(id)));
+}
+
+export function listPromptStyleSkills(): SkillFileRecord[] {
+  return getVisibleSkills().filter(isPromptStyleSkillRecord);
+}
+
+function getDefaultPromptStyleSkillId(): string | undefined {
+  if (registry.has(DEFAULT_PROMPT_STYLE_SKILL_ID)) return DEFAULT_PROMPT_STYLE_SKILL_ID;
+  return allSkills.find(isPromptStyleSkillRecord)?.id;
+}
+
 /** 按节点上 `mounted_skills` 顺序拼接各技能的 system_instruction */
 export function buildMountedSkillsInstructionBlock(orderedIds: string[]): string {
   if (!orderedIds.length) return '';
@@ -202,7 +244,6 @@ export type PipelineKindForSkills = 'writing' | 'storyboard' | 'prompt';
 
 const FIXED_SKILLS_BY_KIND: Partial<Record<PipelineKindForSkills, readonly string[]>> = {
   storyboard: ['storyboard/xuke_storyboard_v1'],
-  prompt: ['prompt/storyboard-to-sd20-prompt'],
 };
 
 export function getFixedSkillIdsForPipelineKind(kind: PipelineKindForSkills): string[] {
@@ -218,11 +259,24 @@ export function normalizeMountedSkillIdsForKind(
 ): string[] {
   const allowed = new Set(listSkillsForPipelineKind(kind).map((s) => s.id));
   const fixed = getFixedSkillIdsForPipelineKind(kind);
+  const requested = orderedSkillIds
+    .map((raw) => (typeof raw === 'string' ? resolveSkillAlias(raw.trim()) : ''))
+    .filter(Boolean);
+  const source =
+    kind === 'prompt'
+      ? (() => {
+          const styleIds = requested.filter(isPromptStyleSkillId);
+          const selectedStyle = styleIds.length ? styleIds[styleIds.length - 1] : getDefaultPromptStyleSkillId();
+          return [
+            ...(selectedStyle ? [selectedStyle] : []),
+            ...fixed,
+            ...requested.filter((id) => !isPromptStyleSkillId(id)),
+          ];
+        })()
+      : [...fixed, ...requested];
   const out: string[] = [];
   const seen = new Set<string>();
-  for (const raw of [...fixed, ...orderedSkillIds]) {
-    const rawId = typeof raw === 'string' ? raw.trim() : '';
-    const id = resolveSkillAlias(rawId);
+  for (const id of source) {
     if (!id || seen.has(id) || !registry.has(id) || !allowed.has(id)) continue;
     seen.add(id);
     out.push(id);
@@ -279,6 +333,9 @@ export function skillToDownloadPayload(skill: SkillFileRecord): Record<string, s
     version: skill.version,
     system_instruction: skill.system_instruction,
   };
+  if (skill.slot) {
+    base.slot = skill.slot;
+  }
   if (skill.export_extensions?.length) {
     base.export_extensions = JSON.stringify(skill.export_extensions);
   }

@@ -121,6 +121,9 @@ const SHOT_LIST_DEFAULT_WIDTH = 800;
 const SHOT_LIST_DEFAULT_HEIGHT = 420;
 const DUPLICATED_NODE_VERTICAL_GAP = 36;
 const DUPLICATED_NODE_COLLISION_PADDING = 16;
+const AUTO_PROMPT_REVIEW_GAP = 96;
+const AUTO_PROMPT_REVIEW_COLLISION_STEP = 96;
+const AUTO_PROMPT_REVIEW_COLLISION_PADDING = 24;
 const UNDO_STACK_LIMIT = 20;
 const activeTaskAbortControllers = new Map<string, AbortController>();
 
@@ -798,6 +801,101 @@ function restoreUndoSnapshot(snapshot: UndoSnapshot, get: () => StudioState): Pa
     detailOpen: snapshot.detailOpen && snapshot.selectedNodeId != null,
     requestFitNodeId: null,
   };
+}
+
+type PromptReviewEnsureResult = { id: string; created: boolean } | null;
+
+function findConnectedPromptReviewNodeId(
+  promptNodeId: string,
+  nodes: StudioRFNode[],
+  edges: Edge[],
+): string | null {
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  for (const edge of edges) {
+    if (edge.source !== promptNodeId) continue;
+    if (edge.sourceHandle && edge.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) continue;
+    if (edge.targetHandle && edge.targetHandle !== 'in') continue;
+    const target = nodeById.get(edge.target);
+    if (target?.type === 'promptReview' && target.data.type === 'prompt_review_node') {
+      return target.id;
+    }
+  }
+  return null;
+}
+
+function findAutoPromptReviewPosition(promptNode: StudioRFNode, nodes: StudioRFNode[]): { x: number; y: number } {
+  const promptSize = getNodeSize(promptNode);
+  const reviewSize = defaultNodeSize({
+    ...promptNode,
+    type: 'promptReview',
+    data: makePromptReviewNodeData('promptreview-preview'),
+  });
+  const occupiedRects = nodes
+    .filter((node) => node.id !== promptNode.id)
+    .map((node) => {
+      const size = getNodeSize(node);
+      return {
+        x: node.position.x,
+        y: node.position.y,
+        width: size.width,
+        height: size.height,
+      };
+    });
+  const rect: NodeRect = {
+    x: promptNode.position.x + promptSize.width + AUTO_PROMPT_REVIEW_GAP,
+    y: promptNode.position.y,
+    width: reviewSize.width,
+    height: reviewSize.height,
+  };
+
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    if (
+      !occupiedRects.some((occupied) =>
+        rectsOverlap(rect, occupied, AUTO_PROMPT_REVIEW_COLLISION_PADDING),
+      )
+    ) {
+      return { x: rect.x, y: rect.y };
+    }
+    rect.y += AUTO_PROMPT_REVIEW_COLLISION_STEP;
+  }
+  return { x: rect.x, y: rect.y };
+}
+
+function ensurePromptReviewNodeForPromptOutput(
+  get: () => StudioState,
+  set: StudioSet,
+  promptNodeId: string,
+): PromptReviewEnsureResult {
+  const { nodes, edges } = get();
+  const promptNode = nodes.find((node) => node.id === promptNodeId);
+  if (!promptNode || promptNode.type !== 'department' || promptNode.data.type !== 'prompt') {
+    return null;
+  }
+
+  const text = departmentAssetAsInputText(promptNode.data, 'prompt_review_node')?.trim() ?? '';
+  if (!text) return null;
+
+  const existingId = findConnectedPromptReviewNodeId(promptNodeId, nodes, edges);
+  if (existingId) {
+    get().syncPromptReviewInputFromGraph(existingId);
+    get().focusNode(existingId, { openDetail: false });
+    return { id: existingId, created: false };
+  }
+
+  const reviewId = get().addPromptReviewNode(findAutoPromptReviewPosition(promptNode, nodes), text);
+  set((state) => ({
+    edges: addUniqueAnimatedEdges(state.edges, [
+      {
+        source: promptNodeId,
+        target: reviewId,
+        sourceHandle: DEPT_OUTPUT_HANDLE_ID,
+        targetHandle: 'in',
+      },
+    ]),
+  }));
+  get().syncPromptReviewInputFromGraph(reviewId);
+  get().focusNode(reviewId, { openDetail: false });
+  return { id: reviewId, created: true };
 }
 
 export const useStudioStore = create<StudioState>((set, get) => ({
@@ -2728,6 +2826,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         get().ensureShotListForStoryboard(nodeId);
         get().syncShotListNodesFromStoryboard(nodeId);
       }
+      let autoPromptReview: PromptReviewEnsureResult = null;
       if (kind === 'prompt') {
         const version = get().nodes.find((x) => x.id === nodeId)?.data.version ?? 1;
         get().registerAsset({
@@ -2737,13 +2836,18 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           payload: emp.output as PromptOutput,
           createdAt: Date.now(),
         });
+        autoPromptReview = ensurePromptReviewNodeForPromptOutput(get, set, nodeId);
       }
 
       get().pushMessage({
         role: 'broadcast',
         text:
           kind === 'prompt'
-            ? 'Prompt 节点已生成完成，可直接使用。'
+            ? autoPromptReview?.created
+              ? 'Prompt 节点已生成完成，已自动创建并连接提示词审核节点。'
+              : autoPromptReview
+                ? 'Prompt 节点已生成完成，已同步到已连接的提示词审核节点。'
+                : 'Prompt 节点已生成完成，可直接使用。'
             : `${deptLabel(kindToDepartment(kind))} 已生成完成，请填写审核意见。`,
         nodeId,
       });

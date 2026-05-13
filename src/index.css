@@ -2726,6 +2726,39 @@ body,
   margin-left: auto;
 }
 
+.shot-list-canvas__context-menu {
+  position: fixed;
+  z-index: 10000;
+  min-width: 152px;
+  padding: 6px;
+  border: 1px solid rgba(125, 211, 252, 0.34);
+  border-radius: 10px;
+  background: rgba(10, 18, 33, 0.96);
+  box-shadow:
+    0 14px 34px rgba(0, 0, 0, 0.38),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(12px);
+}
+
+.shot-list-canvas__context-item {
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  color: #dbeafe;
+  background: transparent;
+  cursor: pointer;
+}
+
+.shot-list-canvas__context-item:hover {
+  color: #f8fafc;
+  background: rgba(56, 189, 248, 0.14);
+}
+
 .shot-list-canvas__empty .shot-list-canvas__btn--add {
   margin-top: 10px;
 }
@@ -5852,11 +5885,28 @@ body,
   font-size: 12px;
 }
 
+.skill-slot__chip--style {
+  border-color: rgba(45, 212, 191, 0.45);
+  background: rgba(20, 184, 166, 0.1);
+}
+
 .skill-slot__chip-label {
   flex: 1;
   min-width: 0;
   word-break: break-all;
   color: var(--text);
+}
+
+.skill-slot__chip-tag {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(45, 212, 191, 0.14);
+  color: #99f6e4;
+  font-size: 10px;
+  font-weight: 700;
 }
 
 .skill-slot__chip-remove {
@@ -5870,8 +5920,25 @@ body,
   color: #fecaca;
 }
 
+.skill-slot__chip--style .skill-slot__chip-remove {
+  background: rgba(45, 212, 191, 0.16);
+  color: #99f6e4;
+}
+
 .skill-slot__chip-remove:hover {
   background: rgba(248, 113, 113, 0.32);
+}
+
+.skill-slot__chip--style .skill-slot__chip-remove:hover:not(:disabled) {
+  background: rgba(45, 212, 191, 0.28);
+}
+
+.skill-slot__slot-title {
+  margin: 10px 0 4px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--muted);
 }
 
 .skill-picker-backdrop {
@@ -5942,6 +6009,11 @@ body,
   border: 1px solid rgba(255, 255, 255, 0.06);
   margin-bottom: 8px;
   background: rgba(0, 0, 0, 0.2);
+}
+
+.skill-picker__row--style {
+  border-color: rgba(45, 212, 191, 0.3);
+  background: rgba(20, 184, 166, 0.08);
 }
 
 .skill-picker__meta {
@@ -6376,6 +6448,40 @@ body,
   gap: 12px;
 }
 
+.auth-card__mode-tabs {
+  margin-top: 22px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 6px;
+  border: 1px solid rgba(45, 212, 191, 0.18);
+  border-radius: 18px;
+  background: rgba(2, 6, 23, 0.36);
+}
+
+.auth-card__mode-tab {
+  min-height: 42px;
+  border: 1px solid transparent;
+  border-radius: 14px;
+  background: transparent;
+  color: rgba(203, 213, 225, 0.78);
+  font-size: 14px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.auth-card__mode-tab.is-active {
+  border-color: rgba(45, 212, 191, 0.62);
+  background: rgba(20, 184, 166, 0.18);
+  color: #ecfeff;
+  box-shadow: inset 0 0 18px rgba(45, 212, 191, 0.12);
+}
+
+.auth-card__mode-tab:hover:not(.is-active) {
+  border-color: rgba(148, 163, 184, 0.22);
+  color: #f8fafc;
+}
+
 .auth-card__form--verify {
   margin-top: 16px;
   padding-top: 16px;
@@ -6464,6 +6570,15 @@ body,
   color: #ccfbf1;
   font-size: 14px;
   line-height: 1.6;
+}
+
+.auth-card__divider {
+  margin: 22px 0 4px;
+  color: rgba(153, 246, 228, 0.86);
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
 }
 
 .auth-card__hint {

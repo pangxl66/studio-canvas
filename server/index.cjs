@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const https = require('node:https');
 const http = require('node:http');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const zlib = require('node:zlib');
 const { createClient } = require('@supabase/supabase-js');
 
@@ -15,6 +16,8 @@ const PROJECT_LIST_LIMIT = 40;
 const DEFAULT_MONTHLY_QUOTA = 20;
 const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_MODEL = 'gpt-5.5';
+const TEST_INVITE_TOKEN_PREFIX = 'test-invite';
+const testInviteQuotas = new Map();
 
 loadLocalEnvFile(path.join(rootDir, '.env.local'));
 
@@ -36,6 +39,128 @@ function loadLocalEnvFile(filePath) {
 
 function env(name) {
   return String(process.env[name] || '').trim();
+}
+
+function parseTestInviteCodes(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return [];
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed.map((item) => String(item || '').trim()).filter(Boolean);
+    }
+  } catch {
+    // Fall back to a human-friendly comma/newline/space separated list.
+  }
+
+  return raw.split(/[\s,;，；]+/).map((item) => item.trim()).filter(Boolean);
+}
+
+function getTestInviteCode() {
+  return env('TEST_INVITE_CODE');
+}
+
+function getTestInviteCodes() {
+  const codes = [
+    ...parseTestInviteCodes(env('TEST_INVITE_CODES')),
+    ...parseTestInviteCodes(getTestInviteCode()),
+  ];
+  return [...new Set(codes)];
+}
+
+function getTestInviteSecret() {
+  return env('TEST_INVITE_SECRET') || getTestInviteCodes()[0] || env('SUPABASE_SERVICE_ROLE_KEY');
+}
+
+function getTestInviteMonthlyQuota() {
+  const value = Number.parseInt(env('TEST_INVITE_MONTHLY_QUOTA') || '', 10);
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_MONTHLY_QUOTA;
+}
+
+function base64UrlJson(value) {
+  return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
+}
+
+function signTestInvitePayload(payload) {
+  const secret = getTestInviteSecret();
+  if (!secret) return '';
+  return crypto.createHmac('sha256', secret).update(payload).digest('base64url');
+}
+
+function createTestInviteToken(email) {
+  const payload = base64UrlJson({
+    email,
+    iat: Math.floor(Date.now() / 1000),
+  });
+  const signature = signTestInvitePayload(payload);
+  if (!signature) return '';
+  return `${TEST_INVITE_TOKEN_PREFIX}.${payload}.${signature}`;
+}
+
+function readTestInviteToken(token) {
+  const secret = getTestInviteSecret();
+  if (!secret || !token || !token.startsWith(`${TEST_INVITE_TOKEN_PREFIX}.`)) {
+    return null;
+  }
+
+  const [, payload, signature] = token.split('.');
+  if (!payload || !signature) return null;
+  const expected = signTestInvitePayload(payload);
+  const expectedBuffer = Buffer.from(expected);
+  const actualBuffer = Buffer.from(signature);
+  if (expectedBuffer.length !== actualBuffer.length || !crypto.timingSafeEqual(expectedBuffer, actualBuffer)) {
+    return null;
+  }
+
+  try {
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    const email = normalizeEmail(data.email) || normalizeEmail(env('TEST_INVITE_EMAIL')) || 'tester@studio-canvas.local';
+    return {
+      email,
+      id: `test-invite:${crypto.createHash('sha256').update(email).digest('hex').slice(0, 16)}`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function readTestInviteQuota(email) {
+  const normalizedEmail = normalizeEmail(email) || 'tester@studio-canvas.local';
+  const monthlyQuota = getTestInviteMonthlyQuota();
+  const existing = testInviteQuotas.get(normalizedEmail);
+  if (existing && existing.monthlyQuota === monthlyQuota) {
+    return existing;
+  }
+  const nextQuota = {
+    monthlyQuota,
+    remainingQuota: monthlyQuota,
+    updatedAt: new Date().toISOString(),
+  };
+  testInviteQuotas.set(normalizedEmail, nextQuota);
+  return nextQuota;
+}
+
+function reserveTestInviteQuota(email, cost) {
+  const quota = readTestInviteQuota(email);
+  const safeCost = Math.max(Number(cost) || 1, 1);
+  if (quota.remainingQuota < safeCost) {
+    return {
+      ok: false,
+      message: `测试额度不足，当前剩余 ${quota.remainingQuota} 次，本次需要 ${safeCost} 次。`,
+      remaining: quota.remainingQuota,
+    };
+  }
+  quota.remainingQuota -= safeCost;
+  quota.updatedAt = new Date().toISOString();
+  return { ok: true, remaining: quota.remainingQuota };
+}
+
+function refundTestInviteQuota(email, cost) {
+  const quota = readTestInviteQuota(email);
+  const safeCost = Math.max(Number(cost) || 1, 1);
+  quota.remainingQuota = Math.min(quota.monthlyQuota, quota.remainingQuota + safeCost);
+  quota.updatedAt = new Date().toISOString();
 }
 
 function normalizeProvider(value) {
@@ -236,6 +361,25 @@ function getAuthClients(token) {
 
 async function getAuthedContext(req) {
   const token = getBearerToken(req);
+  const testInvite = readTestInviteToken(token);
+  if (testInvite) {
+    const now = new Date().toISOString();
+    return {
+      isTestInvite: true,
+      serviceClient: null,
+      user: {
+        app_metadata: { provider: 'test-invite' },
+        aud: 'authenticated',
+        created_at: now,
+        email: testInvite.email,
+        id: testInvite.id,
+        role: 'authenticated',
+        updated_at: now,
+        user_metadata: { testInvite: true },
+      },
+      userId: testInvite.id,
+    };
+  }
   if (!token) {
     return { error: { status: 401, message: '请先登录。' } };
   }
@@ -612,6 +756,59 @@ async function handleHealth(req, res) {
   });
 }
 
+async function handleTestInvite(req, res) {
+  if (req.method === 'GET') {
+    const inviteCodes = getTestInviteCodes();
+    sendJson(res, 200, { enabled: Boolean(inviteCodes.length), inviteCount: inviteCodes.length });
+    return;
+  }
+  if (req.method !== 'POST') {
+    sendJson(res, 405, { error: { message: 'Method not allowed.' } });
+    return;
+  }
+
+  const inviteCodes = getTestInviteCodes();
+  if (!inviteCodes.length) {
+    sendJson(res, 404, { error: { message: '测试邀请码登录未启用。' } });
+    return;
+  }
+
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: { message: '请求体不是合法 JSON。' } });
+    return;
+  }
+
+  const inviteCode = String(body?.inviteCode || body?.code || '').trim();
+  if (!inviteCode) {
+    sendJson(res, 400, { error: { message: '请输入测试邀请码。' } });
+    return;
+  }
+  if (!inviteCodes.includes(inviteCode)) {
+    sendJson(res, 401, { error: { message: '测试邀请码无效。' } });
+    return;
+  }
+
+  const email = normalizeEmail(body?.email) || normalizeEmail(env('TEST_INVITE_EMAIL')) || 'tester@studio-canvas.local';
+  const accessToken = createTestInviteToken(email);
+  if (!accessToken) {
+    sendJson(res, 500, { error: { message: '无法创建测试登录令牌，请检查 TEST_INVITE_SECRET 或 TEST_INVITE_CODE。' } });
+    return;
+  }
+
+  const quota = readTestInviteQuota(email);
+  sendJson(res, 200, {
+    ok: true,
+    accessToken,
+    email,
+    monthlyQuota: quota.monthlyQuota,
+    remainingQuota: quota.remainingQuota,
+    tokenType: 'bearer',
+  });
+}
+
 async function handleCreditStatus(req, res) {
   if (req.method !== 'GET') {
     sendJson(res, 405, { error: { message: 'Method not allowed.' } });
@@ -620,6 +817,21 @@ async function handleCreditStatus(req, res) {
   const auth = await getAuthedContext(req);
   if (auth.error) {
     sendJson(res, auth.error.status, { error: { message: auth.error.message } });
+    return;
+  }
+  if (auth.isTestInvite) {
+    const quota = readTestInviteQuota(auth.user?.email || auth.userId);
+    sendJson(res, 200, {
+      displayName: '测试邀请码',
+      email: auth.user?.email || null,
+      isAdmin: false,
+      monthlyQuota: quota.monthlyQuota,
+      plan: 'test',
+      remainingQuota: quota.remainingQuota,
+      resetAt: null,
+      updatedAt: quota.updatedAt,
+      userId: auth.userId,
+    });
     return;
   }
   try {
@@ -856,6 +1068,14 @@ async function handleProjects(req, res) {
     sendJson(res, auth.error.status, { error: { message: auth.error.message } });
     return;
   }
+  if (auth.isTestInvite) {
+    if (req.method === 'GET') {
+      sendJson(res, 200, { projects: [] });
+      return;
+    }
+    sendJson(res, 403, { error: { message: '测试邀请码用户暂不支持云端工程保存，请先导出工程文件。' } });
+    return;
+  }
 
   if (req.method === 'GET') {
     const { data, error } = await auth.serviceClient
@@ -925,6 +1145,10 @@ async function handleProjectById(req, res, projectId) {
   }
   if (!projectId) {
     sendJson(res, 400, { error: { message: '缺少工程 ID。' } });
+    return;
+  }
+  if (auth.isTestInvite) {
+    sendJson(res, 403, { error: { message: '测试邀请码用户暂不支持云端工程管理，请先导出工程文件。' } });
     return;
   }
 
@@ -1041,6 +1265,19 @@ async function handleLlmChat(req, res) {
   const cost = quotaCostForFeature(feature, body);
   const inChars = inputChars(body);
   const model = normalizeModel(body.model, feature, provider);
+  const isTestInvite = Boolean(auth.isTestInvite);
+  const testInviteEmail = normalizeEmail(auth.user?.email) || 'tester@studio-canvas.local';
+  const recordUsage = async (event) => {
+    if (isTestInvite) return;
+    await writeUsage(auth.serviceClient, event);
+  };
+  const refundReservedQuota = async () => {
+    if (isTestInvite) {
+      refundTestInviteQuota(testInviteEmail, cost);
+      return;
+    }
+    await refundQuota(auth.serviceClient, auth.userId, cost);
+  };
 
   console.log(
     'LLM chat request received',
@@ -1053,14 +1290,18 @@ async function handleLlmChat(req, res) {
     }),
   );
 
-  try {
-    await ensureUserRows(auth.serviceClient, auth.user);
-  } catch (error) {
-    sendJson(res, 500, { error: { message: sanitizeError(error) || '用户额度初始化失败。' } });
-    return;
+  if (!isTestInvite) {
+    try {
+      await ensureUserRows(auth.serviceClient, auth.user);
+    } catch (error) {
+      sendJson(res, 500, { error: { message: sanitizeError(error) || '用户额度初始化失败。' } });
+      return;
+    }
   }
 
-  const reservation = await reserveQuota(auth.serviceClient, auth.userId, cost);
+  const reservation = isTestInvite
+    ? reserveTestInviteQuota(testInviteEmail, cost)
+    : await reserveQuota(auth.serviceClient, auth.userId, cost);
   if (!reservation.ok) {
     console.warn(
       'LLM quota reservation failed',
@@ -1073,7 +1314,7 @@ async function handleLlmChat(req, res) {
         message: sanitizeError(reservation.message),
       }),
     );
-    await writeUsage(auth.serviceClient, {
+    await recordUsage({
       user_id: auth.userId,
       project_id: body.projectId || null,
       feature,
@@ -1095,7 +1336,7 @@ async function handleLlmChat(req, res) {
     const outChars = outputChars(rawText);
     const isOk = upstreamResponse.ok;
     const failureMessage = isOk ? undefined : classifyUpstreamError(upstreamResponse.status, rawText);
-    await writeUsage(auth.serviceClient, {
+    await recordUsage({
       user_id: auth.userId,
       project_id: body.projectId || null,
       feature,
@@ -1118,7 +1359,7 @@ async function handleLlmChat(req, res) {
           body: sanitizeError(rawText),
         }),
       );
-      await refundQuota(auth.serviceClient, auth.userId, cost);
+      await refundReservedQuota();
       sendJson(res, upstreamResponse.status, {
         error: {
           message: failureMessage,
@@ -1132,9 +1373,9 @@ async function handleLlmChat(req, res) {
     res.setHeader('cache-control', 'no-store');
     res.end(rawText);
   } catch (error) {
-    await refundQuota(auth.serviceClient, auth.userId, cost);
+    await refundReservedQuota();
     const message = classifyLlmRequestException(error);
-    await writeUsage(auth.serviceClient, {
+    await recordUsage({
       user_id: auth.userId,
       project_id: body.projectId || null,
       feature,
@@ -1224,6 +1465,10 @@ async function route(req, res) {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     if (url.pathname === '/api/health') {
       await handleHealth(req, res);
+      return;
+    }
+    if (url.pathname === '/api/auth/test-invite') {
+      await handleTestInvite(req, res);
       return;
     }
     if (url.pathname === '/api/credits/status') {
