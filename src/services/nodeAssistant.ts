@@ -424,7 +424,7 @@ async function invokeAssistantJsonObject(params: {
   temperature?: number;
 }): Promise<unknown> {
   if (getResolvedPipelineExecutionMode() !== 'model') {
-    throw new Error('当前是 Fast 本地模式：节点助手精确改稿只在 Deep/API 模式下可用。请先切到 Deep 再发送反馈。');
+    throw new Error('节点助手需要 API 模型才能精确改稿，请先在模型设置中配置可用 API。');
   }
 
   const modelOverride = getAssistantModelOverride();

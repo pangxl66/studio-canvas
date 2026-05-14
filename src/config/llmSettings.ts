@@ -1,40 +1,43 @@
 import type { ModelGatewayConfig } from '@/services/ModelGateway';
 import { isDesktopRuntime, isSaasHostedMode, isSaasMockEnabled } from '@/services/authClient';
 
-// Bump the storage key so stale browser-cached settings do not override the GPT-5.5 defaults.
-const STORAGE_KEY = 'studio_canvas_llm_settings_v6';
-const LEGACY_STORAGE_KEYS = ['studio_canvas_llm_settings_v5', 'tapnow_studio_llm_settings_v5'];
+// v7 keeps only API-backed generation in the user-facing product while keeping legacy settings readable.
+const STORAGE_KEY = 'studio_canvas_llm_settings_v7';
+const LEGACY_STORAGE_KEYS = [
+  'studio_canvas_llm_settings_v6',
+  'studio_canvas_llm_settings_v5',
+  'tapnow_studio_llm_settings_v5',
+];
 const PROVIDER_STORAGE_KEY = 'studio_canvas_llm_provider_v1';
 
 export type LlmProvider = 'gpt' | 'deepseek';
-export type LlmMode = 'fast' | 'deep';
+export type LlmMode = 'deep';
 export type PipelineExecutionMode = 'rule' | 'model';
 
 export const DEFAULT_LLM_PROVIDER: LlmProvider = 'gpt';
-export const DEFAULT_FAST_LLM_MODEL = 'gpt-5.5';
 export const DEFAULT_DEEP_LLM_MODEL = 'gpt-5.5';
-export const DEFAULT_LLM_MODEL = DEFAULT_FAST_LLM_MODEL;
-export const DEFAULT_LLM_MODE: LlmMode = 'fast';
+export const DEFAULT_LLM_MODEL = DEFAULT_DEEP_LLM_MODEL;
+export const DEFAULT_LLM_MODE: LlmMode = 'deep';
 export const DEFAULT_LLM_TIMEOUT_MS = 180_000;
-export const DEFAULT_PIPELINE_EXECUTION_MODE: PipelineExecutionMode = 'rule';
+export const DEFAULT_PIPELINE_EXECUTION_MODE: PipelineExecutionMode = 'model';
 
 export type LlmUserSettings = {
   proxyUrl: string;
   baseUrl: string;
   apiKey: string;
   mode: LlmMode;
-  fastModel: string;
   deepModel: string;
   timeoutMs: number;
   pipelineMode: PipelineExecutionMode;
 };
+
+type LegacyLlmUserSettings = Partial<LlmUserSettings> & Record<string, unknown>;
 
 type ProviderEnvSettings = {
   proxyUrl: string;
   baseUrl: string;
   apiKey: string;
   model: string;
-  fastModel: string;
   deepModel: string;
 };
 
@@ -65,29 +68,12 @@ function envModel(): string {
   return envValue('VITE_LLM_MODEL');
 }
 
-function envFastModel(): string {
-  return envValue('VITE_LLM_FAST_MODEL') || envModel();
-}
-
 function envDeepModel(): string {
   return envValue('VITE_LLM_DEEP_MODEL') || envModel();
 }
 
 function envMode(): LlmMode | null {
-  const raw = envValue('VITE_LLM_MODE').toLowerCase();
-  if (raw === 'fast' || raw === 'deep') return raw;
-  return null;
-}
-
-function envPipelineMode(): PipelineExecutionMode | null {
-  const raw =
-    ((import.meta.env.VITE_PIPELINE_MODE as string | undefined) ??
-      (import.meta.env.VITE_PIPELINE_EXECUTION_MODE as string | undefined) ??
-      '')
-      .trim()
-      .toLowerCase();
-  if (raw === 'rule' || raw === 'model') return raw;
-  return null;
+  return envValue('VITE_LLM_MODE') ? DEFAULT_LLM_MODE : null;
 }
 
 function envTimeoutMs(): number | null {
@@ -133,7 +119,6 @@ function getProviderEnvSettings(provider: LlmProvider): ProviderEnvSettings {
     baseUrl: providerEnvValue(provider, 'BASE_URL') || (usesDefaultEnv ? envBaseUrl() : ''),
     apiKey: providerEnvValue(provider, 'API_KEY') || (usesDefaultEnv ? envApiKey() : ''),
     model,
-    fastModel: providerEnvValue(provider, 'FAST_MODEL') || (usesDefaultEnv ? envFastModel() : '') || model,
     deepModel: providerEnvValue(provider, 'DEEP_MODEL') || (usesDefaultEnv ? envDeepModel() : '') || model,
   };
 }
@@ -178,12 +163,11 @@ export function getAvailableLocalLlmProviders(): Array<{ id: LlmProvider; label:
   }));
 }
 
-function normalizeMode(mode: unknown): LlmMode {
-  return mode === 'deep' ? 'deep' : DEFAULT_LLM_MODE;
+function normalizeMode(_mode: unknown): LlmMode {
+  return DEFAULT_LLM_MODE;
 }
 
-function normalizePipelineMode(mode: unknown): PipelineExecutionMode {
-  if (mode === 'rule') return mode;
+function normalizePipelineMode(_mode: unknown): PipelineExecutionMode {
   return DEFAULT_PIPELINE_EXECUTION_MODE;
 }
 
@@ -201,11 +185,11 @@ function normalizeModelName(model: string, fallback: string): string {
   return trimmed;
 }
 
-export function pipelineModeForLlmMode(mode: LlmMode): PipelineExecutionMode {
-  return mode === 'deep' ? 'model' : 'rule';
+export function pipelineModeForLlmMode(_mode: LlmMode = DEFAULT_LLM_MODE): PipelineExecutionMode {
+  return DEFAULT_PIPELINE_EXECUTION_MODE;
 }
 
-export function loadLlmUserSettings(): Partial<LlmUserSettings> | null {
+export function loadLlmUserSettings(): LegacyLlmUserSettings | null {
   try {
     const raw =
       localStorage.getItem(STORAGE_KEY) ??
@@ -216,7 +200,7 @@ export function loadLlmUserSettings(): Partial<LlmUserSettings> | null {
     if (!localStorage.getItem(STORAGE_KEY)) {
       localStorage.setItem(STORAGE_KEY, raw);
     }
-    return value as Partial<LlmUserSettings>;
+    return value as LegacyLlmUserSettings;
   } catch {
     return null;
   }
@@ -234,16 +218,7 @@ export function clearLlmUserSettings(): void {
 }
 
 export function getResolvedPipelineExecutionMode(): PipelineExecutionMode {
-  const saved = loadLlmUserSettings();
-  const savedMode = saved?.mode;
-  const envResolvedMode = envMode();
-  if (savedMode === 'fast' || savedMode === 'deep') {
-    return pipelineModeForLlmMode(savedMode);
-  }
-  if (envResolvedMode === 'fast' || envResolvedMode === 'deep') {
-    return pipelineModeForLlmMode(envResolvedMode);
-  }
-  return normalizePipelineMode(saved?.pipelineMode ?? envPipelineMode());
+  return DEFAULT_PIPELINE_EXECUTION_MODE;
 }
 
 export function pipelineModeNeedsGateway(mode: PipelineExecutionMode): boolean {
@@ -259,11 +234,6 @@ export function getResolvedLlmGatewayConfig(): ModelGatewayConfig | null {
   const proxyUrl = (forcedSaasProxyUrl || (preferLocalEnv ? providerEnvSettings.proxyUrl : saved?.proxyUrl || envProxyUrl())).trim();
   const baseUrl = (preferLocalEnv ? providerEnvSettings.baseUrl : saved?.baseUrl ?? envBaseUrl()).trim();
   const apiKey = (preferLocalEnv ? providerEnvSettings.apiKey : saved?.apiKey ?? envApiKey()).trim();
-  const mode = normalizeMode(saved?.mode ?? envMode());
-  const fastModel = normalizeModelName(
-    preferLocalEnv ? providerEnvSettings.fastModel : saved?.fastModel ?? envFastModel(),
-    DEFAULT_FAST_LLM_MODEL,
-  );
   const deepModel = normalizeModelName(
     preferLocalEnv ? providerEnvSettings.deepModel : saved?.deepModel ?? envDeepModel(),
     DEFAULT_DEEP_LLM_MODEL,
@@ -276,7 +246,7 @@ export function getResolvedLlmGatewayConfig(): ModelGatewayConfig | null {
     proxyUrl: proxyUrl || undefined,
     baseUrl: forcedSaasProxyUrl ? undefined : baseUrl || undefined,
     apiKey: forcedSaasProxyUrl ? undefined : apiKey || undefined,
-    model: mode === 'deep' ? deepModel : fastModel,
+    model: deepModel,
     provider: selectedProvider,
     timeoutMs,
   };
@@ -285,30 +255,18 @@ export function getResolvedLlmGatewayConfig(): ModelGatewayConfig | null {
 export function getLlmSettingsFormDefaults(): LlmUserSettings {
   const saved = loadLlmUserSettings();
   const preferLocalEnv = shouldPreferLocalEnvGateway();
-  const mode = normalizeMode(saved?.mode ?? envMode());
   const forcedSaasProxyUrl = forcedBrowserProxyUrl();
   const providerEnvSettings = getActiveProviderEnvSettings();
   return {
     proxyUrl: (forcedSaasProxyUrl || (preferLocalEnv ? providerEnvSettings.proxyUrl : saved?.proxyUrl || envProxyUrl())).trim(),
     baseUrl: forcedSaasProxyUrl ? '' : (preferLocalEnv ? providerEnvSettings.baseUrl : saved?.baseUrl ?? envBaseUrl()).trim(),
     apiKey: forcedSaasProxyUrl ? '' : (preferLocalEnv ? providerEnvSettings.apiKey : saved?.apiKey ?? envApiKey()).trim(),
-    mode,
-    fastModel: normalizeModelName(
-      preferLocalEnv ? providerEnvSettings.fastModel : saved?.fastModel ?? envFastModel(),
-      DEFAULT_FAST_LLM_MODEL,
-    ),
+    mode: normalizeMode(saved?.mode ?? envMode()),
     deepModel: normalizeModelName(
       preferLocalEnv ? providerEnvSettings.deepModel : saved?.deepModel ?? envDeepModel(),
       DEFAULT_DEEP_LLM_MODEL,
     ),
     timeoutMs: normalizeTimeoutMs(preferLocalEnv ? envTimeoutMs() : saved?.timeoutMs),
-    pipelineMode:
-      preferLocalEnv || saved?.mode === 'fast' || saved?.mode === 'deep' || envResolvedModeExists(saved?.mode, envMode())
-        ? pipelineModeForLlmMode(mode)
-        : normalizePipelineMode(saved?.pipelineMode ?? envPipelineMode()),
+    pipelineMode: normalizePipelineMode(saved?.pipelineMode),
   };
-}
-
-function envResolvedModeExists(savedMode: unknown, envModeValue: LlmMode | null): boolean {
-  return savedMode === 'fast' || savedMode === 'deep' || envModeValue === 'fast' || envModeValue === 'deep';
 }

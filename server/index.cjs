@@ -648,7 +648,7 @@ function quotaCostForFeature(feature, body) {
 function configuredModelForFeature(feature, provider = '') {
   const normalizedFeature = String(feature || '').trim();
   if (normalizedFeature === 'text-polish') {
-    return envForProvider(provider, 'LLM_FAST_MODEL') || envForProvider(provider, 'LLM_MODEL');
+    return envForProvider(provider, 'LLM_DEEP_MODEL') || envForProvider(provider, 'LLM_MODEL');
   }
   if (normalizedFeature === 'prompt-review') {
     return envForProvider(provider, 'LLM_DEEP_MODEL') || envForProvider(provider, 'LLM_MODEL');

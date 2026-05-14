@@ -173,7 +173,7 @@ function requireDeepModeForWriting(): ExecuteTaskFailure {
   return {
     ok: false,
     reason: 'exception',
-    message: '当前为 Fast 本地模式：编剧节点暂不支持本地执行，请切换到 Deep 后再运行。',
+    message: '当前未启用 API 模型执行：编剧节点需要通过 API 执行，请先检查模型设置。',
   };
 }
 
@@ -231,7 +231,7 @@ export async function executeEmployeePhase(params: ExecuteTaskParams): Promise<E
         }
 
         if (executionMode === 'rule') {
-          skillWarnings.push('当前为 Fast 本地模式：分镜节点按本地规则执行，不调用 API。');
+          skillWarnings.push('当前使用本地规则兜底：分镜节点没有调用 API。');
           const output = runRuleStoryboardFromText(inputUsed);
           return {
             ok: true,
@@ -282,7 +282,7 @@ export async function executeEmployeePhase(params: ExecuteTaskParams): Promise<E
         }
 
         if (executionMode === 'rule') {
-          skillWarnings.push('当前为 Fast 本地模式：提示词节点按本地规则执行，不调用 API。');
+          skillWarnings.push('当前使用本地规则兜底：提示词节点没有调用 API。');
           const output = runRulePromptFromStoryboard(inputUsed);
           return { ok: true, inputUsed, output, skillWarnings };
         }
@@ -334,7 +334,7 @@ export async function executeLeaderPhase(args: {
         if (executionMode !== 'model') {
           return {
             approved: false,
-            feedback: '当前为 Fast 本地模式：编剧审核暂不支持本地执行，请切换到 Deep 后再运行。',
+            feedback: '当前未启用 API 模型执行：编剧审核需要通过 API 执行，请先检查模型设置。',
           };
         }
         if (!isGatewayReady()) {
