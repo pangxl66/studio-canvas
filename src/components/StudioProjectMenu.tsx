@@ -549,7 +549,10 @@ export function StudioProjectMenu() {
   }, [closeMenus, menuOpen]);
 
   return (
-    <Panel position="top-left" className="studio-project-panel">
+    <Panel
+      position="top-left"
+      className={`studio-project-panel${menuOpen ? ' studio-project-panel--menu-open' : ''}`}
+    >
       <div ref={menuRef} className="studio-project-hub nodrag nopan">
         <div className="studio-project-hub__rail">
           <button
