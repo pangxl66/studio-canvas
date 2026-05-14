@@ -13,7 +13,8 @@ const port = Number.parseInt(process.env.PORT || '3000', 10);
 const MAX_INPUT_CHARS = 80_000;
 const MAX_PROJECT_SNAPSHOT_CHARS = 5_000_000;
 const PROJECT_LIST_LIMIT = 40;
-const DEFAULT_MONTHLY_QUOTA = 20;
+const DEFAULT_MONTHLY_QUOTA = 30;
+const LEGACY_DEFAULT_MONTHLY_QUOTA = 20;
 const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_MODEL = 'gpt-5.5';
 const TEST_INVITE_TOKEN_PREFIX = 'test-invite';
@@ -446,6 +447,59 @@ async function ensureUserRows(serviceClient, user) {
   ]);
 }
 
+function shouldUpgradeLegacyDefaultQuota(wallet) {
+  if (DEFAULT_MONTHLY_QUOTA <= LEGACY_DEFAULT_MONTHLY_QUOTA) return false;
+  if (!wallet) return false;
+
+  const monthlyQuota = Number(wallet.monthly_quota || 0);
+  const remainingQuota = Number(wallet.remaining_quota || 0);
+  return monthlyQuota === LEGACY_DEFAULT_MONTHLY_QUOTA && remainingQuota <= LEGACY_DEFAULT_MONTHLY_QUOTA;
+}
+
+async function upgradeLegacyDefaultQuota(serviceClient, userId, wallet) {
+  if (!shouldUpgradeLegacyDefaultQuota(wallet)) return wallet;
+
+  const nextUpdatedAt = new Date().toISOString();
+  const { data, error } = await serviceClient
+    .from('credit_wallets')
+    .update({
+      monthly_quota: DEFAULT_MONTHLY_QUOTA,
+      remaining_quota: DEFAULT_MONTHLY_QUOTA,
+      updated_at: nextUpdatedAt,
+    })
+    .eq('user_id', userId)
+    .eq('monthly_quota', LEGACY_DEFAULT_MONTHLY_QUOTA)
+    .select('monthly_quota,remaining_quota,reset_at,updated_at')
+    .maybeSingle();
+
+  if (error) {
+    console.warn('Legacy default quota upgrade failed', sanitizeError(error.message));
+    return wallet;
+  }
+
+  return data || {
+    ...wallet,
+    monthly_quota: DEFAULT_MONTHLY_QUOTA,
+    remaining_quota: DEFAULT_MONTHLY_QUOTA,
+    updated_at: nextUpdatedAt,
+  };
+}
+
+async function upgradeLegacyDefaultQuotaForUser(serviceClient, userId) {
+  const { data: wallet, error } = await serviceClient
+    .from('credit_wallets')
+    .select('monthly_quota,remaining_quota,reset_at,updated_at')
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  if (error || !wallet) {
+    if (error) console.warn('Legacy default quota read failed', sanitizeError(error.message));
+    return null;
+  }
+
+  return upgradeLegacyDefaultQuota(serviceClient, userId, wallet);
+}
+
 function hasLlmUpstream() {
   return hasProviderLlmUpstream('') || hasProviderLlmUpstream('gpt') || hasProviderLlmUpstream('deepseek');
 }
@@ -644,6 +698,8 @@ function firstRpcRow(data) {
 }
 
 async function reserveQuota(serviceClient, userId, cost) {
+  await upgradeLegacyDefaultQuotaForUser(serviceClient, userId);
+
   const { data, error } = await serviceClient.rpc('reserve_credit_quota', {
     p_cost: cost,
     p_user_id: userId,
@@ -848,15 +904,16 @@ async function handleCreditStatus(req, res) {
       sendJson(res, 500, { error: { message: walletError?.message || '读取额度失败。' } });
       return;
     }
+    const nextWallet = await upgradeLegacyDefaultQuota(auth.serviceClient, auth.userId, wallet);
     sendJson(res, 200, {
       displayName: profile?.display_name || null,
       email: profile?.email || auth.user.email || null,
       isAdmin: isAdminUser(auth.user),
-      monthlyQuota: Number(wallet.monthly_quota || 0),
+      monthlyQuota: Number(nextWallet.monthly_quota || 0),
       plan: profile?.plan || 'free',
-      remainingQuota: Number(wallet.remaining_quota || 0),
-      resetAt: wallet.reset_at || null,
-      updatedAt: wallet.updated_at || null,
+      remainingQuota: Number(nextWallet.remaining_quota || 0),
+      resetAt: nextWallet.reset_at || null,
+      updatedAt: nextWallet.updated_at || null,
       userId: auth.userId,
     });
   } catch (error) {
@@ -926,6 +983,7 @@ async function readAdminCreditDetails(serviceClient, email) {
     }
     nextWallet = createdWallet;
   }
+  nextWallet = await upgradeLegacyDefaultQuota(serviceClient, profile.id, nextWallet);
 
   const { data: usageEvents, error: usageError } = await serviceClient
     .from('usage_events')

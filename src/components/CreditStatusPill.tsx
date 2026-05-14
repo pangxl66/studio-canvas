@@ -9,7 +9,7 @@ import {
 function planLabel(plan: string): string {
   if (plan === 'pro') return 'Pro';
   if (plan === 'personal') return '个人版';
-  if (plan === 'trial') return '试用';
+  if (plan === 'trial' || plan === 'test') return '试用';
   return 'Free';
 }
 

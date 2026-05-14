@@ -25,7 +25,7 @@ function usageLabel(status: string): string {
 
 export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) {
   const [email, setEmail] = useState('');
-  const [amount, setAmount] = useState('20');
+  const [amount, setAmount] = useState('30');
   const [details, setDetails] = useState<AdminCreditDetails | null>(null);
   const [message, setMessage] = useState('');
   const [isBusy, setIsBusy] = useState(false);
@@ -126,7 +126,7 @@ export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) 
             设为次数
           </button>
           <button disabled={isBusy} type="button" onClick={() => void runAction('reset')}>
-            重置为 20
+            重置为 30
           </button>
         </div>
 

@@ -12,8 +12,8 @@ create table if not exists public.profiles (
 
 create table if not exists public.credit_wallets (
   user_id uuid primary key references auth.users(id) on delete cascade,
-  monthly_quota int not null default 20,
-  remaining_quota int not null default 20,
+  monthly_quota int not null default 30,
+  remaining_quota int not null default 30,
   reset_at timestamptz,
   updated_at timestamptz not null default now()
 );
