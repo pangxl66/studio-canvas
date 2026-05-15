@@ -4,6 +4,7 @@ const rawSupabaseUrl = import.meta.env.VITE_SUPABASE_URL?.trim() ?? '';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim() ?? '';
 const saasMock = import.meta.env.VITE_SAAS_MOCK?.trim().toLowerCase() ?? '';
 const MOCK_AUTH_KEY = 'studio_canvas_saas_mock_auth_v1';
+const ACTIVATED_TEST_INVITE_AUTH_KEY = 'studio_canvas_saas_test_invite_activations_v1';
 
 export const STUDIO_AUTH_MOCK_EVENT = 'studio-auth-mock-change';
 
@@ -32,9 +33,12 @@ export type AuthSnapshot = {
 
 type StoredLocalAuth = {
   accessToken?: string;
+  activatedAt?: string;
   email: string;
   refreshToken?: string;
 };
+
+type StoredTestInviteAuths = Record<string, StoredLocalAuth>;
 
 export function isDesktopRuntime(): boolean {
   return typeof window !== 'undefined' && Boolean(window.studioLicense?.isDesktop);
@@ -81,6 +85,43 @@ function readStoredLocalAuth(): StoredLocalAuth | null {
   } catch {
     return null;
   }
+}
+
+function normalizeEmail(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function readActivatedTestInviteAuths(): StoredTestInviteAuths {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(ACTIVATED_TEST_INVITE_AUTH_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as StoredTestInviteAuths;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function readActivatedTestInviteAuth(email: string): StoredLocalAuth | null {
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) return null;
+  const stored = readActivatedTestInviteAuths()[normalizedEmail];
+  return stored?.accessToken ? stored : null;
+}
+
+function writeActivatedTestInviteAuth(email: string, accessToken?: string, refreshToken?: string): void {
+  if (!accessToken) return;
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) return;
+  const stored = readActivatedTestInviteAuths();
+  stored[normalizedEmail] = {
+    accessToken,
+    activatedAt: new Date().toISOString(),
+    email: normalizedEmail,
+    refreshToken,
+  };
+  window.localStorage.setItem(ACTIVATED_TEST_INVITE_AUTH_KEY, JSON.stringify(stored));
 }
 
 function writeStoredLocalAuth(email: string, accessToken?: string, refreshToken?: string): void {
@@ -152,9 +193,23 @@ export async function getTestInviteStatus(): Promise<boolean> {
   }
 }
 
+export function hasActivatedTestInviteEmail(email: string): boolean {
+  return Boolean(readActivatedTestInviteAuth(email));
+}
+
 export async function signInWithTestInvite(email: string, inviteCode: string): Promise<Session | null> {
-  const normalizedEmail = email.trim();
+  const normalizedEmail = normalizeEmail(email);
   const normalizedCode = inviteCode.trim();
+
+  const activatedAuth = readActivatedTestInviteAuth(normalizedEmail);
+  if (normalizedEmail && !normalizedCode && activatedAuth) {
+    writeStoredLocalAuth(
+      activatedAuth.email || normalizedEmail,
+      activatedAuth.accessToken,
+      activatedAuth.refreshToken || `test-invite-refresh-${Date.now()}`,
+    );
+    return getMockAuthSnapshot().session;
+  }
 
   if (!normalizedEmail) throw new Error('请输入邮箱。');
   if (!normalizedCode) throw new Error('请输入测试邀请码。');
@@ -169,7 +224,10 @@ export async function signInWithTestInvite(email: string, inviteCode: string): P
     throw new Error(data?.error?.message || '测试邀请码验证失败。');
   }
 
-  writeStoredLocalAuth(data?.email || normalizedEmail, data?.accessToken, `test-invite-refresh-${Date.now()}`);
+  const nextEmail = normalizeEmail(data?.email || normalizedEmail);
+  const nextRefreshToken = `test-invite-refresh-${Date.now()}`;
+  writeStoredLocalAuth(nextEmail, data?.accessToken, nextRefreshToken);
+  writeActivatedTestInviteAuth(nextEmail, data?.accessToken, nextRefreshToken);
   return getMockAuthSnapshot().session;
 }
 

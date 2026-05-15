@@ -6534,6 +6534,14 @@ body,
   text-align: center;
 }
 
+.auth-card__inline-note {
+  margin: -4px 0 0;
+  color: #99f6e4;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.5;
+}
+
 .auth-card__button {
   min-height: 52px;
   border: 0;

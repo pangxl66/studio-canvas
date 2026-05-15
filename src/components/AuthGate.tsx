@@ -4,6 +4,7 @@ import { CreditStatusPill } from '@/components/CreditStatusPill';
 import {
   getAuthSnapshot,
   getSupabaseClient,
+  hasActivatedTestInviteEmail,
   isSaasAuthEnabled,
   isSaasMockEnabled,
   sendLoginCode,
@@ -196,6 +197,7 @@ export function AuthGate({ children }: AuthGateProps) {
   if (!currentUser) {
     const canSendCode = !isSubmitting && sendCooldown <= 0;
     const hasSentCode = Boolean(codeSentTo);
+    const inviteAlreadyActivated = authMode === 'invite' && hasActivatedTestInviteEmail(email);
 
     return (
       <main className="auth-gate">
@@ -317,16 +319,17 @@ export function AuthGate({ children }: AuthGateProps) {
                 <input
                   autoComplete="off"
                   className="auth-card__input auth-card__input--code"
-                  disabled={isSubmitting}
+                  disabled={isSubmitting || inviteAlreadyActivated}
                   id="studio-test-invite-code"
                   onChange={(event) => setInviteCode(event.target.value)}
                   placeholder="输入测试邀请码"
-                  required
+                  required={!inviteAlreadyActivated}
                   type="password"
                   value={inviteCode}
                 />
+                {inviteAlreadyActivated ? <p className="auth-card__inline-note">该邮箱已激活，不需要再次输入激活码。</p> : null}
                 <button className="auth-card__button" disabled={isSubmitting} type="submit">
-                  {isSubmitting ? '正在进入...' : '使用测试邀请码进入'}
+                  {isSubmitting ? '正在进入...' : inviteAlreadyActivated ? '进入已激活账号' : '使用测试邀请码进入'}
                 </button>
               </form>
               <p className="auth-card__hint">测试入口用于临时给朋友体验，不占用邮箱验证码额度；测试用户暂不支持云端保存工程。</p>
