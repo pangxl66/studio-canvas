@@ -1,4 +1,4 @@
-import { getSupabaseClient, isSaasAuthEnabled, isSaasMockEnabled } from '@/services/authClient';
+import { getAuthSnapshot, isSaasAuthEnabled, isSaasMockEnabled } from '@/services/authClient';
 
 export const STUDIO_CREDIT_REFRESH_EVENT = 'studio-credit-refresh';
 
@@ -69,7 +69,7 @@ export async function fetchCreditStatus(): Promise<CreditStatus | null> {
     return readMockCredit();
   }
 
-  const session = (await getSupabaseClient()?.auth.getSession())?.data.session;
+  const { session } = await getAuthSnapshot();
   if (!session?.access_token) {
     return null;
   }

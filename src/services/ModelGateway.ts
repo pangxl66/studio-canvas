@@ -1,5 +1,5 @@
 import { safeJsonParse } from '@/services/safeJsonParse';
-import { getSupabaseClient, isSaasAuthEnabled } from '@/services/authClient';
+import { getAuthSnapshot, isSaasAuthEnabled } from '@/services/authClient';
 import { requestCreditRefresh, spendMockCredit } from '@/services/creditService';
 
 export type ModelGatewayConfig = {
@@ -102,7 +102,7 @@ export function getGatewayRequestHeaders(config: ModelGatewayConfig): Record<str
 async function getGatewayRequestHeadersForFetch(config: ModelGatewayConfig): Promise<Record<string, string>> {
   const headers = getGatewayRequestHeaders(config);
   if (config.proxyUrl && isSaasAuthEnabled()) {
-    const session = (await getSupabaseClient()?.auth.getSession())?.data.session;
+    const { session } = await getAuthSnapshot();
     if (session?.access_token) {
       headers.Authorization = `Bearer ${session.access_token}`;
     }
