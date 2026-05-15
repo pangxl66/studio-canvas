@@ -91,6 +91,10 @@ function normalizeEmail(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function normalizeInviteCode(value: string): string {
+  return value.trim().replace(/\s+/g, '').toUpperCase();
+}
+
 function readActivatedTestInviteAuths(): StoredTestInviteAuths {
   if (typeof window === 'undefined') return {};
   try {
@@ -199,7 +203,7 @@ export function hasActivatedTestInviteEmail(email: string): boolean {
 
 export async function signInWithTestInvite(email: string, inviteCode: string): Promise<Session | null> {
   const normalizedEmail = normalizeEmail(email);
-  const normalizedCode = inviteCode.trim();
+  const normalizedCode = normalizeInviteCode(inviteCode);
 
   const activatedAuth = readActivatedTestInviteAuth(normalizedEmail);
   if (normalizedEmail && !normalizedCode && activatedAuth) {

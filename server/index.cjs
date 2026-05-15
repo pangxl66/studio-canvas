@@ -42,6 +42,10 @@ function env(name) {
   return String(process.env[name] || '').trim();
 }
 
+function normalizeInviteCode(value) {
+  return String(value || '').trim().replace(/\s+/g, '').toUpperCase();
+}
+
 function parseTestInviteCodes(value) {
   const raw = String(value || '').trim();
   if (!raw) return [];
@@ -49,17 +53,17 @@ function parseTestInviteCodes(value) {
   try {
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) {
-      return parsed.map((item) => String(item || '').trim()).filter(Boolean);
+      return parsed.map(normalizeInviteCode).filter(Boolean);
     }
   } catch {
     // Fall back to a human-friendly comma/newline/space separated list.
   }
 
-  return raw.split(/[\s,;，；]+/).map((item) => item.trim()).filter(Boolean);
+  return raw.split(/[\s,;\uFF0C\uFF1B]+/u).map(normalizeInviteCode).filter(Boolean);
 }
 
 function getTestInviteCode() {
-  return env('TEST_INVITE_CODE');
+  return normalizeInviteCode(env('TEST_INVITE_CODE'));
 }
 
 function getTestInviteCodes() {
@@ -71,7 +75,17 @@ function getTestInviteCodes() {
 }
 
 function getTestInviteSecret() {
-  return env('TEST_INVITE_SECRET') || getTestInviteCodes()[0] || env('SUPABASE_SERVICE_ROLE_KEY');
+  return env('TEST_INVITE_SECRET') || env('SUPABASE_SERVICE_ROLE_KEY') || getTestInviteCodes()[0];
+}
+
+function getTestInviteSecrets() {
+  const secrets = [
+    env('TEST_INVITE_SECRET'),
+    env('SUPABASE_SERVICE_ROLE_KEY'),
+    ...parseTestInviteCodes(env('TEST_INVITE_LEGACY_SECRETS')),
+    getTestInviteCodes()[0],
+  ].filter(Boolean);
+  return [...new Set(secrets)];
 }
 
 function getTestInviteMonthlyQuota() {
@@ -86,6 +100,10 @@ function base64UrlJson(value) {
 function signTestInvitePayload(payload) {
   const secret = getTestInviteSecret();
   if (!secret) return '';
+  return crypto.createHmac('sha256', secret).update(payload).digest('base64url');
+}
+
+function signTestInvitePayloadWithSecret(payload, secret) {
   return crypto.createHmac('sha256', secret).update(payload).digest('base64url');
 }
 
@@ -104,17 +122,20 @@ function getTestInviteUserId(email) {
 }
 
 function readTestInviteToken(token) {
-  const secret = getTestInviteSecret();
-  if (!secret || !token || !token.startsWith(`${TEST_INVITE_TOKEN_PREFIX}.`)) {
+  const secrets = getTestInviteSecrets();
+  if (!secrets.length || !token || !token.startsWith(`${TEST_INVITE_TOKEN_PREFIX}.`)) {
     return null;
   }
 
   const [, payload, signature] = token.split('.');
   if (!payload || !signature) return null;
-  const expected = signTestInvitePayload(payload);
-  const expectedBuffer = Buffer.from(expected);
   const actualBuffer = Buffer.from(signature);
-  if (expectedBuffer.length !== actualBuffer.length || !crypto.timingSafeEqual(expectedBuffer, actualBuffer)) {
+  const isVerified = secrets.some((secret) => {
+    const expected = signTestInvitePayloadWithSecret(payload, secret);
+    const expectedBuffer = Buffer.from(expected);
+    return expectedBuffer.length === actualBuffer.length && crypto.timingSafeEqual(expectedBuffer, actualBuffer);
+  });
+  if (!isVerified) {
     return null;
   }
 
@@ -870,12 +891,20 @@ async function handleTestInvite(req, res) {
     return;
   }
 
-  const inviteCode = String(body?.inviteCode || body?.code || '').trim();
+  const inviteCode = normalizeInviteCode(body?.inviteCode || body?.code || '');
   if (!inviteCode) {
     sendJson(res, 400, { error: { message: '请输入测试邀请码。' } });
     return;
   }
   if (!inviteCodes.includes(inviteCode)) {
+    console.warn(
+      'Invalid test invite code',
+      JSON.stringify({
+        inviteCount: inviteCodes.length,
+        providedLength: inviteCode.length,
+        providedPrefix: inviteCode.slice(0, 8),
+      }),
+    );
     sendJson(res, 401, { error: { message: '测试邀请码无效。' } });
     return;
   }
