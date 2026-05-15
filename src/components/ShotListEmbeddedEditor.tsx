@@ -2,6 +2,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -545,6 +546,10 @@ export function ShotListEmbeddedEditor({
         .filter(({ rowIdx }) => !isolationActive || isolatedRowSet.has(rowIdx)),
     [isolatedRowSet, isolationActive, shots],
   );
+  const visibleRowHandleSignature = useMemo(
+    () => visibleRows.map(({ shot, rowIdx }) => `${rowIdx}:${shot.wireId ?? String(shot.id)}`).join('|'),
+    [visibleRows],
+  );
 
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingRef = useRef<{ rowIdx: number; field: EditableField; value: string } | null>(null);
@@ -552,8 +557,11 @@ export function ShotListEmbeddedEditor({
   const scheduleHandleRefresh = useCallback(() => {
     if (refreshFrameRef.current != null) return;
     refreshFrameRef.current = window.requestAnimationFrame(() => {
-      refreshFrameRef.current = null;
       updateNodeInternals(id);
+      refreshFrameRef.current = window.requestAnimationFrame(() => {
+        refreshFrameRef.current = null;
+        updateNodeInternals(id);
+      });
     });
   }, [id, updateNodeInternals]);
 
@@ -621,9 +629,22 @@ export function ShotListEmbeddedEditor({
     setShotListSelectedWires(id, selectedWireIds);
   }, [id, selectedWireIds, setShotListSelectedWires]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    updateNodeInternals(id);
     scheduleHandleRefresh();
-  }, [scheduleHandleRefresh, selectedWireIds, shots.length, viewportHeight, visibleRows.length]);
+    const timeoutId = window.setTimeout(scheduleHandleRefresh, 80);
+    return () => window.clearTimeout(timeoutId);
+  }, [id, scheduleHandleRefresh, selectedWireIds, shots.length, updateNodeInternals, viewportHeight, visibleRowHandleSignature]);
+
+  useLayoutEffect(() => {
+    const scrollEl = scrollRef.current;
+    if (!scrollEl || typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(() => scheduleHandleRefresh());
+    observer.observe(scrollEl);
+    const tableEl = scrollEl.querySelector('.shot-list-canvas__table');
+    if (tableEl) observer.observe(tableEl);
+    return () => observer.disconnect();
+  }, [scheduleHandleRefresh]);
 
   useEffect(() => {
     if (!contextMenu) return undefined;
