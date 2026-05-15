@@ -42,7 +42,6 @@ import { PromptReviewNode } from '@/components/PromptReviewNode';
 import { StoryboardFileNode } from '@/components/StoryboardFileNode';
 import { ShotListNode } from '@/components/ShotListNode';
 import { TextNode, TEXT_NODE_OUTPUT_HANDLE_ID } from '@/components/TextNode';
-import { CanvasLayoutButton } from '@/components/CanvasLayoutButton';
 import { DetailPanel } from '@/components/DetailPanel';
 import { NodeContextMenu, type ContextMenuState } from '@/components/NodeContextMenu';
 import { ScissorCutLayer } from '@/components/ScissorCutLayer';
@@ -828,7 +827,6 @@ export function StudioCanvas() {
         />
         <Controls className="studio-controls" showInteractive={false} />
         <MiniMap className="studio-minimap" maskColor="rgba(0,0,0,0.55)" nodeColor={() => '#3d3d46'} />
-        <CanvasLayoutButton />
         <ScissorCutLayer />
         <StudioSettings />
         <ChatDock />

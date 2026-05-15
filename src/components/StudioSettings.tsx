@@ -17,17 +17,6 @@ import {
 export const STUDIO_OPEN_SETTINGS_EVENT = 'studio:open-settings';
 export const STUDIO_SETTINGS_CHANGED_EVENT = 'studio:settings-changed';
 
-function IconGear() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path
-        d="M19.4 13.5a7.8 7.8 0 0 0 .05-1 7.8 7.8 0 0 0-.05-1l2.05-1.6-2-3.46-2.42.98a7.68 7.68 0 0 0-1.72-1L15 3.85h-4l-.36 2.57a7.68 7.68 0 0 0-1.72 1l-2.42-.98-2 3.46 2.05 1.6a7.8 7.8 0 0 0-.05 1 7.8 7.8 0 0 0 .05 1L4.5 15.1l2 3.46 2.42-.98c.53.42 1.11.76 1.72 1L11 21.15h4l.36-2.57c.61-.24 1.19-.58 1.72-1l2.42.98 2-3.46-2.1-1.6ZM13 15.5a3 3 0 1 1 0-6 3 3 0 0 1 0 6Z"
-        fill="currentColor"
-      />
-    </svg>
-  );
-}
-
 function LlmProviderButtons({
   value,
   options,
@@ -146,16 +135,6 @@ export function StudioSettings() {
               <LlmProviderButtons value={selectedProvider} options={localProviderOptions} onChange={onProviderChange} />
             </div>
           ) : null}
-          <button
-            type="button"
-            className="studio-run-mode-settings-btn nodrag nopan"
-            title="打开模型设置"
-            aria-label="打开模型设置"
-            onClick={openModal}
-          >
-            <IconGear />
-            <span>模型设置</span>
-          </button>
         </div>
       </Panel>
 

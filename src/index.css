@@ -97,33 +97,6 @@ body,
   background: radial-gradient(1200px 800px at 20% 0%, #12121a 0%, var(--bg) 55%);
 }
 
-.studio-layout-panel {
-  position: fixed !important;
-  top: 188px !important;
-  right: 14px !important;
-  margin: 0;
-  pointer-events: none;
-  z-index: 72;
-}
-
-.studio-layout-panel__btn {
-  pointer-events: auto;
-  padding: 8px 14px;
-  border-radius: 10px;
-  border: 1px solid rgba(124, 108, 246, 0.45);
-  background: rgba(124, 108, 246, 0.18);
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
-}
-
-.studio-layout-panel__btn:hover {
-  background: rgba(124, 108, 246, 0.28);
-  border-color: rgba(124, 108, 246, 0.65);
-}
-
 .node-context-menu {
   position: fixed;
   z-index: 80;
@@ -612,8 +585,8 @@ body,
 /* 左下角：执行模式 + 设置 */
 .studio-run-mode-panel-anchor {
   position: fixed !important;
-  top: 136px !important;
-  right: 14px !important;
+  top: 22px !important;
+  right: 392px !important;
   margin: 0;
   pointer-events: auto;
   z-index: 71;
@@ -621,7 +594,7 @@ body,
 
 .studio-run-mode-panel {
   width: max-content;
-  max-width: min(520px, calc(100vw - 28px));
+  max-width: min(360px, calc(100vw - 430px));
   padding: 6px;
   border-radius: 14px;
   border: 1px solid var(--border);
@@ -637,42 +610,15 @@ body,
 
 @media (max-width: 860px) {
   .studio-run-mode-panel-anchor {
-    top: 140px !important;
+    top: 112px !important;
     right: 12px !important;
     margin: 0;
   }
 
   .studio-run-mode-panel {
+    max-width: min(360px, calc(100vw - 24px));
     justify-content: flex-end;
   }
-}
-
-.studio-run-mode-settings-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 12px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  transition:
-    background 0.15s ease,
-    border-color 0.15s ease,
-    color 0.15s ease;
-}
-
-.studio-run-mode-settings-btn:hover {
-  background: rgba(124, 108, 246, 0.14);
-  border-color: rgba(124, 108, 246, 0.38);
-}
-
-.studio-run-mode-settings-btn svg {
-  width: 16px;
-  height: 16px;
 }
 
 .studio-settings-quick-group {
@@ -754,6 +700,11 @@ body,
 }
 
 @media (max-width: 520px) {
+  .studio-run-mode-panel-anchor {
+    top: 112px !important;
+    right: 12px !important;
+  }
+
   .studio-run-mode-panel {
     flex-direction: column;
     align-items: stretch;
@@ -769,10 +720,6 @@ body,
     justify-content: flex-end;
   }
 
-  .studio-run-mode-settings-btn {
-    justify-content: center;
-    width: 100%;
-  }
 }
 
 /* 左下角：设置（齿轮） */
