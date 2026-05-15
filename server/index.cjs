@@ -12,6 +12,7 @@ const port = Number.parseInt(process.env.PORT || '3000', 10);
 
 const MAX_INPUT_CHARS = 80_000;
 const MAX_PROJECT_SNAPSHOT_CHARS = 5_000_000;
+const MAX_SCRIPT_ANALYSIS_CHARS = 100_000;
 const PROJECT_LIST_LIMIT = 40;
 const DEFAULT_MONTHLY_QUOTA = 30;
 const LEGACY_DEFAULT_MONTHLY_QUOTA = 20;
@@ -741,11 +742,479 @@ function outputChars(rawText) {
   return rawText.length;
 }
 
+function chatContent(rawText) {
+  try {
+    const parsed = JSON.parse(rawText);
+    const content = parsed?.choices?.[0]?.message?.content;
+    if (typeof content === 'string') return content;
+  } catch {
+    // Fall through to raw response.
+  }
+  return String(rawText || '');
+}
+
+function parseJsonLoose(rawText) {
+  const text = String(rawText || '').trim();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    // Try fenced or surrounded JSON.
+  }
+  const withoutFence = text.replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+  try {
+    return JSON.parse(withoutFence);
+  } catch {
+    // Try object substring.
+  }
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    try {
+      return JSON.parse(text.slice(start, end + 1));
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function cleanScriptText(value) {
+  return String(value || '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/\u0000/g, '')
+    .trim();
+}
+
+function compactWhitespace(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function stableScriptId(prefix, index) {
+  return `${prefix}-${String(index + 1).padStart(3, '0')}`;
+}
+
+function confidence(value, fallback = 'medium') {
+  const raw = String(value || '').trim().toLowerCase();
+  return raw === 'high' || raw === 'medium' || raw === 'low' ? raw : fallback;
+}
+
+function evidenceType(value, fallback = 'explicit') {
+  const raw = String(value || '').trim().toLowerCase();
+  return raw === 'explicit' || raw === 'inferred' || raw === 'tbc' ? raw : fallback;
+}
+
+function listFromValue(value) {
+  if (Array.isArray(value)) {
+    return [...new Set(value.map((item) => compactWhitespace(item)).filter(Boolean))];
+  }
+  return [
+    ...new Set(
+      String(value || '')
+        .split(/[,，、\n]+/)
+        .map((item) => compactWhitespace(item))
+        .filter(Boolean),
+    ),
+  ];
+}
+
+function buildScriptTextBlocks(scriptText) {
+  const blocks = [];
+  const paragraphPattern = /[^\n]+(?:\n(?!\n)[^\n]+)*/g;
+  let match;
+  let orderNo = 1;
+  while ((match = paragraphPattern.exec(scriptText)) != null) {
+    const text = match[0].trim();
+    if (!text) continue;
+    blocks.push({
+      id: `BLK-${String(orderNo).padStart(4, '0')}`,
+      orderNo,
+      pageNo: null,
+      text,
+      charStart: match.index,
+      charEnd: match.index + match[0].length,
+    });
+    orderNo += 1;
+  }
+  return blocks;
+}
+
+function looksLikeSceneHeading(text) {
+  const raw = compactWhitespace(text);
+  if (!raw || raw.length > 80) return false;
+  const sceneNo = '(?:\\d+|[一二三四五六七八九十百千万〇零两]+)';
+  if (new RegExp(`^(第?\\s*${sceneNo}\\s*[场幕]|场景\\s*${sceneNo}|SCENE\\s*\\d+)`, 'i').test(raw)) return true;
+  return /(内景|外景|内\/外|外\/内|INT\.?|EXT\.?|日|夜|晨|晚|黄昏|清晨)/i.test(raw) && /[—\-\/ ]/.test(raw);
+}
+
+function sceneTimeLabel(title) {
+  const raw = String(title || '');
+  if (/黄昏|傍晚|晚/.test(raw)) return '傍晚';
+  if (/清晨|晨|早/.test(raw)) return '清晨';
+  if (/夜|NIGHT/i.test(raw)) return '夜';
+  if (/日|白天|DAY/i.test(raw)) return '日';
+  return '';
+}
+
+function sceneIntExt(title) {
+  const raw = String(title || '');
+  if (/内\/外|外\/内|INT\.?\s*\/\s*EXT|EXT\.?\s*\/\s*INT/i.test(raw)) return 'INT/EXT';
+  if (/内景|INT/i.test(raw)) return 'INT';
+  if (/外景|EXT/i.test(raw)) return 'EXT';
+  return '';
+}
+
+function sceneLocation(title) {
+  let raw = String(title || '')
+    .replace(/^(第?\s*(?:\d+|[一二三四五六七八九十百千万〇零两]+)\s*[场幕]|场景\s*(?:\d+|[一二三四五六七八九十百千万〇零两]+)|SCENE\s*\d+)/i, '')
+    .replace(/内景|外景|内\/外|外\/内|INT\.?|EXT\.?/gi, '')
+    .replace(/日|夜|清晨|晨|早|傍晚|黄昏|晚|DAY|NIGHT/gi, '')
+    .replace(/[—\-\/:：]/g, ' ')
+    .trim();
+  raw = raw.split(/\s+/).filter(Boolean).slice(0, 3).join(' ');
+  return raw || '待确认地点';
+}
+
+function sceneSummary(text) {
+  const first = compactWhitespace(text).slice(0, 120);
+  return first || '待补充';
+}
+
+function sceneCharacters(text) {
+  const names = [];
+  for (const line of String(text || '').split(/\n+/)) {
+    const match = line.trim().match(/^([\u4e00-\u9fa5A-Za-z0-9_·]{1,12})\s*[：:]/);
+    if (!match) continue;
+    const name = match[1].trim();
+    if (/^(内景|外景|旁白|字幕|时间|地点|场景)$/.test(name)) continue;
+    names.push(name);
+  }
+  return [...new Set(names)];
+}
+
+const SCRIPT_PROP_KEYWORDS = [
+  '手机',
+  '电话',
+  '信',
+  '照片',
+  '钥匙',
+  '枪',
+  '刀',
+  '车',
+  '门票',
+  '电脑',
+  '盒子',
+  '项链',
+  '戒指',
+  '文件',
+  '合同',
+  '酒杯',
+  '药',
+  '包',
+];
+
+function sceneProps(text) {
+  return SCRIPT_PROP_KEYWORDS.filter((keyword) => String(text || '').includes(keyword));
+}
+
+function blockIdsForRange(blocks, start, end) {
+  return blocks.filter((block) => block.charEnd >= start && block.charStart <= end).map((block) => block.id);
+}
+
+function sourceTextForRange(scriptText, start, end) {
+  return cleanScriptText(scriptText.slice(start, end)).slice(0, 480);
+}
+
+function ruleScriptAnalysis({ projectName, scriptText, sourceType = 'fallback', warnings = [] }) {
+  const cleanText = cleanScriptText(scriptText);
+  const blocks = buildScriptTextBlocks(cleanText);
+  const headings = [];
+  for (const block of blocks) {
+    const firstLine = block.text.split('\n')[0]?.trim() || block.text;
+    if (looksLikeSceneHeading(firstLine)) {
+      headings.push({ block, title: firstLine });
+    }
+  }
+
+  let sceneRanges;
+  if (headings.length) {
+    sceneRanges = headings.map((heading, index) => {
+      const start = heading.block.charStart;
+      const end = headings[index + 1]?.block.charStart ?? cleanText.length;
+      return { title: heading.title, start, end };
+    });
+  } else {
+    const groupSize = Math.max(1, Math.ceil(blocks.length / Math.min(8, Math.max(1, blocks.length))));
+    sceneRanges = [];
+    for (let index = 0; index < blocks.length; index += groupSize) {
+      const group = blocks.slice(index, index + groupSize);
+      if (!group.length) continue;
+      sceneRanges.push({
+        title: `片段 ${sceneRanges.length + 1}`,
+        start: group[0].charStart,
+        end: group[group.length - 1].charEnd,
+      });
+    }
+    warnings.push('未识别到标准场景标题，已按文本段落生成片段，请人工确认场景边界。');
+  }
+
+  const scenes = sceneRanges.map((range, index) => {
+    const sourceText = sourceTextForRange(cleanText, range.start, range.end);
+    return {
+      id: stableScriptId('SC', index),
+      sceneNo: index + 1,
+      title: range.title || `场景 ${index + 1}`,
+      intExt: sceneIntExt(range.title),
+      location: sceneLocation(range.title),
+      timeLabel: sceneTimeLabel(range.title),
+      summary: sceneSummary(sourceText),
+      characters: sceneCharacters(sourceText),
+      props: sceneProps(sourceText),
+      sourceText,
+      sourceBlockIds: blockIdsForRange(blocks, range.start, range.end),
+      confidence: headings.length ? 'medium' : 'low',
+      evidenceType: headings.length ? 'explicit' : 'inferred',
+      notes: headings.length ? '' : '规则拆分结果，建议人工审核。',
+      status: 'ai_generated',
+    };
+  });
+
+  const characterMap = new Map();
+  for (const scene of scenes) {
+    for (const name of scene.characters) {
+      const current = characterMap.get(name) || { sceneIds: [], sourceText: scene.sourceText, sourceBlockIds: [] };
+      current.sceneIds.push(scene.id);
+      current.sourceBlockIds.push(...scene.sourceBlockIds);
+      characterMap.set(name, current);
+    }
+  }
+  const characters = [...characterMap.entries()].map(([name, info], index) => ({
+    id: stableScriptId('CHAR', index),
+    name,
+    aliases: [],
+    description: `${name} 在 ${info.sceneIds.length} 个场景中出现。`,
+    firstSceneId: info.sceneIds[0] || null,
+    sceneCount: new Set(info.sceneIds).size,
+    sourceText: info.sourceText.slice(0, 320),
+    sourceBlockIds: [...new Set(info.sourceBlockIds)],
+    confidence: 'medium',
+    evidenceType: 'explicit',
+    notes: '',
+    status: 'ai_generated',
+  }));
+
+  const propMap = new Map();
+  for (const scene of scenes) {
+    for (const name of scene.props) {
+      const current = propMap.get(name) || { sceneIds: [], sourceText: scene.sourceText, sourceBlockIds: [] };
+      current.sceneIds.push(scene.id);
+      current.sourceBlockIds.push(...scene.sourceBlockIds);
+      propMap.set(name, current);
+    }
+  }
+  const props = [...propMap.entries()].map(([name, info], index) => ({
+    id: stableScriptId('PROP', index),
+    name,
+    category: '道具',
+    ownerCharacterId: null,
+    importance: info.sceneIds.length > 1 ? 'key' : 'normal',
+    sceneIds: [...new Set(info.sceneIds)],
+    sourceText: info.sourceText.slice(0, 320),
+    sourceBlockIds: [...new Set(info.sourceBlockIds)],
+    confidence: 'low',
+    evidenceType: 'inferred',
+    notes: '由关键词规则识别，建议人工确认。',
+    status: 'ai_generated',
+  }));
+
+  const locations = [...new Set(scenes.map((scene) => scene.location).filter(Boolean))].map((name, index) => ({
+    id: stableScriptId('LOC', index),
+    name,
+    type: 'location',
+    sceneIds: scenes.filter((scene) => scene.location === name).map((scene) => scene.id),
+    description: '',
+  }));
+
+  return {
+    analysisId: `AN-${Date.now()}`,
+    projectName: compactWhitespace(projectName) || '未命名剧本',
+    sourceType,
+    generatedAt: new Date().toISOString(),
+    modelUsed: null,
+    aiUsed: false,
+    warnings,
+    stats: {
+      textChars: cleanText.length,
+      blockCount: blocks.length,
+      sceneCount: scenes.length,
+      characterCount: characters.length,
+      propCount: props.length,
+    },
+    textBlocks: blocks,
+    scenes,
+    characters,
+    props,
+    locations,
+  };
+}
+
+function blockIdsForQuote(blocks, quote) {
+  const compactQuote = compactWhitespace(quote).slice(0, 80);
+  if (!compactQuote) return [];
+  return blocks
+    .filter((block) => compactWhitespace(block.text).includes(compactQuote) || compactQuote.includes(compactWhitespace(block.text).slice(0, 60)))
+    .map((block) => block.id)
+    .slice(0, 6);
+}
+
+function normalizeAiScriptAnalysis(raw, fallback, meta) {
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('AI response is not an object.');
+  }
+  const rawScenes = Array.isArray(raw.scenes) ? raw.scenes : [];
+  if (!rawScenes.length) {
+    throw new Error('AI response does not contain scenes.');
+  }
+
+  const scenes = rawScenes.map((entry, index) => {
+    const item = entry && typeof entry === 'object' ? entry : { title: entry };
+    const title = compactWhitespace(item.title || item.name || `场景 ${index + 1}`);
+    const sourceText = compactWhitespace(item.source_text || item.sourceText || item.evidence || item.summary || '');
+    return {
+      id: compactWhitespace(item.id) || stableScriptId('SC', index),
+      sceneNo: Number(item.scene_no || item.sceneNo || index + 1) || index + 1,
+      title,
+      intExt: compactWhitespace(item.int_ext || item.intExt || sceneIntExt(title)),
+      location: compactWhitespace(item.location || sceneLocation(title)),
+      timeLabel: compactWhitespace(item.time_label || item.timeLabel || sceneTimeLabel(title)),
+      summary: compactWhitespace(item.summary || sourceText || '待补充'),
+      characters: listFromValue(item.characters),
+      props: listFromValue(item.props),
+      sourceText: sourceText || fallback.scenes[index]?.sourceText || '',
+      sourceBlockIds: listFromValue(item.source_block_ids || item.sourceBlockIds).length
+        ? listFromValue(item.source_block_ids || item.sourceBlockIds)
+        : blockIdsForQuote(fallback.textBlocks, sourceText),
+      confidence: confidence(item.confidence),
+      evidenceType: evidenceType(item.evidence_type || item.evidenceType),
+      notes: compactWhitespace(item.notes),
+      status: 'ai_generated',
+    };
+  });
+
+  const rawCharacters = Array.isArray(raw.characters) ? raw.characters : [];
+  const characterNames = rawCharacters.length
+    ? rawCharacters
+    : [...new Set(scenes.flatMap((scene) => scene.characters))].map((name) => ({ name }));
+  const characters = characterNames.map((entry, index) => {
+    const item = entry && typeof entry === 'object' ? entry : { name: entry };
+    const name = compactWhitespace(item.name || `角色 ${index + 1}`);
+    const sceneIds = scenes.filter((scene) => scene.characters.includes(name)).map((scene) => scene.id);
+    const sourceText = compactWhitespace(item.source_text || item.sourceText || item.description || '');
+    return {
+      id: compactWhitespace(item.id) || stableScriptId('CHAR', index),
+      name,
+      aliases: listFromValue(item.aliases),
+      description: compactWhitespace(item.description || (sceneIds.length ? `${name} 出现在 ${sceneIds.length} 个场景。` : '待补充')),
+      firstSceneId: compactWhitespace(item.first_scene_id || item.firstSceneId) || sceneIds[0] || null,
+      sceneCount: Number(item.scene_count || item.sceneCount || sceneIds.length) || sceneIds.length,
+      sourceText,
+      sourceBlockIds: listFromValue(item.source_block_ids || item.sourceBlockIds),
+      confidence: confidence(item.confidence),
+      evidenceType: evidenceType(item.evidence_type || item.evidenceType),
+      notes: compactWhitespace(item.notes),
+      status: 'ai_generated',
+    };
+  });
+
+  const rawProps = Array.isArray(raw.props) ? raw.props : [];
+  const propNames = rawProps.length ? rawProps : [...new Set(scenes.flatMap((scene) => scene.props))].map((name) => ({ name }));
+  const props = propNames.map((entry, index) => {
+    const item = entry && typeof entry === 'object' ? entry : { name: entry };
+    const name = compactWhitespace(item.name || `道具 ${index + 1}`);
+    const sceneIds = listFromValue(item.scene_ids || item.sceneIds);
+    const inferredSceneIds = sceneIds.length ? sceneIds : scenes.filter((scene) => scene.props.includes(name)).map((scene) => scene.id);
+    return {
+      id: compactWhitespace(item.id) || stableScriptId('PROP', index),
+      name,
+      category: compactWhitespace(item.category) || '道具',
+      ownerCharacterId: compactWhitespace(item.owner_character_id || item.ownerCharacterId) || null,
+      importance: ['key', 'normal', 'background'].includes(String(item.importance)) ? String(item.importance) : 'normal',
+      sceneIds: inferredSceneIds,
+      sourceText: compactWhitespace(item.source_text || item.sourceText || ''),
+      sourceBlockIds: listFromValue(item.source_block_ids || item.sourceBlockIds),
+      confidence: confidence(item.confidence, 'low'),
+      evidenceType: evidenceType(item.evidence_type || item.evidenceType, 'inferred'),
+      notes: compactWhitespace(item.notes),
+      status: 'ai_generated',
+    };
+  });
+
+  const locations = [...new Set(scenes.map((scene) => scene.location).filter(Boolean))].map((name, index) => ({
+    id: stableScriptId('LOC', index),
+    name,
+    type: 'location',
+    sceneIds: scenes.filter((scene) => scene.location === name).map((scene) => scene.id),
+    description: '',
+  }));
+
+  const warnings = [...fallback.warnings, ...listFromValue(raw.warnings)];
+  return {
+    ...fallback,
+    analysisId: `AN-${Date.now()}`,
+    projectName: meta.projectName,
+    sourceType: meta.sourceType,
+    generatedAt: new Date().toISOString(),
+    modelUsed: meta.model,
+    aiUsed: true,
+    warnings,
+    scenes,
+    characters,
+    props,
+    locations,
+    stats: {
+      textChars: fallback.stats.textChars,
+      blockCount: fallback.stats.blockCount,
+      sceneCount: scenes.length,
+      characterCount: characters.length,
+      propCount: props.length,
+    },
+  };
+}
+
+function buildScriptAnalysisMessages(projectName, scriptText) {
+  const clippedText = scriptText.slice(0, Math.min(scriptText.length, 46_000));
+  return [
+    {
+      role: 'system',
+      content:
+        '你是影视统筹和剧本拆解专家。只返回合法 JSON 对象，不要 Markdown。必须基于原文证据，不确定的内容标记 confidence=low 和 evidence_type=tbc。',
+    },
+    {
+      role: 'user',
+      content: [
+        `项目名：${projectName || '未命名剧本'}`,
+        '',
+        '请从剧本文本中提取 Phase 1 MVP 结构化数据。返回 JSON：',
+        '{',
+        '  "warnings": ["string"],',
+        '  "scenes": [{"id":"SC-001","scene_no":1,"title":"string","int_ext":"INT/EXT/","location":"string","time_label":"string","summary":"string","characters":["string"],"props":["string"],"source_text":"string","source_block_ids":[],"confidence":"high|medium|low","evidence_type":"explicit|inferred|tbc","notes":"string"}],',
+        '  "characters": [{"id":"CHAR-001","name":"string","aliases":[],"description":"string","first_scene_id":"SC-001","scene_count":1,"source_text":"string","source_block_ids":[],"confidence":"high|medium|low","evidence_type":"explicit|inferred|tbc","notes":"string"}],',
+        '  "props": [{"id":"PROP-001","name":"string","category":"道具","importance":"key|normal|background","scene_ids":["SC-001"],"source_text":"string","source_block_ids":[],"confidence":"high|medium|low","evidence_type":"explicit|inferred|tbc","notes":"string"}]',
+        '}',
+        '',
+        '剧本文本：',
+        clippedText,
+      ].join('\n'),
+    },
+  ];
+}
+
 function estimateTokens(inChars, outChars) {
   return Math.ceil((inChars + outChars) / 2);
 }
 
 function quotaCostForFeature(feature, body) {
+  if (feature === 'script-analysis') return 2;
   if (feature === 'prompt-generate-multi') return 2;
   if (feature === 'prompt-review') return 1;
   if (feature === 'text-polish') return 1;
@@ -1482,6 +1951,163 @@ async function handleProjectById(req, res, projectId) {
   sendJson(res, 405, { error: { message: 'Method not allowed.' } });
 }
 
+async function handleScriptAnalyze(req, res) {
+  if (req.method !== 'POST') {
+    sendJson(res, 405, { error: { message: 'Method not allowed.' } });
+    return;
+  }
+
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: { message: '请求体不是合法 JSON。' } });
+    return;
+  }
+
+  const scriptText = cleanScriptText(body.scriptText);
+  const projectName = compactWhitespace(body.projectName) || '未命名剧本';
+  const sourceType = body.sourceType === 'file' ? 'file' : 'paste';
+  if (!scriptText) {
+    sendJson(res, 400, { error: { message: '请先提供剧本文本。' } });
+    return;
+  }
+  if (scriptText.length > MAX_SCRIPT_ANALYSIS_CHARS) {
+    sendJson(res, 400, {
+      error: { message: `剧本文本过长，当前 ${scriptText.length} 字符，上限 ${MAX_SCRIPT_ANALYSIS_CHARS}。` },
+    });
+    return;
+  }
+
+  const auth = await getAuthedContext(req);
+  if (auth.error) {
+    sendJson(res, auth.error.status, { error: { message: auth.error.message } });
+    return;
+  }
+
+  const provider = normalizeProvider(body.provider);
+  const feature = 'script-analysis';
+  const messages = buildScriptAnalysisMessages(projectName, scriptText);
+  const requestBody = {
+    feature,
+    messages,
+    model: body.model,
+    provider,
+    response_format: { type: 'json_object' },
+    temperature: 0.18,
+    max_tokens: 6000,
+  };
+  const model = normalizeModel(requestBody.model, feature, provider);
+  const fallback = ruleScriptAnalysis({
+    projectName,
+    scriptText,
+    sourceType,
+    warnings: [],
+  });
+
+  if (!hasProviderLlmApiKey(provider) || !hasProviderLlmUpstream(provider)) {
+    sendJson(res, 200, {
+      ...fallback,
+      warnings: [...fallback.warnings, '模型服务尚未配置，已使用规则拆解生成可编辑底稿。'],
+    });
+    return;
+  }
+
+  const cost = quotaCostForFeature(feature, requestBody);
+  const inChars = inputChars(requestBody);
+  const isTestInvite = Boolean(auth.isTestInvite);
+  const testInviteEmail = normalizeEmail(auth.user?.email) || 'tester@studio-canvas.local';
+  const recordUsage = async (event) => {
+    if (isTestInvite) return;
+    await writeUsage(auth.serviceClient, event);
+  };
+  const refundReservedQuota = async () => {
+    if (isTestInvite) {
+      refundTestInviteQuota(testInviteEmail, cost);
+      return;
+    }
+    await refundQuota(auth.serviceClient, auth.userId, cost);
+  };
+
+  if (!isTestInvite) {
+    try {
+      await ensureUserRows(auth.serviceClient, auth.user);
+    } catch (error) {
+      sendJson(res, 500, { error: { message: sanitizeError(error) || '用户额度初始化失败。' } });
+      return;
+    }
+  }
+
+  const reservation = isTestInvite
+    ? reserveTestInviteQuota(testInviteEmail, cost)
+    : await reserveQuota(auth.serviceClient, auth.userId, cost);
+  if (!reservation.ok) {
+    await recordUsage({
+      user_id: auth.userId,
+      project_id: null,
+      feature,
+      model,
+      input_chars: inChars,
+      output_chars: 0,
+      estimated_tokens: estimateTokens(inChars, 0),
+      quota_cost: 0,
+      status: 'failed',
+      error_message: reservation.message,
+    });
+    sendJson(res, 402, { error: { message: reservation.message } });
+    return;
+  }
+
+  try {
+    const upstreamResponse = await callUpstream(requestBody, provider);
+    const rawText = await upstreamResponse.text();
+    const content = chatContent(rawText);
+    const parsed = upstreamResponse.ok ? parseJsonLoose(content) : null;
+    if (!upstreamResponse.ok || !parsed) {
+      throw new Error(upstreamResponse.ok ? '模型返回内容不是合法 JSON。' : classifyUpstreamError(upstreamResponse.status, rawText));
+    }
+
+    const result = normalizeAiScriptAnalysis(parsed, fallback, {
+      model,
+      projectName,
+      sourceType,
+    });
+    const outChars = JSON.stringify(result).length;
+    await recordUsage({
+      user_id: auth.userId,
+      project_id: null,
+      feature,
+      model,
+      input_chars: inChars,
+      output_chars: outChars,
+      estimated_tokens: estimateTokens(inChars, outChars),
+      quota_cost: cost,
+      status: 'success',
+      error_message: null,
+    });
+    sendJson(res, 200, result);
+  } catch (error) {
+    await refundReservedQuota();
+    const message = sanitizeError(error) || '模型分析失败。';
+    await recordUsage({
+      user_id: auth.userId,
+      project_id: null,
+      feature,
+      model,
+      input_chars: inChars,
+      output_chars: 0,
+      estimated_tokens: estimateTokens(inChars, 0),
+      quota_cost: 0,
+      status: 'failed',
+      error_message: message,
+    });
+    sendJson(res, 200, {
+      ...fallback,
+      warnings: [...fallback.warnings, `AI 分析失败，已使用规则拆解底稿：${message}`],
+    });
+  }
+}
+
 async function handleLlmChat(req, res) {
   if (req.method !== 'POST') {
     sendJson(res, 405, { error: { message: 'Method not allowed.' } });
@@ -1734,6 +2360,10 @@ async function route(req, res) {
     if (url.pathname.startsWith('/api/projects/')) {
       const projectId = decodeURIComponent(url.pathname.replace('/api/projects/', '').trim());
       await handleProjectById(req, res, projectId);
+      return;
+    }
+    if (url.pathname === '/api/script/analyze') {
+      await handleScriptAnalyze(req, res);
       return;
     }
     if (url.pathname === '/api/llm/chat') {
