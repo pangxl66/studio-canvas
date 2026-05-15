@@ -98,8 +98,10 @@ body,
 }
 
 .studio-layout-panel {
-  margin-top: 100px;
-  margin-right: 12px;
+  position: fixed !important;
+  top: 188px !important;
+  right: 14px !important;
+  margin: 0;
   pointer-events: none;
   z-index: 72;
 }
@@ -609,7 +611,10 @@ body,
 
 /* 左下角：执行模式 + 设置 */
 .studio-run-mode-panel-anchor {
-  margin: 142px 12px 0 0;
+  position: fixed !important;
+  top: 136px !important;
+  right: 14px !important;
+  margin: 0;
   pointer-events: auto;
   z-index: 71;
 }
@@ -632,7 +637,9 @@ body,
 
 @media (max-width: 860px) {
   .studio-run-mode-panel-anchor {
-    margin: 154px 12px 0 0;
+    top: 140px !important;
+    right: 12px !important;
+    margin: 0;
   }
 
   .studio-run-mode-panel {
