@@ -150,12 +150,17 @@ export function AuthGate({ children }: AuthGateProps) {
 
   const handleTestInvite = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    const nextEmail = String(formData.get('email') || email).trim();
+    const nextInviteCode = String(formData.get('inviteCode') || inviteCode).trim();
 
     setIsSubmitting(true);
     setMessage('');
 
     try {
-      const nextSession = await signInWithTestInvite(email, inviteCode);
+      setEmail(nextEmail);
+      setInviteCode(nextInviteCode);
+      const nextSession = await signInWithTestInvite(nextEmail, nextInviteCode);
       setSession(nextSession);
       setInviteCode('');
       setMessage('');
@@ -307,6 +312,7 @@ export function AuthGate({ children }: AuthGateProps) {
                   disabled={isSubmitting}
                   id="studio-invite-email"
                   inputMode="email"
+                  name="email"
                   onChange={(event) => setEmail(event.target.value)}
                   placeholder="you@example.com"
                   required
@@ -321,9 +327,9 @@ export function AuthGate({ children }: AuthGateProps) {
                   className="auth-card__input auth-card__input--code"
                   disabled={isSubmitting || inviteAlreadyActivated}
                   id="studio-test-invite-code"
+                  name="inviteCode"
                   onChange={(event) => setInviteCode(event.target.value)}
                   placeholder="输入测试邀请码"
-                  required={!inviteAlreadyActivated}
                   type="password"
                   value={inviteCode}
                 />

@@ -203,10 +203,10 @@ export function hasActivatedTestInviteEmail(email: string): boolean {
 
 export async function signInWithTestInvite(email: string, inviteCode: string): Promise<Session | null> {
   const normalizedEmail = normalizeEmail(email);
-  const normalizedCode = normalizeInviteCode(inviteCode);
+  const normalizedCode = normalizeInviteCode(inviteCode) || ' ';
 
   const activatedAuth = readActivatedTestInviteAuth(normalizedEmail);
-  if (normalizedEmail && !normalizedCode && activatedAuth) {
+  if (normalizedEmail && !normalizedCode.trim() && activatedAuth) {
     writeStoredLocalAuth(
       activatedAuth.email || normalizedEmail,
       activatedAuth.accessToken,

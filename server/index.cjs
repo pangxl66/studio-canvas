@@ -18,7 +18,10 @@ const LEGACY_DEFAULT_MONTHLY_QUOTA = 20;
 const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_MODEL = 'gpt-5.5';
 const TEST_INVITE_TOKEN_PREFIX = 'test-invite';
+const testInviteActivationPath = path.join(rootDir, '.data', 'test-invite-activations.json');
+const testInviteActivations = new Set();
 const testInviteQuotas = new Map();
+let testInviteActivationsLoaded = false;
 
 loadLocalEnvFile(path.join(rootDir, '.env.local'));
 
@@ -200,6 +203,57 @@ function writeTestInviteQuota(email, monthlyQuota, remainingQuota) {
   };
   testInviteQuotas.set(normalizedEmail, nextQuota);
   return nextQuota;
+}
+
+function ensureTestInviteActivationsLoaded() {
+  if (testInviteActivationsLoaded) return;
+  testInviteActivationsLoaded = true;
+  try {
+    if (!fs.existsSync(testInviteActivationPath)) return;
+    const raw = fs.readFileSync(testInviteActivationPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    const emails = Array.isArray(parsed) ? parsed : parsed?.emails;
+    if (!Array.isArray(emails)) return;
+    for (const email of emails) {
+      const normalizedEmail = normalizeEmail(email);
+      if (normalizedEmail) testInviteActivations.add(normalizedEmail);
+    }
+  } catch (error) {
+    console.warn('Failed to read test invite activations', sanitizeError(error));
+  }
+}
+
+function saveTestInviteActivations() {
+  try {
+    fs.mkdirSync(path.dirname(testInviteActivationPath), { recursive: true });
+    const payload = JSON.stringify(
+      {
+        emails: [...testInviteActivations].sort(),
+        updatedAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    );
+    const tempPath = `${testInviteActivationPath}.tmp`;
+    fs.writeFileSync(tempPath, payload);
+    fs.renameSync(tempPath, testInviteActivationPath);
+  } catch (error) {
+    console.warn('Failed to save test invite activations', sanitizeError(error));
+  }
+}
+
+function hasActivatedTestInviteEmail(email) {
+  ensureTestInviteActivationsLoaded();
+  const normalizedEmail = normalizeEmail(email);
+  return Boolean(normalizedEmail && (testInviteActivations.has(normalizedEmail) || testInviteQuotas.has(normalizedEmail)));
+}
+
+function rememberActivatedTestInviteEmail(email) {
+  ensureTestInviteActivationsLoaded();
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail || testInviteActivations.has(normalizedEmail)) return;
+  testInviteActivations.add(normalizedEmail);
+  saveTestInviteActivations();
 }
 
 function normalizeProvider(value) {
@@ -891,12 +945,14 @@ async function handleTestInvite(req, res) {
     return;
   }
 
+  const email = normalizeEmail(body?.email) || normalizeEmail(env('TEST_INVITE_EMAIL')) || 'tester@studio-canvas.local';
+  const isActivatedEmail = hasActivatedTestInviteEmail(email);
   const inviteCode = normalizeInviteCode(body?.inviteCode || body?.code || '');
-  if (!inviteCode) {
+  if (!inviteCode && !isActivatedEmail) {
     sendJson(res, 400, { error: { message: '请输入测试邀请码。' } });
     return;
   }
-  if (!inviteCodes.includes(inviteCode)) {
+  if (inviteCode && !inviteCodes.includes(inviteCode)) {
     console.warn(
       'Invalid test invite code',
       JSON.stringify({
@@ -909,7 +965,9 @@ async function handleTestInvite(req, res) {
     return;
   }
 
-  const email = normalizeEmail(body?.email) || normalizeEmail(env('TEST_INVITE_EMAIL')) || 'tester@studio-canvas.local';
+  if (inviteCode) {
+    rememberActivatedTestInviteEmail(email);
+  }
   const accessToken = createTestInviteToken(email);
   if (!accessToken) {
     sendJson(res, 500, { error: { message: '无法创建测试登录令牌，请检查 TEST_INVITE_SECRET 或 TEST_INVITE_CODE。' } });
