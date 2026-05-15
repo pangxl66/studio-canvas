@@ -99,6 +99,10 @@ function createTestInviteToken(email) {
   return `${TEST_INVITE_TOKEN_PREFIX}.${payload}.${signature}`;
 }
 
+function getTestInviteUserId(email) {
+  return `test-invite:${crypto.createHash('sha256').update(normalizeEmail(email)).digest('hex').slice(0, 16)}`;
+}
+
 function readTestInviteToken(token) {
   const secret = getTestInviteSecret();
   if (!secret || !token || !token.startsWith(`${TEST_INVITE_TOKEN_PREFIX}.`)) {
@@ -119,7 +123,7 @@ function readTestInviteToken(token) {
     const email = normalizeEmail(data.email) || normalizeEmail(env('TEST_INVITE_EMAIL')) || 'tester@studio-canvas.local';
     return {
       email,
-      id: `test-invite:${crypto.createHash('sha256').update(email).digest('hex').slice(0, 16)}`,
+      id: getTestInviteUserId(email),
     };
   } catch {
     return null;
@@ -130,10 +134,11 @@ function readTestInviteQuota(email) {
   const normalizedEmail = normalizeEmail(email) || 'tester@studio-canvas.local';
   const monthlyQuota = getTestInviteMonthlyQuota();
   const existing = testInviteQuotas.get(normalizedEmail);
-  if (existing && existing.monthlyQuota === monthlyQuota) {
+  if (existing && (existing.isCustom || existing.monthlyQuota === monthlyQuota)) {
     return existing;
   }
   const nextQuota = {
+    isCustom: false,
     monthlyQuota,
     remainingQuota: monthlyQuota,
     updatedAt: new Date().toISOString(),
@@ -162,6 +167,18 @@ function refundTestInviteQuota(email, cost) {
   const safeCost = Math.max(Number(cost) || 1, 1);
   quota.remainingQuota = Math.min(quota.monthlyQuota, quota.remainingQuota + safeCost);
   quota.updatedAt = new Date().toISOString();
+}
+
+function writeTestInviteQuota(email, monthlyQuota, remainingQuota) {
+  const normalizedEmail = normalizeEmail(email) || 'tester@studio-canvas.local';
+  const nextQuota = {
+    isCustom: true,
+    monthlyQuota: Math.max(0, Number(monthlyQuota) || 0),
+    remainingQuota: Math.max(0, Number(remainingQuota) || 0),
+    updatedAt: new Date().toISOString(),
+  };
+  testInviteQuotas.set(normalizedEmail, nextQuota);
+  return nextQuota;
 }
 
 function normalizeProvider(value) {
@@ -951,6 +968,62 @@ function normalizeUsageEvent(row) {
   };
 }
 
+function isCurrentTestInviteEmail(auth, email) {
+  return Boolean(auth?.isTestInvite && normalizeEmail(auth.user?.email) === normalizeEmail(email));
+}
+
+function readTestInviteAdminCreditDetails(email) {
+  const normalizedEmail = normalizeEmail(email);
+  const quota = readTestInviteQuota(normalizedEmail);
+  return {
+    usageEvents: [],
+    user: {
+      displayName: '测试邀请码',
+      email: normalizedEmail,
+      plan: 'test',
+      userId: getTestInviteUserId(normalizedEmail),
+    },
+    wallet: {
+      monthlyQuota: quota.monthlyQuota,
+      remainingQuota: quota.remainingQuota,
+      resetAt: null,
+      updatedAt: quota.updatedAt,
+    },
+  };
+}
+
+function updateTestInviteAdminCredits(email, action, rawAmount) {
+  const current = readTestInviteQuota(email);
+  const currentMonthly = Number(current.monthlyQuota || 0);
+  const currentRemaining = Number(current.remainingQuota || 0);
+  let nextMonthly = currentMonthly;
+  let nextRemaining = currentRemaining;
+
+  if (action === 'reset') {
+    nextMonthly = getTestInviteMonthlyQuota();
+    nextRemaining = nextMonthly;
+  } else if (action === 'add') {
+    const amount = readCreditAmount(rawAmount);
+    if (!amount) {
+      return { error: { status: 400, message: '增加次数必须是 1-9999 的整数。' } };
+    }
+    nextMonthly = currentMonthly + amount;
+    nextRemaining = currentRemaining + amount;
+  } else if (action === 'set') {
+    const amount = readCreditAmount(rawAmount);
+    if (amount === null) {
+      return { error: { status: 400, message: '设置次数必须是 0-9999 的整数。' } };
+    }
+    nextMonthly = amount;
+    nextRemaining = amount;
+  } else {
+    return { error: { status: 400, message: '未知操作，请使用 add、reset 或 set。' } };
+  }
+
+  writeTestInviteQuota(email, nextMonthly, nextRemaining);
+  return { details: readTestInviteAdminCreditDetails(email) };
+}
+
 async function readAdminCreditDetails(serviceClient, email) {
   const normalizedEmail = normalizeEmail(email);
   const { data: profile, error: profileError } = await serviceClient
@@ -1056,6 +1129,10 @@ async function handleAdminCredits(req, res, url) {
         sendJson(res, 400, { error: { message: '请输入要查询的用户邮箱。' } });
         return;
       }
+      if (isCurrentTestInviteEmail(auth, email)) {
+        sendJson(res, 200, readTestInviteAdminCreditDetails(email));
+        return;
+      }
       const details = await readAdminCreditDetails(auth.serviceClient, email);
       if (details.notFound) {
         sendJson(res, 404, { error: { message: '未找到该邮箱用户。请确认对方已经登录过一次。' } });
@@ -1077,6 +1154,16 @@ async function handleAdminCredits(req, res, url) {
     const action = String(body.action || '').trim();
     if (!email) {
       sendJson(res, 400, { error: { message: '请输入要操作的用户邮箱。' } });
+      return;
+    }
+
+    if (isCurrentTestInviteEmail(auth, email)) {
+      const result = updateTestInviteAdminCredits(email, action, body.amount);
+      if (result.error) {
+        sendJson(res, result.error.status, { error: { message: result.error.message } });
+        return;
+      }
+      sendJson(res, 200, result.details);
       return;
     }
 
