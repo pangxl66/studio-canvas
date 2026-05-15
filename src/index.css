@@ -6624,6 +6624,10 @@ body,
   pointer-events: auto;
 }
 
+.auth-topbar-account .admin-credit-panel {
+  pointer-events: auto;
+}
+
 .auth-session-pill {
   position: relative;
   z-index: auto;

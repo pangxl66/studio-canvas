@@ -1,4 +1,4 @@
-import { getSupabaseClient, isSaasAuthEnabled, isSaasMockEnabled } from '@/services/authClient';
+import { getAuthSnapshot, isSaasAuthEnabled, isSaasMockEnabled } from '@/services/authClient';
 
 export type AdminCreditUsageEvent = {
   createdAt: string | null;
@@ -33,7 +33,7 @@ async function getAccessToken(): Promise<string> {
     throw new Error('管理员额度管理只在网站登录模式下可用。');
   }
 
-  const session = (await getSupabaseClient()?.auth.getSession())?.data.session;
+  const { session } = await getAuthSnapshot();
   if (!session?.access_token) {
     throw new Error('请先登录管理员账号。');
   }
