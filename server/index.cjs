@@ -360,6 +360,15 @@ function getAuthClients(token) {
   };
 }
 
+function getServiceClient() {
+  const supabaseUrl = env('SUPABASE_URL');
+  const supabaseServiceRoleKey = env('SUPABASE_SERVICE_ROLE_KEY');
+  if (!supabaseUrl || !supabaseServiceRoleKey) {
+    throw new Error('Server Supabase service env is missing.');
+  }
+  return createClient(supabaseUrl, supabaseServiceRoleKey);
+}
+
 async function getAuthedContext(req) {
   const token = getBearerToken(req);
   const testInvite = readTestInviteToken(token);
@@ -423,6 +432,13 @@ async function getAdminContext(req) {
   }
   if (!isAdminUser(auth.user)) {
     return { error: { status: 403, message: '当前账号不是管理员，无法管理额度。' } };
+  }
+  if (!auth.serviceClient) {
+    try {
+      return { ...auth, serviceClient: getServiceClient() };
+    } catch (error) {
+      return { error: { status: 500, message: sanitizeError(error) || 'Server admin env is missing.' } };
+    }
   }
   return auth;
 }
@@ -880,7 +896,7 @@ async function handleCreditStatus(req, res) {
     sendJson(res, 200, {
       displayName: '测试邀请码',
       email: auth.user?.email || null,
-      isAdmin: false,
+      isAdmin: isAdminUser(auth.user),
       monthlyQuota: quota.monthlyQuota,
       plan: 'test',
       remainingQuota: quota.remainingQuota,
