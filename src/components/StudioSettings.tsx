@@ -1,4 +1,3 @@
-import { Panel } from '@xyflow/react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -127,7 +126,7 @@ export function StudioSettings() {
 
   return (
     <>
-      <Panel position="top-right" className="studio-run-mode-panel-anchor">
+      <div className="studio-run-mode-panel-anchor">
         <div className="studio-run-mode-panel nodrag nopan">
           {showProviderSwitch ? (
             <div className="studio-settings-quick-group">
@@ -136,7 +135,7 @@ export function StudioSettings() {
             </div>
           ) : null}
         </div>
-      </Panel>
+      </div>
 
       {open
         ? createPortal(

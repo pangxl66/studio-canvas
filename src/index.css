@@ -9,6 +9,10 @@
   --accent-dim: rgba(124, 108, 246, 0.25);
   --danger: #f87171;
   --ok: #4ade80;
+  --topbar-right: 16px;
+  --topbar-top: 14px;
+  --topbar-account-width: clamp(300px, 28vw, 360px);
+  --topbar-gap: 12px;
   font-family: 'Inter', 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', 'Segoe UI', sans-serif;
 }
 
@@ -582,11 +586,11 @@ body,
   cursor: pointer;
 }
 
-/* 左下角：执行模式 + 设置 */
+/* Top-right account and API controls */
 .studio-run-mode-panel-anchor {
   position: fixed !important;
-  top: 22px !important;
-  right: 392px !important;
+  top: var(--topbar-top) !important;
+  right: calc(var(--topbar-right) + var(--topbar-account-width) + var(--topbar-gap)) !important;
   margin: 0;
   pointer-events: auto;
   z-index: 71;
@@ -594,29 +598,36 @@ body,
 
 .studio-run-mode-panel {
   width: max-content;
-  max-width: min(360px, calc(100vw - 430px));
-  padding: 6px;
-  border-radius: 14px;
+  min-height: 58px;
+  max-width: min(360px, calc(100vw - var(--topbar-account-width) - 56px));
+  padding: 7px 9px;
+  border-radius: 20px;
   border: 1px solid var(--border);
   background: rgba(19, 20, 27, 0.92);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.38);
   backdrop-filter: blur(12px);
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  flex-wrap: nowrap;
 }
 
 @media (max-width: 860px) {
+  :root {
+    --topbar-right: 12px;
+    --topbar-account-width: min(340px, calc(100vw - 24px));
+  }
+
   .studio-run-mode-panel-anchor {
-    top: 112px !important;
-    right: 12px !important;
+    top: calc(var(--topbar-top) + 102px) !important;
+    right: var(--topbar-right) !important;
     margin: 0;
   }
 
   .studio-run-mode-panel {
-    max-width: min(360px, calc(100vw - 24px));
+    width: var(--topbar-account-width);
+    max-width: var(--topbar-account-width);
     justify-content: flex-end;
   }
 }
@@ -624,7 +635,7 @@ body,
 .studio-settings-quick-group {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   flex: 0 0 auto;
   min-width: 0;
   white-space: nowrap;
@@ -701,14 +712,14 @@ body,
 
 @media (max-width: 520px) {
   .studio-run-mode-panel-anchor {
-    top: 112px !important;
-    right: 12px !important;
+    top: calc(var(--topbar-top) + 102px) !important;
+    right: var(--topbar-right) !important;
   }
 
   .studio-run-mode-panel {
-    flex-direction: column;
-    align-items: stretch;
-    width: min(260px, calc(100vw - 28px));
+    min-height: 52px;
+    width: var(--topbar-account-width);
+    align-items: center;
   }
 
   .studio-settings-quick-group {
@@ -6595,16 +6606,35 @@ body,
   line-height: 1.7;
 }
 
-.auth-session-pill {
+.auth-topbar-account {
   position: fixed;
-  top: 14px;
-  right: 14px;
-  z-index: 70;
+  top: var(--topbar-top);
+  right: var(--topbar-right);
+  z-index: 72;
+  width: var(--topbar-account-width);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.auth-topbar-account .auth-session-pill,
+.auth-topbar-account .credit-status-pill {
+  pointer-events: auto;
+}
+
+.auth-session-pill {
+  position: relative;
+  z-index: auto;
+  width: 100%;
+  min-height: 58px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 10px;
-  max-width: min(440px, calc(100vw - 28px));
-  padding: 8px 10px 8px 14px;
+  max-width: none;
+  padding: 8px 10px 8px 16px;
   border-radius: 999px;
   border: 1px solid rgba(45, 212, 191, 0.28);
   background: rgba(8, 13, 23, 0.78);
@@ -6639,8 +6669,8 @@ body,
 
 .auth-session-toast {
   position: fixed;
-  top: 98px;
-  right: 14px;
+  top: calc(var(--topbar-top) + 92px);
+  right: var(--topbar-right);
   z-index: 70;
   max-width: 360px;
   padding: 12px 14px;
@@ -6654,14 +6684,14 @@ body,
 }
 
 .credit-status-pill {
-  position: fixed;
-  top: 58px;
-  right: 14px;
-  z-index: 70;
+  position: relative;
+  z-index: auto;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
   min-height: 32px;
+  min-width: 132px;
   padding: 7px 11px;
   border-radius: 999px;
   border: 1px solid rgba(96, 165, 250, 0.28);

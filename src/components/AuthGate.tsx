@@ -346,13 +346,15 @@ export function AuthGate({ children }: AuthGateProps) {
 
   return (
     <>
-      <div className="auth-session-pill nodrag nopan">
-        <span>{userLabel(currentUser)}</span>
-        <button disabled={isSubmitting} type="button" onClick={() => void handleSignOut()}>
-          退出
-        </button>
+      <div className="auth-topbar-account nodrag nopan">
+        <div className="auth-session-pill">
+          <span>{userLabel(currentUser)}</span>
+          <button disabled={isSubmitting} type="button" onClick={() => void handleSignOut()}>
+            退出
+          </button>
+        </div>
+        <CreditStatusPill />
       </div>
-      <CreditStatusPill />
       {message ? <div className="auth-session-toast">{message}</div> : null}
       {children}
     </>
