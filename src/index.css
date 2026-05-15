@@ -11,7 +11,7 @@
   --ok: #4ade80;
   --topbar-right: 16px;
   --topbar-top: 14px;
-  --topbar-account-width: clamp(300px, 28vw, 360px);
+  --topbar-account-width: 276px;
   --topbar-gap: 12px;
   font-family: 'Inter', 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', 'Segoe UI', sans-serif;
 }
@@ -616,7 +616,7 @@ body,
 @media (max-width: 860px) {
   :root {
     --topbar-right: 12px;
-    --topbar-account-width: min(340px, calc(100vw - 24px));
+    --topbar-account-width: min(276px, calc(100vw - 24px));
   }
 
   .studio-run-mode-panel-anchor {
@@ -6627,13 +6627,13 @@ body,
 .auth-session-pill {
   position: relative;
   z-index: auto;
-  width: 100%;
+  width: max-content;
   min-height: 58px;
+  max-width: 100%;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  max-width: none;
+  justify-content: flex-start;
+  gap: 14px;
   padding: 8px 10px 8px 16px;
   border-radius: 999px;
   border: 1px solid rgba(45, 212, 191, 0.28);
@@ -6646,12 +6646,15 @@ body,
 }
 
 .auth-session-pill span {
+  flex: 0 1 auto;
+  max-width: min(190px, calc(100vw - 150px));
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .auth-session-pill button {
+  flex: 0 0 auto;
   padding: 6px 10px;
   border-radius: 999px;
   border: 1px solid rgba(45, 212, 191, 0.26);
