@@ -1,3 +1,5 @@
+import type { ScriptBreakdownOutput } from '@/types/scriptBreakdown';
+
 export type Department =
   | 'WRITING'
   | 'STORYBOARD'
@@ -6,7 +8,19 @@ export type Department =
   | 'SHOT_LIST'
   | 'STORYBOARD_FILE'
   | 'PROMPT_REVIEW'
-  | 'IMAGE';
+  | 'IMAGE'
+  | 'SCRIPT_INPUT'
+  | 'SCRIPT_SCENE'
+  | 'SCRIPT_CHARACTER'
+  | 'SCRIPT_PROP'
+  | 'SCRIPT_OUTPUT'
+  | 'SCRIPT_REVIEW'
+  | 'SCRIPT_TIMELINE'
+  | 'SCRIPT_ART'
+  | 'SCRIPT_VFX'
+  | 'SCRIPT_WORLD'
+  | 'SCRIPT_PRODUCTION'
+  | 'SCRIPT_AI_ASSETS';
 
 /** 部门流水线为 writing | storyboard | prompt；TEXT_NODE 为基础长文本源节点；shot_list_node 为分镜子节点 */
 export type NodeKind =
@@ -17,7 +31,19 @@ export type NodeKind =
   | 'shot_list_node'
   | 'storyboard_file_node'
   | 'prompt_review_node'
-  | 'image_node';
+  | 'image_node'
+  | 'script_input_node'
+  | 'script_scene_node'
+  | 'script_character_node'
+  | 'script_prop_node'
+  | 'script_output_node'
+  | 'script_review_node'
+  | 'script_timeline_node'
+  | 'script_art_node'
+  | 'script_vfx_node'
+  | 'script_world_node'
+  | 'script_production_node'
+  | 'script_ai_assets_node';
 
 export type NodeStatus =
   | 'NOT_STARTED'
@@ -184,7 +210,7 @@ export type StudioNodeData = {
   department: Department;
   status: NodeStatus;
   input: string;
-  output: WritingOutput | StoryboardOutput | PromptOutput | Record<string, unknown> | null;
+  output: WritingOutput | StoryboardOutput | PromptOutput | ScriptBreakdownOutput | Record<string, unknown> | null;
   review_result: string | null;
   version: number;
   label: string;

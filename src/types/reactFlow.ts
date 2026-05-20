@@ -7,4 +7,7 @@ export type StudioRFNode =
   | Node<StudioNodeData, 'shotList'>
   | Node<StudioNodeData, 'storyboardFile'>
   | Node<StudioNodeData, 'promptReview'>
-  | Node<StudioNodeData, 'imageNode'>;
+  | Node<StudioNodeData, 'imageNode'>
+  | Node<StudioNodeData, 'scriptInput'>
+  | Node<StudioNodeData, 'scriptAnalyzer'>
+  | Node<StudioNodeData, 'scriptOutput'>;

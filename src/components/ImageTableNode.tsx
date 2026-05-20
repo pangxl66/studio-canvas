@@ -1,10 +1,15 @@
-import { type Node, type NodeProps } from '@xyflow/react';
-import { memo, useCallback, useRef, useState, type ChangeEvent } from 'react';
+import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
+import { memo, useCallback, useRef, useState, type ChangeEvent, type SyntheticEvent } from 'react';
+import { analyzeImageReference } from '@/services/imageReferenceAnalysis';
 import { analyzeStoryboardImageToOutput } from '@/services/storyboardImageAnalysis';
 import { useStudioStore } from '@/store/useStudioStore';
 import type { StudioNodeData } from '@/types/studio';
 
 type ImageRF = Node<StudioNodeData, 'imageNode'>;
+
+export const IMAGE_NODE_OUTPUT_HANDLE_ID = 'out';
+
+type ImageBusyMode = 'visual' | 'table' | null;
 
 function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
   const patchNodeData = useStudioStore((state) => state.patchNodeData);
@@ -13,7 +18,9 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
   const focusNode = useStudioStore((state) => state.focusNode);
   const nodes = useStudioStore((state) => state.nodes);
   const inputRef = useRef<HTMLInputElement>(null);
-  const [busy, setBusy] = useState(false);
+  const [busyMode, setBusyMode] = useState<ImageBusyMode>(null);
+  const [imageSize, setImageSize] = useState<{ width: number; height: number } | null>(null);
+  const busy = busyMode != null;
 
   const pickImage = useCallback(() => {
     inputRef.current?.click();
@@ -43,17 +50,47 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
           generation_error: undefined,
           imageAnalysisSummary: undefined,
           output: null,
+          label: data.label?.trim() || file.name.replace(/\.[^.]+$/u, '') || '图片节点',
         },
         true,
       );
+      setImageSize(null);
       pushMessage({
         role: 'system',
-        text: `已载入图片“${file.name}”，可以点击“解析表格”生成镜头表节点。`,
+        text: `已载入图片“${file.name}”。可以点击“分析画面”，或连接到文本卡片后点击文本润色。`,
         nodeId: id,
       });
     },
-    [id, patchNodeData, pushMessage],
+    [data.label, id, patchNodeData, pushMessage],
   );
+
+  const analyzeVisual = useCallback(async () => {
+    if (!data.imageDataUrl) {
+      pushMessage({ role: 'system', text: '当前还没有图片，请先上传或粘贴图片。', nodeId: id });
+      return;
+    }
+    setBusyMode('visual');
+    patchNodeData(id, { generation_error: undefined }, false);
+    try {
+      const summary = await analyzeImageReference({ imageDataUrl: data.imageDataUrl });
+      patchNodeData(
+        id,
+        {
+          imageAnalysisSummary: summary,
+          generation_error: undefined,
+          review_result: '画面分析已生成，可作为文本润色的视觉参考。',
+        },
+        true,
+      );
+      pushMessage({ role: 'system', text: '图片画面分析已完成。', nodeId: id });
+    } catch (error) {
+      const message = error instanceof Error && error.message.trim() ? error.message.trim() : '图片画面分析失败。';
+      patchNodeData(id, { generation_error: message }, false);
+      pushMessage({ role: 'system', text: message, nodeId: id });
+    } finally {
+      setBusyMode(null);
+    }
+  }, [data.imageDataUrl, id, patchNodeData, pushMessage]);
 
   const parseImage = useCallback(async () => {
     if (!data.imageDataUrl) {
@@ -62,7 +99,7 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
     }
     const node = nodes.find((item) => item.id === id);
     const basePosition = node?.position ?? { x: 320, y: 240 };
-    setBusy(true);
+    setBusyMode('table');
     patchNodeData(id, { generation_error: undefined }, false);
     try {
       const parsed = await analyzeStoryboardImageToOutput({ imageDataUrl: data.imageDataUrl });
@@ -99,34 +136,86 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
       patchNodeData(id, { generation_error: message }, false);
       pushMessage({ role: 'system', text: message, nodeId: id });
     } finally {
-      setBusy(false);
+      setBusyMode(null);
     }
   }, [addShotListNode, data.imageDataUrl, data.imageFileName, focusNode, id, nodes, patchNodeData, pushMessage]);
 
+  const onPreviewLoaded = useCallback((event: SyntheticEvent<HTMLImageElement>) => {
+    const { naturalWidth, naturalHeight } = event.currentTarget;
+    if (naturalWidth > 0 && naturalHeight > 0) {
+      setImageSize({ width: naturalWidth, height: naturalHeight });
+    }
+  }, []);
+
+  const title = data.imageFileName?.trim() || data.label?.trim() || '截图';
+  const dimensionLabel = imageSize ? `${imageSize.width} x ${imageSize.height}` : data.imageDataUrl ? 'Image' : '未上传';
+
   return (
-    <div className={`image-table-node ${selected ? 'image-table-node--selected' : ''}`}>
+    <div className={`image-table-node ${data.imageDataUrl ? 'image-table-node--loaded' : ''} ${selected ? 'image-table-node--selected' : ''}`}>
+      {selected ? (
+        <div className="image-table-node__selected-toolbar nowheel nopan">
+          <button
+            type="button"
+            className="image-table-node__toolbar-btn"
+            onClick={() => void analyzeVisual()}
+            disabled={busy}
+            title={busyMode === 'visual' ? '正在分析画面' : '分析画面'}
+          >
+            <span className="image-table-node__toolbar-icon image-table-node__toolbar-icon--analyze" aria-hidden />
+            <span>{busyMode === 'visual' ? '分析中' : '分析画面'}</span>
+          </button>
+          <button
+            type="button"
+            className="image-table-node__toolbar-btn"
+            onClick={() => void parseImage()}
+            disabled={busy}
+            title={busyMode === 'table' ? '正在解析表格' : '解析表格'}
+          >
+            <span className="image-table-node__toolbar-icon image-table-node__toolbar-icon--grid" aria-hidden />
+            <span>{busyMode === 'table' ? '解析中' : '解析表格'}</span>
+          </button>
+          <span className="image-table-node__toolbar-divider" aria-hidden />
+          <button
+            type="button"
+            className="image-table-node__toolbar-btn image-table-node__toolbar-btn--icon"
+            onClick={pickImage}
+            disabled={busy}
+            aria-label={data.imageDataUrl ? '替换图片' : '上传图片'}
+            title={data.imageDataUrl ? '替换图片' : '上传图片'}
+          >
+            <span className="image-table-node__toolbar-icon image-table-node__toolbar-icon--upload" aria-hidden />
+          </button>
+        </div>
+      ) : null}
       <header className="image-table-node__head">
-        <span className="image-table-node__title">{data.label || '图片表格'}</span>
-        <span className="image-table-node__badge">Image → 镜头表</span>
+        <span className="image-table-node__title">
+          <span className="image-table-node__title-icon" aria-hidden />
+          <span className="image-table-node__title-text">{title}</span>
+        </span>
+        <span className="image-table-node__dimension">{dimensionLabel}</span>
       </header>
-      <div className="image-table-node__body">
+      <div className="image-table-node__media">
         {data.imageDataUrl ? (
-          <img className="image-table-node__preview" src={data.imageDataUrl} alt={data.imageFileName || '图片表格'} />
+          <img
+            className="image-table-node__preview"
+            src={data.imageDataUrl}
+            alt={data.imageFileName || '图片节点'}
+            onLoad={onPreviewLoaded}
+          />
         ) : (
-          <div className="image-table-node__empty">上传或粘贴表格截图后，可以一键解析为镜头表节点。</div>
+          <button type="button" className="image-table-node__empty" onClick={pickImage} disabled={busy}>
+            <span className="image-table-node__empty-title">添加图片参考</span>
+            <span className="image-table-node__empty-copy">上传或粘贴图片后，可连接到文本卡片参与 LLM 润色。</span>
+          </button>
         )}
-        <div className="image-table-node__meta">{data.imageFileName?.trim() || '尚未载入图片'}</div>
+        {busy ? (
+          <span className="image-table-node__busy">{busyMode === 'visual' ? '分析画面中' : '解析表格中'}</span>
+        ) : null}
+      </div>
+      <div className="image-table-node__body">
         {data.imageAnalysisSummary?.trim() ? (
           <div className="image-table-node__summary">{data.imageAnalysisSummary.trim()}</div>
         ) : null}
-        <div className="image-table-node__actions">
-          <button type="button" className="image-table-node__btn image-table-node__btn--ghost" onClick={pickImage}>
-            {data.imageDataUrl ? '更换图片' : '上传图片'}
-          </button>
-          <button type="button" className="image-table-node__btn" onClick={() => void parseImage()} disabled={busy}>
-            {busy ? '解析中…' : '解析表格'}
-          </button>
-        </div>
         <input
           ref={inputRef}
           className="image-table-node__input"
@@ -138,6 +227,13 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
           <div className="image-table-node__error">{data.generation_error.trim()}</div>
         ) : null}
       </div>
+      <Handle
+        type="source"
+        position={Position.Right}
+        id={IMAGE_NODE_OUTPUT_HANDLE_ID}
+        className="image-table-node__handle"
+        title="Output：连接到文本卡片后，润色会结合图片画面。"
+      />
     </div>
   );
 }

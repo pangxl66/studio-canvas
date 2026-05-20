@@ -35,11 +35,24 @@ export function toPersistableNodesAndEdges(
   nodes: StudioRFNode[],
   edges: Edge[],
 ): { nodes: StudioRFNode[]; edges: Edge[] } {
+  const safeNodes = nodes.map((node) => ({ ...node, data: normalizeTransientNodeData(node.data) }));
   const json = JSON.stringify(
-    { nodes, edges },
+    { nodes: safeNodes, edges },
     (_, v) => (typeof v === 'function' ? undefined : v),
   );
   return JSON.parse(json) as { nodes: StudioRFNode[]; edges: Edge[] };
+}
+
+function normalizeTransientNodeData(data: StudioNodeData): StudioNodeData {
+  if (data.status !== 'IN_PROGRESS') return data;
+  const hasOutput = data.output != null;
+  return {
+    ...data,
+    status: hasOutput ? 'APPROVED' : 'NOT_STARTED',
+    generation_error: '',
+    streaming_preview: '',
+    review_result: hasOutput ? data.review_result || '上一次运行被中断，已保留已有结果。' : '上一次运行被中断，请重新运行。',
+  };
 }
 
 /** 统一分镜表 / 分镜部门的 output 与 snapshot：补全 shots、narrativeBeats，支持历史上误存成字符串的 JSON */
@@ -63,57 +76,58 @@ export function normalizeStoryboardOutputValue(raw: unknown): StoryboardOutput |
 
 /** 从磁盘 / IDB 读入后：规范化镜头表与分镜 output，保证表格数组完整可渲染 */
 export function normalizeRestoredStudioNode(node: StudioRFNode): StudioRFNode {
-  if (node.type === 'shotList' && node.data.type === 'shot_list_node') {
+  const safeNode = { ...node, data: normalizeTransientNodeData(node.data) };
+  if (safeNode.type === 'shotList' && safeNode.data.type === 'shot_list_node') {
     return {
-      ...node,
+      ...safeNode,
       data: {
-        ...node.data,
-        output: normalizeStoryboardOutputValue(node.data.output),
-        storyboard_ai_snapshot: normalizeStoryboardOutputValue(node.data.storyboard_ai_snapshot),
+        ...safeNode.data,
+        output: normalizeStoryboardOutputValue(safeNode.data.output),
+        storyboard_ai_snapshot: normalizeStoryboardOutputValue(safeNode.data.storyboard_ai_snapshot),
       },
     };
   }
-  if (node.type === 'storyboardFile' && node.data.type === 'storyboard_file_node') {
+  if (safeNode.type === 'storyboardFile' && safeNode.data.type === 'storyboard_file_node') {
     return {
-      ...node,
+      ...safeNode,
       data: {
-        ...node.data,
-        output: normalizeStoryboardOutputValue(node.data.output),
+        ...safeNode.data,
+        output: normalizeStoryboardOutputValue(safeNode.data.output),
       },
     };
   }
-  if (node.type === 'imageNode' && node.data.type === 'image_node') {
+  if (safeNode.type === 'imageNode' && safeNode.data.type === 'image_node') {
     return {
-      ...node,
+      ...safeNode,
       data: {
-        ...node.data,
-        output: normalizeStoryboardOutputValue(node.data.output),
+        ...safeNode.data,
+        output: normalizeStoryboardOutputValue(safeNode.data.output),
       },
     };
   }
-  if (node.type === 'department' && node.data.type === 'storyboard') {
+  if (safeNode.type === 'department' && safeNode.data.type === 'storyboard') {
     return {
-      ...node,
+      ...safeNode,
       data: {
-        ...node.data,
-        mounted_skills: normalizeMountedSkillIdsForKind('storyboard', node.data.mounted_skills ?? []),
-        output: normalizeStoryboardOutputValue(node.data.output) as StudioNodeData['output'],
+        ...safeNode.data,
+        mounted_skills: normalizeMountedSkillIdsForKind('storyboard', safeNode.data.mounted_skills ?? []),
+        output: normalizeStoryboardOutputValue(safeNode.data.output) as StudioNodeData['output'],
       },
     };
   }
   if (
-    node.type === 'department' &&
-    (node.data.type === 'writing' || node.data.type === 'prompt')
+    safeNode.type === 'department' &&
+    (safeNode.data.type === 'writing' || safeNode.data.type === 'prompt')
   ) {
     return {
-      ...node,
+      ...safeNode,
       data: {
-        ...node.data,
-        mounted_skills: normalizeMountedSkillIdsForKind(node.data.type, node.data.mounted_skills ?? []),
+        ...safeNode.data,
+        mounted_skills: normalizeMountedSkillIdsForKind(safeNode.data.type, safeNode.data.mounted_skills ?? []),
       },
     };
   }
-  return node;
+  return safeNode;
 }
 
 /**

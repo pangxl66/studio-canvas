@@ -252,6 +252,34 @@ export function getResolvedLlmGatewayConfig(): ModelGatewayConfig | null {
   };
 }
 
+export function getResolvedVisionLlmGatewayConfig(): ModelGatewayConfig | null {
+  const saved = loadLlmUserSettings();
+  const forcedSaasProxyUrl = forcedBrowserProxyUrl();
+  const preferLocalEnv = shouldPreferLocalEnvGateway();
+  const gptEnvSettings = getProviderEnvSettings('gpt');
+  const fallbackEnvSettings = getActiveProviderEnvSettings();
+  const providerEnvSettings = hasUsableGatewaySettings(gptEnvSettings) ? gptEnvSettings : fallbackEnvSettings;
+  const proxyUrl = (forcedSaasProxyUrl || (preferLocalEnv ? providerEnvSettings.proxyUrl : saved?.proxyUrl || envProxyUrl())).trim();
+  const baseUrl = (preferLocalEnv ? providerEnvSettings.baseUrl : saved?.baseUrl ?? envBaseUrl()).trim();
+  const apiKey = (preferLocalEnv ? providerEnvSettings.apiKey : saved?.apiKey ?? envApiKey()).trim();
+  const deepModel = normalizeModelName(
+    preferLocalEnv ? providerEnvSettings.deepModel : saved?.deepModel ?? envDeepModel(),
+    DEFAULT_DEEP_LLM_MODEL,
+  );
+  const timeoutMs = normalizeTimeoutMs(preferLocalEnv ? envTimeoutMs() : saved?.timeoutMs);
+
+  if (!proxyUrl && (!baseUrl || !apiKey)) return null;
+
+  return {
+    proxyUrl: proxyUrl || undefined,
+    baseUrl: forcedSaasProxyUrl ? undefined : baseUrl || undefined,
+    apiKey: forcedSaasProxyUrl ? undefined : apiKey || undefined,
+    model: deepModel,
+    provider: 'gpt',
+    timeoutMs,
+  };
+}
+
 export function getLlmSettingsFormDefaults(): LlmUserSettings {
   const saved = loadLlmUserSettings();
   const preferLocalEnv = shouldPreferLocalEnvGateway();

@@ -134,6 +134,11 @@ export function StudioProjectMenu() {
       liveNodes,
       liveEdges,
     );
+
+    if (persistableNodes.length === 0 && persistableEdges.length === 0 && !liveProjectId) {
+      return;
+    }
+
     const payload: StudioProjectFilePayload = {
       version: STUDIO_PROJECT_JSON_VERSION,
       savedAt: Date.now(),

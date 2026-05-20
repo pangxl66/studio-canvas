@@ -9,12 +9,9 @@ import {
   skillToDownloadPayload,
 } from '@/services/skillLoader';
 import type { SkillFileRecord } from '@/types/skill';
-import type { NodeKind, StudioNodeData } from '@/types/studio';
+import type { StudioNodeData } from '@/types/studio';
 
-type PipelineKind = Exclude<
-  NodeKind,
-  'text_node' | 'shot_list_node' | 'storyboard_file_node' | 'prompt_review_node' | 'image_node'
->;
+type PipelineKind = 'writing' | 'storyboard' | 'prompt';
 
 function downloadSkillJson(skill: SkillFileRecord) {
   const payload = skillToDownloadPayload(skill);

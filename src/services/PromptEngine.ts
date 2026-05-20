@@ -6,7 +6,6 @@ import {
 } from '@/agents/storyboardDeptSpec';
 import { WRITING_DEPT_AGENT_SYSTEM, WRITING_DEPT_OUTPUT_SHAPE } from '@/agents/writingDeptSpec';
 import type { StudioRFNode } from '@/types/reactFlow';
-import type { NodeKind } from '@/types/studio';
 import { appendProjectContextForConsumer } from '@/services/ProjectContext';
 import { resolveAndComposeMountedSkills } from '@/services/skillLoader';
 
@@ -22,10 +21,7 @@ export type BuildFinalPromptsResult = {
   warnings: string[];
 };
 
-type PipelineKind = Exclude<
-  NodeKind,
-  'text_node' | 'shot_list_node' | 'storyboard_file_node' | 'prompt_review_node' | 'image_node'
->;
+type PipelineKind = 'writing' | 'storyboard' | 'prompt';
 
 function isPipelineDepartment(node: StudioRFNode): node is StudioRFNode & {
   type: 'department';

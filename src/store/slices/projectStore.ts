@@ -4,6 +4,7 @@ import {
   normalizeRestoredStudioNode,
   rebindStudioNodeRuntimeHandlers,
 } from '@/utils/studioNodePersistence';
+import { removeDeprecatedScriptNodes } from '@/utils/deprecatedScriptNodes';
 import type { StudioState } from '../useStudioStore';
 
 type StudioSet = (
@@ -66,12 +67,13 @@ export function createProjectStoreSlice(
 
     hydrateProject: (nodes: StudioRFNode[], edges: Edge[], opts) => {
       const normalized = nodes.map(normalizeRestoredStudioNode);
+      const filtered = removeDeprecatedScriptNodes(normalized, edges);
       const api = {
         executeNodeTask: (id: string) => get().executeNodeTask(id),
         focusNode: (id: string, o?: { openDetail?: boolean }) => get().focusNode(id, o),
         removeNodesByIds: (ids: string[]) => get().removeNodesByIds(ids),
       };
-      const bound = rebindStudioNodeRuntimeHandlers(normalized, api);
+      const bound = rebindStudioNodeRuntimeHandlers(filtered.nodes, api);
       const cleaned: StudioRFNode[] = bound.map((node) => ({
         ...node,
         selected: false,
@@ -79,7 +81,7 @@ export function createProjectStoreSlice(
       }));
       set({
         nodes: cleaned,
-        edges,
+        edges: filtered.edges,
         assets: [],
         messages: [],
         selectedNodeId: null,

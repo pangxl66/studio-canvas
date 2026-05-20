@@ -166,6 +166,14 @@ function classifyUpstreamError(status: number, raw: unknown): string {
   if (/context.?length|maximum context|max tokens|too many tokens|token.*exceed|context_length_exceeded|上下文|输入过长/.test(lower)) {
     return '模型输入过长：当前内容超出模型上下文限制，请减少输入或拆分镜头后再试。';
   }
+  if (
+    status === 400 &&
+    /unknown variant [`'"]?image_url|expected [`'"]?text|image[_ -]?url.*expected.*text|does not support.*image|vision.*not supported/.test(
+      lower,
+    )
+  ) {
+    return '当前模型通道不支持图片输入：图片节点需要走 GPT/视觉模型。请切换到 GPT，或在服务器配置支持图片理解的 GPT_LLM_MODEL / GPT_LLM_BASE_URL 后重试。';
+  }
   if (status >= 500) {
     return '模型服务暂时不可用：上游服务异常，请稍后再试。';
   }
@@ -206,8 +214,32 @@ function getBearerToken(req: IncomingMessage): string {
   return match?.[1]?.trim() ?? '';
 }
 
+function messageContentChars(value: unknown): number {
+  if (typeof value === 'string') return value.length;
+  if (Array.isArray(value)) {
+    return value.reduce((total, part) => {
+      if (!part || typeof part !== 'object') return total + messageContentChars(part);
+      const record = part as Record<string, unknown>;
+      const partType = typeof record.type === 'string' ? record.type.toLowerCase() : '';
+      if (partType.includes('image')) return total + 1200;
+      return total + messageContentChars(record.text) + messageContentChars(record.content);
+    }, 0);
+  }
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const type = typeof record.type === 'string' ? record.type.toLowerCase() : '';
+    if (type.includes('image')) return 1200;
+    return messageContentChars(record.text) + messageContentChars(record.content);
+  }
+  return 0;
+}
+
 function bodyInputChars(body: ChatRequestBody): number {
-  return JSON.stringify(body.messages ?? []).length;
+  if (!Array.isArray(body.messages)) return 0;
+  return body.messages.reduce(
+    (total, message) => total + (message.role?.length ?? 0) + messageContentChars(message.content),
+    0,
+  );
 }
 
 function extractOutputChars(rawText: string): number {
@@ -237,6 +269,9 @@ function quotaCostForFeature(feature: string, body: ChatRequestBody): number {
 
 function configuredModelForFeature(feature?: string): string {
   const normalizedFeature = feature?.trim() ?? '';
+  if (normalizedFeature === 'image-text-polish') {
+    return env('LLM_DEEP_MODEL') || env('LLM_MODEL');
+  }
   if (normalizedFeature === 'text-polish') {
     return env('LLM_FAST_MODEL') || env('LLM_MODEL');
   }

@@ -1,5 +1,5 @@
 import { safeJsonParse } from '@/services/safeJsonParse';
-import { getAuthSnapshot, isSaasAuthEnabled } from '@/services/authClient';
+import { getAuthSnapshot, isSaasAuthEnabled, isSaasMockEnabled } from '@/services/authClient';
 import { requestCreditRefresh, spendMockCredit } from '@/services/creditService';
 
 export type ModelGatewayConfig = {
@@ -16,9 +16,15 @@ export type RequestLLMParams = {
   userPrompt: string;
   temperature: number;
   jsonMode: boolean;
+  feature?: string;
   maxOutputTokens?: number;
   model?: string;
   signal?: AbortSignal;
+};
+
+export type RequestLLMWithImageParams = RequestLLMParams & {
+  imageDataUrl: string;
+  imageDetail?: 'auto' | 'low' | 'high';
 };
 
 export type RequestLLMError = {
@@ -106,6 +112,9 @@ async function getGatewayRequestHeadersForFetch(config: ModelGatewayConfig): Pro
     if (session?.access_token) {
       headers.Authorization = `Bearer ${session.access_token}`;
     }
+    if (isSaasMockEnabled() && session?.user?.email) {
+      headers['X-Studio-Mock-Email'] = session.user.email;
+    }
   }
   return headers;
 }
@@ -168,6 +177,15 @@ function mapNetworkErrorMessage(raw: string): string {
 function mapApiErrorMessage(status: number, bodySnippet: string): string | null {
   const text = sanitizeGatewayText(bodySnippet);
   if (!text) return null;
+
+  if (
+    status === 400 &&
+    /unknown variant [`'"]?image_url|expected [`'"]?text|image[_ -]?url.*expected.*text|does not support.*image|vision.*not supported/i.test(
+      text,
+    )
+  ) {
+    return '当前模型通道不支持图片输入：图片节点需要走 GPT/视觉模型。请切换到 GPT，或在服务器配置支持图片理解的 GPT_LLM_MODEL / GPT_LLM_BASE_URL 后重试。';
+  }
 
   if (/^(模型服务|模型请求|无法访问|站内)/.test(text)) {
     return text;
@@ -348,8 +366,11 @@ async function requestLLMOnce(
       { role: 'user', content: params.userPrompt },
     ],
   };
-  if (config.provider) {
+  if (config.proxyUrl && config.provider) {
     body.provider = config.provider;
+  }
+  if (params.feature?.trim()) {
+    body.feature = params.feature.trim();
   }
   if (typeof params.maxOutputTokens === 'number' && Number.isFinite(params.maxOutputTokens) && params.maxOutputTokens > 0) {
     body.max_tokens = Math.floor(params.maxOutputTokens);
@@ -520,6 +541,210 @@ export async function requestLLM(
   };
 }
 
+async function requestLLMWithImageOnce(
+  config: ModelGatewayConfig,
+  params: RequestLLMWithImageParams,
+  model: string,
+): Promise<RequestLLMResult> {
+  const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const url = getGatewayRequestUrl(config);
+  const imageProvider = config.provider === 'deepseek' ? 'gpt' : config.provider;
+
+  const body: Record<string, unknown> = {
+    model,
+    temperature: params.temperature,
+    messages: [
+      { role: 'system', content: params.systemPrompt },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: params.userPrompt },
+          {
+            type: 'image_url',
+            image_url: {
+              url: params.imageDataUrl,
+              ...(params.imageDetail ? { detail: params.imageDetail } : {}),
+            },
+          },
+        ],
+      },
+    ],
+  };
+  if (config.proxyUrl && imageProvider) {
+    body.provider = imageProvider;
+  }
+  if (params.feature?.trim()) {
+    body.feature = params.feature.trim();
+  }
+  if (typeof params.maxOutputTokens === 'number' && Number.isFinite(params.maxOutputTokens) && params.maxOutputTokens > 0) {
+    body.max_tokens = Math.floor(params.maxOutputTokens);
+  }
+  if (params.jsonMode) {
+    body.response_format = { type: 'json_object' };
+  }
+
+  const controller = new AbortController();
+  let abortedByUser = false;
+  const onExternalAbort = () => {
+    abortedByUser = true;
+    controller.abort();
+  };
+  if (params.signal) {
+    if (params.signal.aborted) {
+      abortedByUser = true;
+      controller.abort();
+    } else {
+      params.signal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+  }
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: await getGatewayRequestHeadersForFetch(config),
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    const text = await res.text();
+    const data = text.trim() ? parseChatCompletionsResponseBody(text) ?? {} : {};
+
+    if (!res.ok) {
+      const snippet = data.error?.message ?? text;
+      return {
+        ok: false,
+        error: {
+          code: `HTTP_${res.status}`,
+          message: mapHttpToFriendly(res.status, snippet),
+          retried: false,
+        },
+      };
+    }
+
+    if (!text.trim()) {
+      return {
+        ok: false,
+        error: {
+          code: 'EMPTY_CONTENT',
+          message: '模型请求成功，但响应体为空。',
+          retried: false,
+        },
+      };
+    }
+
+    if (!Object.keys(data).length) {
+      const snippet = sanitizeGatewayText(text);
+      return {
+        ok: false,
+        error: {
+          code: 'INVALID_JSON',
+          message: `模型服务返回的内容不是合法 JSON。${snippet ? ` 响应片段：${snippet.slice(0, 160)}` : ''}`,
+          retried: false,
+        },
+      };
+    }
+
+    const content = parseAssistantContent(data);
+    if (content == null) {
+      return {
+        ok: false,
+        error: {
+          code: 'EMPTY_CONTENT',
+          message: '模型请求成功，但响应中缺少 choices[0].message.content。',
+          retried: false,
+        },
+      };
+    }
+
+    refreshCreditAfterProxySuccess(config);
+    return { ok: true, content };
+  } catch (error) {
+    const name = error instanceof Error ? error.name : '';
+    const isAbort = name === 'AbortError' || (error instanceof DOMException && error.name === 'AbortError');
+    if (isAbort) {
+      if (abortedByUser) {
+        return {
+          ok: false,
+          error: {
+            code: 'USER_ABORT',
+            message: USER_ABORT_MESSAGE,
+            retried: false,
+          },
+        };
+      }
+      return {
+        ok: false,
+        error: {
+          code: 'TIMEOUT',
+          message: `模型请求超时：等待 ${Math.floor(timeoutMs / 1000)} 秒后仍未完成。`,
+          retried: false,
+        },
+      };
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      error: {
+        code: 'NETWORK',
+        message: mapNetworkErrorMessage(message),
+        retried: false,
+      },
+    };
+  } finally {
+    clearTimeout(timer);
+    params.signal?.removeEventListener('abort', onExternalAbort);
+  }
+}
+
+export async function requestLLMWithImage(
+  config: ModelGatewayConfig,
+  params: RequestLLMWithImageParams,
+): Promise<RequestLLMResult> {
+  const model = (params.model ?? config.model)?.trim();
+  if (!model) {
+    return {
+      ok: false,
+      error: {
+        code: 'MISSING_MODEL',
+        message: '未配置模型名称，请在设置或环境变量中补齐。',
+        retried: false,
+      },
+    };
+  }
+
+  const first = await requestLLMWithImageOnce(config, params, model);
+  if (first.ok) return first;
+  if (first.error.code === 'USER_ABORT') return first;
+  if (!shouldRetryGatewayError(first.error)) return first;
+
+  try {
+    await waitBeforeRetry(first.error.code === 'HTTP_429' || first.error.code === 'STREAM_ERROR' ? 1600 : 900, params.signal);
+  } catch {
+    return {
+      ok: false,
+      error: {
+        code: 'USER_ABORT',
+        message: USER_ABORT_MESSAGE,
+        retried: false,
+      },
+    };
+  }
+
+  const second = await requestLLMWithImageOnce(config, params, model);
+  if (second.ok) return second;
+  if (second.error.code === 'USER_ABORT') return second;
+
+  return {
+    ok: false,
+    error: {
+      code: second.error.code,
+      message: `${second.error.message} 已自动重试 1 次，但仍然失败。`,
+      retried: true,
+    },
+  };
+}
+
 export type RequestLLMStreamParams = RequestLLMParams & {
   onDelta: (delta: string, accumulated: string) => void;
   onComplete?: (fullText: string) => void;
@@ -552,7 +777,7 @@ async function requestLLMStreamOnce(
       { role: 'user', content: params.userPrompt },
     ],
   };
-  if (config.provider) {
+  if (config.proxyUrl && config.provider) {
     body.provider = config.provider;
   }
   if (typeof params.maxOutputTokens === 'number' && Number.isFinite(params.maxOutputTokens) && params.maxOutputTokens > 0) {

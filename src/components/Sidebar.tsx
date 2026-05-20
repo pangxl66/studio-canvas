@@ -1,11 +1,7 @@
 import { useReactFlow } from '@xyflow/react';
 import { useStudioStore } from '@/store/useStudioStore';
-import type { NodeKind } from '@/types/studio';
 
-type PipelineKind = Exclude<
-  NodeKind,
-  'text_node' | 'shot_list_node' | 'storyboard_file_node' | 'prompt_review_node' | 'image_node'
->;
+type PipelineKind = 'writing' | 'storyboard' | 'prompt';
 
 function IconPen() {
   return (

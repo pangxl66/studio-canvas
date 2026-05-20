@@ -89,7 +89,23 @@ function uid(prefix: string) {
 
 type PipelineKind = Exclude<
   NodeKind,
-  'text_node' | 'shot_list_node' | 'storyboard_file_node' | 'prompt_review_node' | 'image_node'
+  | 'text_node'
+  | 'shot_list_node'
+  | 'storyboard_file_node'
+  | 'prompt_review_node'
+  | 'image_node'
+  | 'script_input_node'
+  | 'script_scene_node'
+  | 'script_character_node'
+  | 'script_prop_node'
+  | 'script_output_node'
+  | 'script_review_node'
+  | 'script_timeline_node'
+  | 'script_art_node'
+  | 'script_vfx_node'
+  | 'script_world_node'
+  | 'script_production_node'
+  | 'script_ai_assets_node'
 >;
 
 function kindToDepartment(kind: PipelineKind): Department {
@@ -106,6 +122,18 @@ function deptLabel(d: Department): string {
   if (d === 'STORYBOARD_FILE') return '分镜表文件';
   if (d === 'PROMPT_REVIEW') return '提示词审核';
   if (d === 'IMAGE') return '图片表格';
+  if (d === 'SCRIPT_INPUT') return '剧本输入';
+  if (d === 'SCRIPT_SCENE') return '场景拆解';
+  if (d === 'SCRIPT_CHARACTER') return '角色分析';
+  if (d === 'SCRIPT_PROP') return '道具分析';
+  if (d === 'SCRIPT_OUTPUT') return '拆解汇总';
+  if (d === 'SCRIPT_REVIEW') return '质量复核';
+  if (d === 'SCRIPT_TIMELINE') return '时间线分析';
+  if (d === 'SCRIPT_ART') return '美术分析';
+  if (d === 'SCRIPT_VFX') return 'VFX分析';
+  if (d === 'SCRIPT_WORLD') return '世界观分析';
+  if (d === 'SCRIPT_PRODUCTION') return '制片统筹';
+  if (d === 'SCRIPT_AI_ASSETS') return 'AI资产生成';
   return 'Prompt部';
 }
 
@@ -148,9 +176,12 @@ function positiveNumber(value: unknown): number | undefined {
 }
 
 function defaultNodeSize(node: StudioRFNode): { width: number; height: number } {
-  if (node.type === 'textNode') return { width: 220, height: 150 };
+  if (node.type === 'textNode') return { width: 430, height: 420 };
   if (node.type === 'storyboardFile') return { width: 260, height: 190 };
-  if (node.type === 'imageNode') return { width: 260, height: 300 };
+  if (node.type === 'imageNode') return { width: 560, height: 390 };
+  if (node.type === 'scriptInput') return { width: 360, height: 360 };
+  if (node.type === 'scriptAnalyzer') return { width: 300, height: 260 };
+  if (node.type === 'scriptOutput') return { width: 360, height: 300 };
   if (node.type === 'shotList') {
     return {
       width: positiveNumber(node.data.canvasWidth) ?? SHOT_LIST_DEFAULT_WIDTH,
@@ -327,7 +358,7 @@ function makeImageNodeData(
     output: null,
     review_result: null,
     version: 0,
-    label: opts?.label?.trim() || `图片表格 · ${id.slice(-4)}`,
+    label: opts?.label?.trim() || `图片节点 · ${id.slice(-4)}`,
     imageDataUrl: opts?.imageDataUrl,
     imageMimeType: opts?.imageMimeType,
     imageFileName: opts?.imageFileName,
@@ -351,6 +382,68 @@ function makePromptReviewNodeData(id: string, text = '', positionLabel?: string)
     canvasHeight: 640,
     prompt_review_history: [],
     label: positionLabel ?? `提示词审核 · ${id.slice(-4)}`,
+    assistant_preferences: '',
+    assistant_task_instruction: '',
+  };
+}
+
+type ScriptNodeKind =
+  | 'script_input_node'
+  | 'script_scene_node'
+  | 'script_character_node'
+  | 'script_prop_node'
+  | 'script_output_node'
+  | 'script_review_node'
+  | 'script_timeline_node'
+  | 'script_art_node'
+  | 'script_vfx_node'
+  | 'script_world_node'
+  | 'script_production_node'
+  | 'script_ai_assets_node';
+
+function scriptDepartmentForKind(kind: ScriptNodeKind): Department {
+  if (kind === 'script_input_node') return 'SCRIPT_INPUT';
+  if (kind === 'script_scene_node') return 'SCRIPT_SCENE';
+  if (kind === 'script_character_node') return 'SCRIPT_CHARACTER';
+  if (kind === 'script_prop_node') return 'SCRIPT_PROP';
+  if (kind === 'script_review_node') return 'SCRIPT_REVIEW';
+  if (kind === 'script_timeline_node') return 'SCRIPT_TIMELINE';
+  if (kind === 'script_art_node') return 'SCRIPT_ART';
+  if (kind === 'script_vfx_node') return 'SCRIPT_VFX';
+  if (kind === 'script_world_node') return 'SCRIPT_WORLD';
+  if (kind === 'script_production_node') return 'SCRIPT_PRODUCTION';
+  if (kind === 'script_ai_assets_node') return 'SCRIPT_AI_ASSETS';
+  return 'SCRIPT_OUTPUT';
+}
+
+function scriptLabelForKind(kind: ScriptNodeKind): string {
+  if (kind === 'script_input_node') return '剧本输入';
+  if (kind === 'script_scene_node') return '场景拆解';
+  if (kind === 'script_character_node') return '角色分析';
+  if (kind === 'script_prop_node') return '道具分析';
+  if (kind === 'script_review_node') return '质量复核';
+  if (kind === 'script_timeline_node') return '时间线分析';
+  if (kind === 'script_art_node') return '美术分析';
+  if (kind === 'script_vfx_node') return 'VFX分析';
+  if (kind === 'script_world_node') return '世界观分析';
+  if (kind === 'script_production_node') return '制片统筹';
+  if (kind === 'script_ai_assets_node') return 'AI资产生成';
+  return '拆解汇总';
+}
+
+function makeScriptNodeData(id: string, kind: ScriptNodeKind): StudioNodeData {
+  const inputLike = kind === 'script_input_node';
+  return {
+    id,
+    type: kind,
+    department: scriptDepartmentForKind(kind),
+    status: inputLike ? 'APPROVED' : 'NOT_STARTED',
+    input: '',
+    raw_text: inputLike ? '' : undefined,
+    output: null,
+    review_result: null,
+    version: 0,
+    label: `${scriptLabelForKind(kind)} · ${id.slice(-4)}`,
     assistant_preferences: '',
     assistant_task_instruction: '',
   };
@@ -468,6 +561,27 @@ export type StudioState = {
       label?: string;
     },
   ) => string;
+  addScriptInputNode: (position?: { x: number; y: number }) => string;
+  addScriptCoreAnalyzerNodes: (inputId: string) => {
+    sceneId: string;
+    characterId: string;
+    propId: string;
+  };
+  addScriptAiAssetsNodeFromSource: (sourceId: string) => string | null;
+  addScriptBreakdownTemplate: (position?: { x: number; y: number }) => {
+    inputId: string;
+    sceneId: string;
+    characterId: string;
+    propId: string;
+    outputId: string;
+    reviewId: string;
+    timelineId: string;
+    artId: string;
+    vfxId: string;
+    worldId: string;
+    productionId: string;
+    aiAssetsId: string;
+  };
   /** 閸︺劍瀵氱€规艾娼楅弽鍥у灡瀵?TEXT_NODE閿涘苯鑻熸潻鐐插煂闁劑妫?Input閿涘澅argetHandle `in`閿?*/
   createTextNodeLinkedToDepartment: (deptId: string, position: { x: number; y: number }) => string;
   /** 娴犲骸褰為弻鍕缁惧潡鍣撮弨鎯ф躬缁岃櫣娅ф径鍕倵閿涘瞼鏁遍懣婊冨礋闁瀚ㄩ崚娑樼紦閼哄倻鍋ｉ獮鎯板殰閸斻劏绻涚痪?*/
@@ -477,6 +591,7 @@ export type StudioState = {
     fromHandleType: 'source' | 'target' | null;
     pick:
       | 'text_node'
+      | 'image_node'
       | 'storyboard_file_node'
       | 'prompt_review_node'
       | 'writing'
@@ -518,7 +633,7 @@ export type StudioState = {
   /** 閸欐牗绉烽幍瀣З鐟曞棛娲婇敍灞肩矤鏉╃偟鍤庨柌宥嗘煀閸氬牆鑻?input */
   syncDepartmentInputFromGraph: (deptId: string) => void;
   syncPromptReviewInputFromGraph: (nodeId: string) => void;
-  runTextPolish: (nodeId: string) => Promise<void>;
+  runTextPolish: (nodeId: string, opts?: { instruction?: string }) => Promise<void>;
   savePromptReviewSnapshot: (nodeId: string, label?: string) => boolean;
   restorePromptReviewSnapshot: (nodeId: string, snapshotId: string) => boolean;
   runPromptReviewLlm: (nodeId: string, instruction?: string) => Promise<void>;
@@ -1670,7 +1785,19 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         target.data.type !== 'text_node' &&
         target.data.type !== 'shot_list_node' &&
         target.data.type !== 'storyboard_file_node' &&
-        target.data.type !== 'prompt_review_node'
+        target.data.type !== 'prompt_review_node' &&
+        target.data.type !== 'script_input_node' &&
+        target.data.type !== 'script_scene_node' &&
+        target.data.type !== 'script_character_node' &&
+        target.data.type !== 'script_prop_node' &&
+        target.data.type !== 'script_output_node' &&
+        target.data.type !== 'script_review_node' &&
+        target.data.type !== 'script_timeline_node' &&
+        target.data.type !== 'script_art_node' &&
+        target.data.type !== 'script_vfx_node' &&
+        target.data.type !== 'script_world_node' &&
+        target.data.type !== 'script_production_node' &&
+        target.data.type !== 'script_ai_assets_node'
       ) {
         if (!canTransitionPipelineStatus(target.data.status, patchEff.status, target.data.type)) {
           return s;
@@ -2179,6 +2306,9 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
     if (feedingDept) {
       const dk = from.data.type as PipelineKind;
+      if (p.pick === 'image_node') {
+        return pushErr('图片节点目前作为文本卡片的视觉参考使用，请连接到文本卡片。');
+      }
       if (p.pick === 'text_node') {
         const id = uid('text');
         const data = makeTextNodeData(id, '');
@@ -2303,6 +2433,23 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         syncTextIn(from.id);
         return id;
       }
+      if (p.pick === 'image_node') {
+        const id = get().addImageNode(upstreamPos);
+        set((s) => ({
+          edges: addEdge(
+            {
+              source: id,
+              target: from.id,
+              sourceHandle: 'out',
+              targetHandle: 'in',
+              animated: true,
+            },
+            s.edges,
+          ),
+        }));
+        get().pushMessage({ role: 'system', text: '已创建图片节点，并接入当前文本卡片。', nodeId: id });
+        return id;
+      }
       if (p.pick === 'prompt_review_node') {
         return pushErr('提示词审核节点只能从 Prompt 节点右侧 Output 创建。');
       }
@@ -2325,7 +2472,42 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     }
 
     if (fromDownstreamOut) {
+      if (from.type === 'imageNode') {
+        if (p.pick !== 'text_node') {
+          return pushErr('图片节点 Output 目前只支持连接到文本卡片。');
+        }
+        const id = uid('text');
+        const data = makeTextNodeData(id, '');
+        set((s) => ({
+          nodes: [
+            ...s.nodes,
+            {
+              id,
+              type: 'textNode',
+              position: downstreamPos,
+              selected: false,
+              data,
+            },
+          ],
+          edges: addEdge(
+            {
+              source: from.id,
+              target: id,
+              sourceHandle: 'out',
+              targetHandle: 'in',
+              animated: true,
+            },
+            s.edges,
+          ),
+        }));
+        get().pushMessage({ role: 'system', text: '已创建文本卡片，并接入当前图片作为视觉参考。', nodeId: id });
+        return id;
+      }
+
       if (from.type === 'textNode') {
+        if (p.pick === 'image_node') {
+          return pushErr('文本卡片 Output 暂不连接到图片节点；请把图片节点 Output 接到文本卡片 Input。');
+        }
         if (p.pick === 'text_node') {
           const id = uid('text');
           const data = makeTextNodeData(id, '');
@@ -2441,6 +2623,9 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
       if (from.type === 'department') {
         const fk = from.data.type as PipelineKind;
+        if (p.pick === 'image_node') {
+          return pushErr('部门 Output 暂不连接到图片节点；请把图片节点 Output 接到文本卡片 Input。');
+        }
         if (p.pick === 'prompt_review_node') {
           if (fk !== 'prompt') {
             return pushErr('只有 Prompt 节点的 Output 可以创建提示词审核节点。');
@@ -2532,6 +2717,9 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       }
 
       if (from.type === 'promptReview') {
+        if (p.pick === 'image_node') {
+          return pushErr('提示词审核节点 Output 暂不连接到图片节点；请把图片节点 Output 接到文本卡片 Input。');
+        }
         if (p.pick === 'text_node') {
           const id = uid('text');
           const data = makeTextNodeData(id, '');
@@ -3195,8 +3383,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     get().pushMessage({
       role: 'system',
       text: opts?.imageDataUrl
-        ? '已创建图片节点。可点击“解析表格”识别图片中的分镜表。'
-        : '已创建图片节点。上传或粘贴表格图片后，可解析成独立分镜表节点。',
+        ? '已创建图片节点。可点击“分析画面”，或连接到文本卡片后参与 LLM 润色。'
+        : '已创建图片节点。上传或粘贴图片后，可作为文本润色的视觉参考。',
       nodeId: id,
     });
     return id;
@@ -3232,6 +3420,299 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       nodeId: id,
     });
     return id;
+  },
+
+  addScriptInputNode: (position) => {
+    pushUndoSnapshot(set);
+    const id = uid('scriptinput');
+    const pos = position ?? { x: 260, y: 220 };
+    set((s) => ({
+      nodes: [
+        ...s.nodes,
+        {
+          id,
+          type: 'scriptInput',
+          position: pos,
+          selected: false,
+          data: makeScriptNodeData(id, 'script_input_node'),
+        },
+      ],
+    }));
+    get().pushMessage({
+      role: 'system',
+      text: '已创建剧本输入节点。粘贴剧本后点击“剧本拆解”，会通过 API 生成场景、角色、道具三个节点。',
+      nodeId: id,
+    });
+    return id;
+  },
+
+  addScriptCoreAnalyzerNodes: (inputId) => {
+    pushUndoSnapshot(set);
+    let result = {
+      sceneId: '',
+      characterId: '',
+      propId: '',
+    };
+
+    set((s) => {
+      const inputNode = s.nodes.find((node) => node.id === inputId);
+      if (!inputNode || inputNode.type !== 'scriptInput') return s;
+      const origin = inputNode?.position ?? { x: 260, y: 220 };
+      const findDownstreamAnalyzer = (kind: ScriptNodeKind): string | null => {
+        const visited = new Set<string>([inputId]);
+        const queue = s.edges.filter((edge) => edge.source === inputId).map((edge) => edge.target);
+        while (queue.length > 0) {
+          const currentId = queue.shift();
+          if (!currentId || visited.has(currentId)) continue;
+          visited.add(currentId);
+          const node = s.nodes.find((item) => item.id === currentId);
+          if (node?.type === 'scriptAnalyzer' && node.data.type === kind) return node.id;
+          for (const edge of s.edges.filter((item) => item.source === currentId)) {
+            if (!visited.has(edge.target)) queue.push(edge.target);
+          }
+        }
+        return null;
+      };
+      const makeAnalyzer = (
+        currentId: string | null,
+        prefix: string,
+        kind: 'script_scene_node' | 'script_character_node' | 'script_prop_node',
+        position: { x: number; y: number },
+      ): { id: string; node: StudioRFNode | null } => {
+        if (currentId) return { id: currentId, node: null };
+        const id = uid(prefix);
+        return {
+          id,
+          node: {
+            id,
+            type: 'scriptAnalyzer',
+            position,
+            selected: false,
+            data: makeScriptNodeData(id, kind),
+          },
+        };
+      };
+
+      const scene = makeAnalyzer(findDownstreamAnalyzer('script_scene_node'), 'scriptscene', 'script_scene_node', {
+        x: origin.x + 440,
+        y: origin.y - 280,
+      });
+      const character = makeAnalyzer(findDownstreamAnalyzer('script_character_node'), 'scriptcast', 'script_character_node', {
+        x: origin.x + 440,
+        y: origin.y,
+      });
+      const prop = makeAnalyzer(findDownstreamAnalyzer('script_prop_node'), 'scriptprop', 'script_prop_node', {
+        x: origin.x + 440,
+        y: origin.y + 280,
+      });
+
+      result = {
+        sceneId: scene.id,
+        characterId: character.id,
+        propId: prop.id,
+      };
+
+      let edges = s.edges;
+      for (const targetId of [scene.id, character.id, prop.id]) {
+        if (!edges.some((edge) => edge.source === inputId && edge.target === targetId)) {
+          edges = addEdge({ source: inputId, target: targetId, sourceHandle: 'out', targetHandle: 'in', animated: true }, edges);
+        }
+      }
+
+      return {
+        nodes: [...s.nodes, ...[scene.node, character.node, prop.node].filter((node): node is StudioRFNode => Boolean(node))],
+        edges,
+      };
+    });
+
+    return result;
+  },
+
+  addScriptAiAssetsNodeFromSource: (sourceId) => {
+    pushUndoSnapshot(set);
+    let result: string | null = null;
+
+    set((s) => {
+      const sourceNode = s.nodes.find((node) => node.id === sourceId);
+      if (!sourceNode || (sourceNode.type !== 'scriptAnalyzer' && sourceNode.type !== 'scriptOutput')) return s;
+
+      const existingEdge = s.edges.find((edge) => {
+        if (edge.source !== sourceId) return false;
+        const target = s.nodes.find((node) => node.id === edge.target);
+        return target?.type === 'scriptAnalyzer' && target.data.type === 'script_ai_assets_node';
+      });
+      if (existingEdge) {
+        result = existingEdge.target;
+        return s;
+      }
+
+      const id = uid('scriptasset');
+      result = id;
+      const node: StudioRFNode = {
+        id,
+        type: 'scriptAnalyzer',
+        position: { x: sourceNode.position.x + 390, y: sourceNode.position.y },
+        selected: false,
+        data: makeScriptNodeData(id, 'script_ai_assets_node'),
+      };
+      const edge: Connection = { source: sourceId, target: id, sourceHandle: 'out', targetHandle: 'in' };
+      return {
+        nodes: [...s.nodes, node],
+        edges: addEdge({ ...edge, animated: true }, s.edges),
+      };
+    });
+
+    return result;
+  },
+
+  addScriptBreakdownTemplate: (position) => {
+    pushUndoSnapshot(set);
+    const origin = position ?? { x: 260, y: 220 };
+    const inputId = uid('scriptinput');
+    const sceneId = uid('scriptscene');
+    const characterId = uid('scriptcast');
+    const propId = uid('scriptprop');
+    const outputId = uid('scriptout');
+    const reviewId = uid('scriptreview');
+    const timelineId = uid('scripttime');
+    const artId = uid('scriptart');
+    const vfxId = uid('scriptvfx');
+    const worldId = uid('scriptworld');
+    const productionId = uid('scriptprod');
+    const aiAssetsId = uid('scriptasset');
+    const nodesToAdd: StudioRFNode[] = [
+      {
+        id: inputId,
+        type: 'scriptInput',
+        position: origin,
+        selected: false,
+        data: makeScriptNodeData(inputId, 'script_input_node'),
+      },
+      {
+        id: sceneId,
+        type: 'scriptAnalyzer',
+        position: { x: origin.x + 420, y: origin.y - 24 },
+        selected: false,
+        data: makeScriptNodeData(sceneId, 'script_scene_node'),
+      },
+      {
+        id: characterId,
+        type: 'scriptAnalyzer',
+        position: { x: origin.x + 790, y: origin.y - 150 },
+        selected: false,
+        data: makeScriptNodeData(characterId, 'script_character_node'),
+      },
+      {
+        id: propId,
+        type: 'scriptAnalyzer',
+        position: { x: origin.x + 790, y: origin.y + 118 },
+        selected: false,
+        data: makeScriptNodeData(propId, 'script_prop_node'),
+      },
+      {
+        id: outputId,
+        type: 'scriptOutput',
+        position: { x: origin.x + 1160, y: origin.y - 18 },
+        selected: false,
+        data: makeScriptNodeData(outputId, 'script_output_node'),
+      },
+      {
+        id: reviewId,
+        type: 'scriptAnalyzer',
+        position: { x: origin.x + 1570, y: origin.y - 286 },
+        selected: false,
+        data: makeScriptNodeData(reviewId, 'script_review_node'),
+      },
+      {
+        id: timelineId,
+        type: 'scriptAnalyzer',
+        position: { x: origin.x + 1570, y: origin.y - 18 },
+        selected: false,
+        data: makeScriptNodeData(timelineId, 'script_timeline_node'),
+      },
+      {
+        id: worldId,
+        type: 'scriptAnalyzer',
+        position: { x: origin.x + 1570, y: origin.y + 250 },
+        selected: false,
+        data: makeScriptNodeData(worldId, 'script_world_node'),
+      },
+      {
+        id: artId,
+        type: 'scriptAnalyzer',
+        position: { x: origin.x + 1980, y: origin.y - 150 },
+        selected: false,
+        data: makeScriptNodeData(artId, 'script_art_node'),
+      },
+      {
+        id: vfxId,
+        type: 'scriptAnalyzer',
+        position: { x: origin.x + 1980, y: origin.y + 118 },
+        selected: false,
+        data: makeScriptNodeData(vfxId, 'script_vfx_node'),
+      },
+      {
+        id: productionId,
+        type: 'scriptAnalyzer',
+        position: { x: origin.x + 2390, y: origin.y - 18 },
+        selected: false,
+        data: makeScriptNodeData(productionId, 'script_production_node'),
+      },
+      {
+        id: aiAssetsId,
+        type: 'scriptAnalyzer',
+        position: { x: origin.x + 2800, y: origin.y - 18 },
+        selected: false,
+        data: makeScriptNodeData(aiAssetsId, 'script_ai_assets_node'),
+      },
+    ];
+
+    const templateEdges: Connection[] = [
+      { source: inputId, target: sceneId, sourceHandle: 'out', targetHandle: 'in' },
+      { source: sceneId, target: characterId, sourceHandle: 'out', targetHandle: 'in' },
+      { source: sceneId, target: propId, sourceHandle: 'out', targetHandle: 'in' },
+      { source: sceneId, target: outputId, sourceHandle: 'out', targetHandle: 'in' },
+      { source: characterId, target: outputId, sourceHandle: 'out', targetHandle: 'in' },
+      { source: propId, target: outputId, sourceHandle: 'out', targetHandle: 'in' },
+      { source: outputId, target: reviewId, sourceHandle: 'out', targetHandle: 'in' },
+      { source: outputId, target: timelineId, sourceHandle: 'out', targetHandle: 'in' },
+      { source: outputId, target: worldId, sourceHandle: 'out', targetHandle: 'in' },
+      { source: outputId, target: artId, sourceHandle: 'out', targetHandle: 'in' },
+      { source: outputId, target: vfxId, sourceHandle: 'out', targetHandle: 'in' },
+      { source: outputId, target: productionId, sourceHandle: 'out', targetHandle: 'in' },
+      { source: outputId, target: aiAssetsId, sourceHandle: 'out', targetHandle: 'in' },
+    ];
+
+    set((s) => {
+      let edges = s.edges;
+      for (const edge of templateEdges) {
+        edges = addEdge({ ...edge, animated: true }, edges);
+      }
+      return {
+        nodes: [...s.nodes, ...nodesToAdd],
+        edges,
+      };
+    });
+
+    get().pushMessage({
+      role: 'system',
+      text: '已创建节点式剧本拆解模板：剧本输入 → 场景拆解 → 角色/道具分析 → 拆解汇总 → 质量复核/时间线/世界观 → 美术/VFX/制片统筹 → AI资产生成。',
+      nodeId: inputId,
+    });
+    return {
+      inputId,
+      sceneId,
+      characterId,
+      propId,
+      outputId,
+      reviewId,
+      timelineId,
+      artId,
+      vfxId,
+      worldId,
+      productionId,
+      aiAssetsId,
+    };
   },
 
   triggerLeaderReview: async (nodeId) => {

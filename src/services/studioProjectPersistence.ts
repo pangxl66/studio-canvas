@@ -4,6 +4,7 @@ import {
   normalizeRestoredStudioNode,
   toPersistableNodesAndEdges,
 } from '@/utils/studioNodePersistence';
+import { removeDeprecatedScriptNodes } from '@/utils/deprecatedScriptNodes';
 
 export const STUDIO_PROJECT_JSON_VERSION = 1;
 
@@ -61,6 +62,9 @@ const STUDIO_PROJECT_NODE_TYPES = new Set<StudioRFNode['type']>([
   'storyboardFile',
   'imageNode',
   'promptReview',
+  'scriptInput',
+  'scriptAnalyzer',
+  'scriptOutput',
 ]);
 
 function projectKey(projectId: string): string {
@@ -80,7 +84,11 @@ export function stringifyStudioProjectPayloadWithMeta(
   edges: Edge[],
   meta?: { projectId?: string; projectName?: string },
 ): string {
-  const { nodes: persistableNodes, edges: persistableEdges } = toPersistableNodesAndEdges(nodes, edges);
+  const cleaned = removeDeprecatedScriptNodes(nodes, edges);
+  const { nodes: persistableNodes, edges: persistableEdges } = toPersistableNodesAndEdges(
+    cleaned.nodes,
+    cleaned.edges,
+  );
   const payload: StudioProjectFilePayload = {
     version: STUDIO_PROJECT_JSON_VERSION,
     savedAt: Date.now(),
@@ -116,11 +124,12 @@ export function parseStudioProjectPayload(raw: unknown): StudioProjectFilePayloa
     }
   }
   const normalizedNodes = (nodes as StudioRFNode[]).map(normalizeRestoredStudioNode);
+  const cleaned = removeDeprecatedScriptNodes(normalizedNodes, edges as Edge[]);
   return {
     version: typeof raw.version === 'number' ? raw.version : STUDIO_PROJECT_JSON_VERSION,
     savedAt: typeof raw.savedAt === 'number' ? raw.savedAt : Date.now(),
-    nodes: normalizedNodes,
-    edges: edges as Edge[],
+    nodes: cleaned.nodes,
+    edges: cleaned.edges,
     projectId: typeof raw.projectId === 'string' ? raw.projectId : undefined,
     projectName: typeof raw.projectName === 'string' ? raw.projectName : undefined,
   };

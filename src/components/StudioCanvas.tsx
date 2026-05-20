@@ -37,7 +37,7 @@ import {
   DEPT_INPUT_PULL_HANDLE_ID,
   DEPT_OUTPUT_HANDLE_ID,
 } from '@/components/DepartmentNode';
-import { ImageTableNode } from '@/components/ImageTableNode';
+import { ImageTableNode, IMAGE_NODE_OUTPUT_HANDLE_ID } from '@/components/ImageTableNode';
 import { PromptReviewNode } from '@/components/PromptReviewNode';
 import { StoryboardFileNode } from '@/components/StoryboardFileNode';
 import { ShotListNode } from '@/components/ShotListNode';
@@ -58,6 +58,7 @@ import {
 } from '@/services/studioProjectPersistence';
 import { useStudioStore } from '@/store/useStudioStore';
 import type { StudioRFNode } from '@/types/reactFlow';
+import { isDeprecatedScriptFlowNode, removeDeprecatedScriptNodes } from '@/utils/deprecatedScriptNodes';
 import { parseStoryboardWorkbookFile } from '@/utils/storyboardWorkbook';
 import {
   SHOT_LIST_LINK_HANDLE_ID,
@@ -96,7 +97,7 @@ type NodeGalleryItem = {
 };
 
 const HIDE_TEMPORARY_NODE_ENTRIES = true;
-const HIDDEN_PANE_GALLERY_KINDS = new Set<CreateNodeKind>(['writing', 'image_node', 'storyboard_file_node']);
+const HIDDEN_PANE_GALLERY_KINDS = new Set<CreateNodeKind>(['writing', 'storyboard_file_node']);
 
 const PANE_GALLERY_ITEMS_BASE: NodeGalleryItem[] = [
   {
@@ -147,9 +148,9 @@ const PANE_GALLERY_ITEMS_BASE: NodeGalleryItem[] = [
   {
     id: 'image_node',
     kind: 'image_node',
-    title: '图片表格',
-    subtitle: '上传、拖入或粘贴表格截图，解析后自动生成独立镜头表节点。',
-    badge: '图片识别',
+    title: '图片节点',
+    subtitle: '上传图片作为视觉参考；连接到文本卡片后，润色会结合画面内容。',
+    badge: '画面参考',
     accentClass: 'node-picker__card--storyboard',
     icon: '图',
   },
@@ -186,12 +187,24 @@ const INFINITE_EXTENT: CoordinateExtent = [
 export function StudioCanvas() {
   const nodes = useStudioStore((s) => s.nodes);
   const nodeCount = nodes.length;
+  const removeNodesByIds = useStudioStore((s) => s.removeNodesByIds);
 
   // 浠呭湪鏂拌妭鐐硅繘鍏ョ敾甯冩椂琛ョ粦 onExecute/onDelete锛涗笉鍦ㄦ璺?reconcile锛堝叏鍥?resync 浼氱骇鑱?patch锛屾槗瑙﹀彂 Maximum update depth锛?
   useEffect(() => {
     useStudioStore.getState().ensureRuntimeBindingsOnNodes();
   }, [nodeCount]);
   const edges = useStudioStore((s) => s.edges);
+  const visibleGraph = useMemo(() => removeDeprecatedScriptNodes(nodes, edges), [edges, nodes]);
+  const visibleNodes = visibleGraph.nodes;
+  const visibleEdges = visibleGraph.edges;
+
+  useEffect(() => {
+    const removedIds = nodes.filter(isDeprecatedScriptFlowNode).map((node) => node.id);
+    if (removedIds.length > 0) {
+      removeNodesByIds(removedIds);
+    }
+  }, [nodes, removeNodesByIds]);
+
   const onNodesChange = useStudioStore((s) => s.onNodesChange);
   const onConnect = useStudioStore((s) => s.onConnect);
   const onEdgesChange = useStudioStore((s) => s.onEdgesChange);
@@ -262,7 +275,8 @@ export function StudioCanvas() {
       lastPaneClickRef.current = null;
       setContextMenu(null);
       setPaneCreateMenu(null);
-      focusNode(n.id, { openDetail: n.type === 'department' || n.type === 'shotList' });
+      const openDetail = n.type === 'department' || n.type === 'shotList';
+      focusNode(n.id, { openDetail });
     },
     [focusNode],
   );
@@ -564,7 +578,7 @@ export function StudioCanvas() {
           });
           pushMessage({
             role: 'system',
-            text: `已拖入图片“${file.name}”，可以点击“解析表格”生成独立镜头表节点。`,
+            text: `已拖入图片“${file.name}”，可以点击“分析画面”，或连接到文本卡片后参与 LLM 润色。`,
             nodeId: imageNodeId,
           });
           focusNode(imageNodeId, { openDetail: false });
@@ -648,7 +662,7 @@ export function StudioCanvas() {
         });
         pushMessage({
           role: 'system',
-          text: '已从剪贴板粘贴图片，可以点击“解析表格”生成独立镜头表节点。',
+          text: '已从剪贴板粘贴图片，可以点击“分析画面”，或连接到文本卡片后参与 LLM 润色。',
           nodeId: imageNodeId,
         });
         focusNode(imageNodeId, { openDetail: false });
@@ -673,8 +687,8 @@ export function StudioCanvas() {
       <StudioErrorBoundary>
       <ReactFlow
         colorMode="dark"
-        nodes={nodes}
-        edges={edges}
+        nodes={visibleNodes}
+        edges={visibleEdges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onEdgesDelete={onEdgesDelete}
@@ -729,6 +743,12 @@ export function StudioCanvas() {
 
           if (a.type === 'promptReview' && b.type === 'promptReview') {
             if (edge.sourceHandle != null && edge.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) return false;
+            if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
+            return true;
+          }
+
+          if (a.type === 'imageNode' && b.type === 'textNode') {
+            if (edge.sourceHandle != null && edge.sourceHandle !== IMAGE_NODE_OUTPUT_HANDLE_ID) return false;
             if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
             return true;
           }
@@ -870,6 +890,26 @@ export function StudioCanvas() {
                 }}
               >
                 创建文本卡片
+              </button>
+              <button
+                type="button"
+                className="node-picker__btn"
+                onClick={() => {
+                  const p = nodePicker;
+                  const nid = completeConnectionMenuPick({
+                    fromNodeId: p.fromNodeId,
+                    fromHandleId: p.fromHandleId,
+                    fromHandleType: p.fromHandleType,
+                    pick: 'image_node',
+                    flowPosition: { x: p.flowX, y: p.flowY },
+                  });
+                  if (nid) {
+                    setNodePicker(null);
+                    focusNode(nid, { openDetail: false });
+                  }
+                }}
+              >
+                创建图片节点
               </button>
               {!HIDE_TEMPORARY_NODE_ENTRIES ? (
                 <button

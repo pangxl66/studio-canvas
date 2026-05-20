@@ -30,23 +30,37 @@ export function parseModelJson(raw: string, fallbackHint?: string): unknown {
 const MISSING_CFG =
   '未配置可用模型网关。请优先在设置里填写“代理 URL”，或改用 Base URL + API Key；也可以在 `.env` 里配置 `VITE_LLM_PROXY_URL` 或 `VITE_LLM_BASE_URL` / `VITE_LLM_API_KEY`。';
 
+function preferSameOriginProxy(config: NonNullable<ReturnType<typeof getResolvedLlmGatewayConfig>>) {
+  if (typeof window === 'undefined') return config;
+  return {
+    ...config,
+    proxyUrl: '/api/llm/chat',
+    baseUrl: undefined,
+    apiKey: undefined,
+  };
+}
+
 export async function invokeLlmJsonObject(params: {
   systemPrompt: string;
   userPrompt: string;
   temperature?: number;
+  feature?: string;
   model?: string;
+  preferProxy?: boolean;
   signal?: AbortSignal;
 }): Promise<unknown> {
-  const config = getResolvedLlmGatewayConfig();
-  if (!config) {
+  const resolvedConfig = getResolvedLlmGatewayConfig();
+  if (!resolvedConfig) {
     throw new Error(MISSING_CFG);
   }
+  const config = params.preferProxy ? preferSameOriginProxy(resolvedConfig) : resolvedConfig;
 
   const result = await requestLLM(config, {
     systemPrompt: params.systemPrompt,
     userPrompt: params.userPrompt,
     temperature: params.temperature ?? 0.35,
     jsonMode: true,
+    feature: params.feature,
     model: params.model,
     signal: params.signal,
   });
@@ -63,6 +77,7 @@ export async function invokeLlmJsonObject(params: {
       userPrompt: buildJsonRepairUserPrompt(params.userPrompt, result.content),
       temperature: 0.1,
       jsonMode: true,
+      feature: params.feature,
       model: params.model,
       signal: params.signal,
     });
