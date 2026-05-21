@@ -633,7 +633,7 @@ export type StudioState = {
   /** 閸欐牗绉烽幍瀣З鐟曞棛娲婇敍灞肩矤鏉╃偟鍤庨柌宥嗘煀閸氬牆鑻?input */
   syncDepartmentInputFromGraph: (deptId: string) => void;
   syncPromptReviewInputFromGraph: (nodeId: string) => void;
-  runTextPolish: (nodeId: string, opts?: { instruction?: string }) => Promise<void>;
+  runTextPolish: (nodeId: string, opts?: { instruction?: string; mode?: 'simple' | 'deep' }) => Promise<void>;
   savePromptReviewSnapshot: (nodeId: string, label?: string) => boolean;
   restorePromptReviewSnapshot: (nodeId: string, snapshotId: string) => boolean;
   runPromptReviewLlm: (nodeId: string, instruction?: string) => Promise<void>;

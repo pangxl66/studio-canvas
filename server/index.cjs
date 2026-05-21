@@ -806,6 +806,7 @@ function estimateTokens(inChars, outChars) {
 function quotaCostForFeature(feature, body) {
   if (feature === 'prompt-generate-multi') return 2;
   if (feature === 'prompt-review') return 1;
+  if (feature === 'text-polish-simple') return 1;
   if (feature === 'text-polish') return 1;
   if ((body.messages || []).length > 2) return 2;
   return 1;
@@ -813,6 +814,9 @@ function quotaCostForFeature(feature, body) {
 
 function configuredModelForFeature(feature, provider = '') {
   const normalizedFeature = String(feature || '').trim();
+  if (normalizedFeature === 'text-polish-simple') {
+    return envForProvider(provider, 'LLM_MODEL');
+  }
   if (normalizedFeature === 'text-polish' || normalizedFeature === 'image-text-polish') {
     return envForProvider(provider, 'LLM_DEEP_MODEL') || envForProvider(provider, 'LLM_MODEL');
   }

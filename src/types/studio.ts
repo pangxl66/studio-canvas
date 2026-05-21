@@ -218,6 +218,7 @@ export type StudioNodeData = {
   raw_text?: string;
   /** TEXT_NODE：展示模式。plain=常规文本节点；未设置时使用 AI 工作区模式 */
   text_view_mode?: 'plain';
+  text_polish_mode?: 'simple' | 'deep';
   /** 分镜节点：生成时依据的剧本场次数，供分镜 Leader 与场次对齐校验 */
   sourceSceneCount?: number;
   /** 分镜：员工 AI 首次写入 `output` 时的深拷贝，供「重置为 AI 原始生成」 */

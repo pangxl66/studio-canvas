@@ -262,6 +262,7 @@ function estimateTokens(inputChars: number, outputChars: number): number {
 function quotaCostForFeature(feature: string, body: ChatRequestBody): number {
   if (feature === 'prompt-generate-multi') return 2;
   if (feature === 'prompt-review') return 1;
+  if (feature === 'text-polish-simple') return 1;
   if (feature === 'text-polish') return 1;
   if ((body.messages?.length ?? 0) > 2) return 2;
   return 1;
@@ -271,6 +272,9 @@ function configuredModelForFeature(feature?: string): string {
   const normalizedFeature = feature?.trim() ?? '';
   if (normalizedFeature === 'image-text-polish') {
     return env('LLM_DEEP_MODEL') || env('LLM_MODEL');
+  }
+  if (normalizedFeature === 'text-polish-simple') {
+    return env('LLM_MODEL');
   }
   if (normalizedFeature === 'text-polish') {
     return env('LLM_DEEP_MODEL') || env('LLM_MODEL');

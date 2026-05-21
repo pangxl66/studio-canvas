@@ -80,6 +80,7 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
   const displayText = busy ? (data.streaming_preview ?? raw) : draft;
   const displayLabel = displayTextNodeLabel(data.label);
   const plainMode = data.text_view_mode === 'plain';
+  const polishMode = data.text_polish_mode === 'simple' ? 'simple' : 'deep';
   const hasText = Boolean(displayText.trim());
   const hasImages = imageReferences.length > 0;
   const canGenerate = busy || Boolean(instruction.trim() || draft.trim() || hasImages);
@@ -195,6 +196,13 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
     setInstruction(event.target.value);
   }, []);
 
+  const onPolishModeChange = useCallback(
+    (mode: 'simple' | 'deep') => {
+      patchNodeData(id, { text_polish_mode: mode }, false);
+    },
+    [id, patchNodeData],
+  );
+
   const onStop = useCallback(() => {
     stopNodeTask(id);
   }, [id, stopNodeTask]);
@@ -228,10 +236,10 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
       }
       commitDraft();
       const nextInstruction = instruction.trim();
-      void runTextPolish(id, nextInstruction ? { instruction: nextInstruction } : undefined);
+      void runTextPolish(id, nextInstruction ? { instruction: nextInstruction, mode: polishMode } : { mode: polishMode });
       if (nextInstruction) setInstruction('');
     },
-    [busy, commitDraft, id, instruction, onStop, runTextPolish],
+    [busy, commitDraft, id, instruction, onStop, polishMode, runTextPolish],
   );
 
   return (
@@ -326,6 +334,26 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
             disabled={busy}
           />
           <div className="text-node__workspace-footer">
+            <div className="text-node__polish-mode" role="group" aria-label="文本优化模式">
+              <button
+                type="button"
+                className={`text-node__polish-mode-btn ${polishMode === 'simple' ? 'text-node__polish-mode-btn--active' : ''}`}
+                disabled={busy}
+                onClick={() => onPolishModeChange('simple')}
+                title="简单优化：贴近原文，只做轻量润色"
+              >
+                简单
+              </button>
+              <button
+                type="button"
+                className={`text-node__polish-mode-btn ${polishMode === 'deep' ? 'text-node__polish-mode-btn--active' : ''}`}
+                disabled={busy}
+                onClick={() => onPolishModeChange('deep')}
+                title="深度优化：补充影视级运镜、构图、灯光和表演细节"
+              >
+                深度
+              </button>
+            </div>
             <div className="text-node__workspace-actions">
               <button
                 type="button"

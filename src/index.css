@@ -2112,10 +2112,60 @@ body,
 .text-node__workspace-footer {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 16px;
   min-height: 34px;
   margin-top: 10px;
+}
+
+.text-node__polish-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.5);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.text-node__polish-mode-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  min-width: 48px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(229, 231, 235, 0.58);
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: 0;
+  cursor: pointer;
+  transition:
+    background 0.16s ease,
+    color 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+.text-node__polish-mode-btn:hover:not(:disabled) {
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.text-node__polish-mode-btn--active {
+  background: rgba(45, 212, 191, 0.22);
+  color: rgba(229, 255, 252, 0.98);
+  box-shadow:
+    inset 0 0 0 1px rgba(94, 234, 212, 0.34),
+    0 0 14px rgba(20, 184, 166, 0.16);
+}
+
+.text-node__polish-mode-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
 }
 
 .text-node__workspace-actions {

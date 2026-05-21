@@ -13,6 +13,7 @@ type StudioSet = (
 type StudioGet = () => StudioState;
 
 type TextSlice = Pick<StudioState, 'runTextPolish'>;
+type TextPolishMode = 'simple' | 'deep';
 
 type TextSliceDeps = {
   activeTaskAbortControllers: Map<string, AbortController>;
@@ -98,6 +99,28 @@ function buildTextPolishUserPrompt(sourceText: string, instruction = ''): string
   ].join('\n');
 }
 
+function buildSimpleTextPolishSystemPrompt(): string {
+  return [
+    '你是一位中文影视文本润色编辑。当前任务是“简单优化”，仍然需要调用你的语言理解与表达能力，但必须贴近原文，不做大幅扩写。',
+    '只修正原文中不顺、不清楚、不自然、重复、错别字、标点和语序问题；允许少量补充可直接从原文推出的画面、动作、情绪和节奏。',
+    '不要新增原文没有的人物、地点、道具、反转、世界观、结局或大段环境铺陈；不要把一句简单描述改成全新的长剧情。',
+    '保持原文核心事实、叙事顺序、语气和重点，长度通常控制在原文的 0.9-1.25 倍；原文非常粗糙时最多到 1.4 倍。',
+    '可以轻量补入场景时间、院线影视级运镜、构图、灯光风格和真实细腻的表演，但只在原文已有信息能支撑时补充，不能喧宾夺主。',
+    '输出纯正文，不要解释，不要 JSON，不要 Markdown 代码块，不要标题前缀。',
+  ].join('\n');
+}
+
+function buildSimpleTextPolishUserPrompt(sourceText: string, instruction = ''): string {
+  return [
+    ...(instruction.trim() ? ['本次简单优化指令：', instruction.trim(), ''] : []),
+    '请对下面文本做简单 AI 润色：在原基础上补顺表达，轻量补充场景时间、必要的影视级运镜、构图、灯光风格和真实细腻表演。',
+    '请收住，不要发散，不要新增无关剧情，不要大幅改写；让结果比原文更清楚、更有画面感即可。',
+    '',
+    '待优化文本：',
+    sourceText,
+  ].join('\n');
+}
+
 function buildImageAwareSystemPrompt(): string {
   return [
     '你是一位影视级概念设计提示词导演，负责把“图片画面”与“用户补充提示词/动作/情绪”融合成一段新的中文影视级画面提示词。',
@@ -163,6 +186,7 @@ export function createTextStoreSlice(
       if (!node || node.type !== 'textNode') return;
       const nodeText = (node.data.raw_text ?? node.data.input ?? '').trim();
       const instruction = opts?.instruction?.trim() || '';
+      const mode: TextPolishMode = opts?.mode === 'simple' ? 'simple' : node.data.text_polish_mode === 'simple' ? 'simple' : 'deep';
       const sourceText = nodeText || instruction;
       const instructionForPrompt = nodeText ? instruction : '';
       const imageRefs = connectedImageReferences(nodeId, get().nodes, get().edges);
@@ -194,7 +218,9 @@ export function createTextStoreSlice(
           generation_error: undefined,
           streaming_preview: hasImageContext
             ? 'LLM 正在读取连接的图片节点，并生成影视级画面提示词...'
-            : 'LLM 正在以高质量模式按剧本格式润色文本...\n\n完成后会自动写回正文。',
+            : mode === 'simple'
+              ? 'LLM 正在以简单模式轻量优化文本...\n\n完成后会自动写回正文。'
+              : 'LLM 正在以深度模式按影视剧本规范润色文本...\n\n完成后会自动写回正文。',
         },
         true,
       );
@@ -207,7 +233,8 @@ export function createTextStoreSlice(
       try {
         const settings = getLlmSettingsFormDefaults();
         const imageConfig = hasImageContext && primaryImage?.imageDataUrl ? getResolvedVisionLlmGatewayConfig() ?? config : config;
-        const model = (hasImageContext && primaryImage?.imageDataUrl ? imageConfig.model : settings.deepModel)?.trim() || config.model?.trim();
+        const textModel = mode === 'simple' ? config.model?.trim() : settings.deepModel?.trim();
+        const model = (hasImageContext && primaryImage?.imageDataUrl ? imageConfig.model : textModel)?.trim() || config.model?.trim();
         const finalResult =
           hasImageContext && primaryImage?.imageDataUrl
             ? await requestLLMWithImage(imageConfig, {
@@ -224,14 +251,20 @@ export function createTextStoreSlice(
               })
             : await requestLLM(config, {
                 model,
-                systemPrompt: hasImageContext ? buildImageAwareSystemPrompt() : buildTextPolishSystemPrompt(),
+                systemPrompt: hasImageContext
+                  ? buildImageAwareSystemPrompt()
+                  : mode === 'simple'
+                    ? buildSimpleTextPolishSystemPrompt()
+                    : buildTextPolishSystemPrompt(),
                 userPrompt: hasImageContext
                   ? buildImageAwareUserPrompt(sourceText, imageRefs, instructionForPrompt)
-                  : buildTextPolishUserPrompt(sourceText, instructionForPrompt),
-                temperature: hasImageContext ? 0.28 : 0.32,
+                  : mode === 'simple'
+                    ? buildSimpleTextPolishUserPrompt(sourceText, instructionForPrompt)
+                    : buildTextPolishUserPrompt(sourceText, instructionForPrompt),
+                temperature: hasImageContext ? 0.28 : mode === 'simple' ? 0.18 : 0.32,
                 jsonMode: false,
-                feature: 'text-polish',
-                maxOutputTokens: hasImageContext ? 2200 : 4200,
+                feature: hasImageContext ? 'image-text-polish' : mode === 'simple' ? 'text-polish-simple' : 'text-polish',
+                maxOutputTokens: hasImageContext ? 2200 : mode === 'simple' ? 2200 : 4200,
                 signal: controller.signal,
               });
 
@@ -305,7 +338,9 @@ export function createTextStoreSlice(
         );
         get().pushMessage({
           role: 'broadcast',
-          text: hasImageContext ? '文本节点已结合图片生成影视级提示词，并已写回正文。' : '文本节点 LLM 润色已完成，并已写回正文。',
+          text: hasImageContext
+            ? '文本节点已结合图片生成影视级提示词，并已写回正文。'
+            : `文本节点 LLM ${mode === 'simple' ? '简单优化' : '深度优化'}已完成，并已写回正文。`,
           nodeId,
         });
       } finally {
