@@ -55,30 +55,43 @@ function connectedImageReferences(textId: string, nodes: StudioRFNode[], edges: 
 
 function buildTextPolishSystemPrompt(): string {
   return [
-    '你是一位中文短剧剧本编辑，负责把文本卡片里的粗糙素材润色成“可继续进入编剧节点、分镜节点和 Prompt 节点”的剧本文本。',
-    '本任务参考剧本格式规范，但输出仍然是纯文本正文，不要输出 JSON、Markdown 代码块、解释、审稿意见或标题前缀。',
+    '你是一位中文影视剧本润色编辑，负责把文本卡片里的粗糙素材真正润色成可拍摄、可表演、可继续进入分镜和 Prompt 节点的剧本文本。',
+    '本任务不是格式规范化，也不是大幅扩写。你必须对文本内容进行适度 AI 润色：让表达更顺、更有画面感和表演感，但只围绕原文已有动作与情绪展开。',
+    '输出仍然是纯文本正文，不要输出 JSON、Markdown 代码块、解释、审稿意见或标题前缀。',
     '',
-    '【忠实改写】',
-    '只能润色和整理表达，不得新增原文没有的人物、事件、设定、地点、道具、反转或结局。',
-    '保留原文核心信息、叙事顺序、人物姓名、专有名词、重要数字、台词含义、情绪转折和段落意图。',
-    '可以修正病句、重复、口水话、错别字、标点、断句和不自然表达；不得把短素材扩写成新剧情。',
+    '【内容润色】',
+    '保留原文核心人物、事件、地点、叙事顺序、台词含义、情绪转折和结局，不改变剧情事实。',
+    '允许在原文事实基础上补足少量必要的环境氛围、人物动作、表情反应、视线关系、场面调度、节奏停顿和镜头化描写。',
+    '重点补充：场景发生时间、院线影视级运镜、画面构图、灯光风格，以及真实细腻的大师级表演细节。所有补充都必须贴合原文已有情境，不要脱离原素材另起剧情。',
+    '运镜和构图要服务表演与叙事，例如推进、跟随、停顿、压迫性近景、留白、前后景关系、视线方向等；不要写成参数表。',
+    '灯光风格要具体但克制，例如自然光、逆光、侧光、低照度、冷暖对比、阴影层次、空气质感等；不要堆砌形容词。',
+    '表演描写要真实细腻，关注眼神、呼吸、停顿、微表情、肢体重心和情绪转折，不要夸张成舞台腔或玄幻化表达。',
+    '润色幅度要收束：通常控制在原文长度的 1.2-1.8 倍；原文极短时最多扩展到 2.5 倍，不要写成长段新剧情。',
+    '可以修正病句、重复、口水话、错别字、标点、断句和不自然表达；不要发明新的关键人物、重大事件、道具反转、背景设定或结局。',
+    '避免过度文学化、过多比喻、复杂心理独白、世界观补充、无关环境铺陈和连续新增镜头。',
+    '如果原文包含“拍摄方式、镜头、景别”等字段，不要只把它们整理成标签，要把它们自然融入正文的动作、画面和节奏里。',
     '',
     '【剧本格式】',
-    '如果原文已经有场次、集数、镜头或段落结构，必须保留原有编号和顺序，只做格式清理。',
-    '如果原文是散文/小说段落，请按内容自然整理成剧本可读格式：场次标题、登场角色、动作/叙事、对白。',
-    '动作/叙事行使用短句，写清人物动作、空间关系、情绪变化和关键物件。',
-    '对白必须独立成行，优先使用“角色名：台词”。',
+    '如果原文已有场次、集数、镜头或段落结构，可以保留编号和顺序，但必须润色每一段正文内容，不能只改标题或标签。',
+    '如果原文是散文、小说段落或简短提示，请自然整理成剧本可读格式：场景信息、动作/叙事、必要对白。',
+    '动作/叙事行使用克制、有画面感的短句，写清人物动作、空间关系、情绪变化和关键视觉焦点即可。',
+    '对白如存在，必须独立成行，优先使用“角色名：台词”。没有对白时，不要硬编对白。',
     '',
     '【下游友好】',
     '输出要让编剧节点容易识别 episode / scene / characters / coreConflict，让分镜节点容易识别场景、动作、对白和节奏。',
     '不要生成 Prompt、分镜表、镜头参数、seedanceCard 或任何视频模型提示词字段。',
+    '禁止只输出“场次、拍摄方式、镜头说明”这类规范化骨架；最终结果必须是一段已经润色过、但不过度发散的剧本正文。',
   ].join('\n');
 }
 
-function buildTextPolishUserPrompt(sourceText: string): string {
+function buildTextPolishUserPrompt(sourceText: string, instruction = ''): string {
   return [
-    '请把下面文本润色为符合剧本阅读习惯的纯文本正文。',
-    '要求：忠于原文、结构清楚、场次/动作/对白更容易被后续编剧和分镜节点识别。',
+    ...(instruction.trim() ? ['本次润色指令：', instruction.trim(), ''] : []),
+    '请把下面文本进行真正的 AI 内容润色，不要只做规范化处理。',
+    '要求：忠于原文核心事实，适度增强画面感、动作细节、情绪层次、场面调度、影视节奏和可拍摄性。',
+    '请在原文基础上补充场景时间、院线影视级运镜、构图、灯光风格和真实细腻的大师级表演，但不要新增无关剧情。',
+    '请收束润色幅度，不要大幅发散；如果原文很短，只补足最必要的动作和画面，不要写成新剧情。',
+    '如果原文有拍摄方式，请把拍摄方式融入正文，而不是只列成字段。',
     '',
     '待润色文本：',
     sourceText,
@@ -115,13 +128,14 @@ function buildImageAwareSystemPrompt(): string {
   ].join('\n');
 }
 
-function buildImageAwareUserPrompt(sourceText: string, references: ImageReference[]): string {
+function buildImageAwareUserPrompt(sourceText: string, references: ImageReference[], instruction = ''): string {
   const referenceLines = references.map((reference, index) => {
     const name = reference.fileName || reference.label;
     const summary = reference.summary ? `\n已知画面分析：${reference.summary}` : '';
     return `图片${index + 1}：${name || '未命名图片'}${summary}`;
   });
   return [
+    ...(instruction.trim() ? ['【本次补充/修改要求】', instruction.trim(), ''] : []),
     '请结合图片画面与用户输入，生成一段新的影视级中文提示词。',
     '图片内容是视频首帧起幅画面，必须先写起始内容，再写后续内容。',
     '用户输入不要被简单照抄，要作为首帧之后的动作、情绪或镜头发展，与图片中的时间地点、画面构图、角色站位、相机景别、运镜表演、光影构图和色彩风格融合。',
@@ -148,7 +162,9 @@ export function createTextStoreSlice(
       const node = get().nodes.find((item) => item.id === nodeId);
       if (!node || node.type !== 'textNode') return;
       const nodeText = (node.data.raw_text ?? node.data.input ?? '').trim();
-      const sourceText = opts?.instruction?.trim() || nodeText;
+      const instruction = opts?.instruction?.trim() || '';
+      const sourceText = nodeText || instruction;
+      const instructionForPrompt = nodeText ? instruction : '';
       const imageRefs = connectedImageReferences(nodeId, get().nodes, get().edges);
       const primaryImage = imageRefs.find((reference) => reference.imageDataUrl);
       const hasImageContext = imageRefs.length > 0;
@@ -178,7 +194,7 @@ export function createTextStoreSlice(
           generation_error: undefined,
           streaming_preview: hasImageContext
             ? 'LLM 正在读取连接的图片节点，并生成影视级画面提示词...'
-            : 'LLM 正在按剧本格式润色文本...\n\n为避免不支持流式的网关重复等待，本次使用单次快速请求；完成后会自动写回正文。',
+            : 'LLM 正在以高质量模式按剧本格式润色文本...\n\n完成后会自动写回正文。',
         },
         true,
       );
@@ -199,7 +215,7 @@ export function createTextStoreSlice(
                 imageDataUrl: primaryImage.imageDataUrl,
                 imageDetail: 'auto',
                 systemPrompt: buildImageAwareSystemPrompt(),
-                userPrompt: buildImageAwareUserPrompt(sourceText, imageRefs),
+                userPrompt: buildImageAwareUserPrompt(sourceText, imageRefs, instructionForPrompt),
                 temperature: 0.28,
                 jsonMode: false,
                 feature: 'image-text-polish',
@@ -207,11 +223,12 @@ export function createTextStoreSlice(
                 signal: controller.signal,
               })
             : await requestLLM(config, {
+                model,
                 systemPrompt: hasImageContext ? buildImageAwareSystemPrompt() : buildTextPolishSystemPrompt(),
                 userPrompt: hasImageContext
-                  ? buildImageAwareUserPrompt(sourceText, imageRefs)
-                  : buildTextPolishUserPrompt(sourceText),
-                temperature: hasImageContext ? 0.28 : 0.22,
+                  ? buildImageAwareUserPrompt(sourceText, imageRefs, instructionForPrompt)
+                  : buildTextPolishUserPrompt(sourceText, instructionForPrompt),
+                temperature: hasImageContext ? 0.28 : 0.32,
                 jsonMode: false,
                 feature: 'text-polish',
                 maxOutputTokens: hasImageContext ? 2200 : 4200,

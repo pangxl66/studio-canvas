@@ -273,7 +273,7 @@ function configuredModelForFeature(feature?: string): string {
     return env('LLM_DEEP_MODEL') || env('LLM_MODEL');
   }
   if (normalizedFeature === 'text-polish') {
-    return env('LLM_FAST_MODEL') || env('LLM_MODEL');
+    return env('LLM_DEEP_MODEL') || env('LLM_MODEL');
   }
   if (normalizedFeature === 'prompt-review') {
     return env('LLM_DEEP_MODEL') || env('LLM_MODEL');

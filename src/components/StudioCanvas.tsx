@@ -291,7 +291,7 @@ export function StudioCanvas() {
   const onNodeDoubleClick = useCallback(
     (_: ReactMouseEvent, n: StudioRFNode) => {
       if (n.type === 'textNode') {
-        useStudioStore.getState().focusNode(n.id, { openDetail: true });
+        useStudioStore.getState().focusNode(n.id, { openDetail: false });
       }
     },
     [],

@@ -1,5 +1,17 @@
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
-import { memo, useCallback, useMemo, useState, type ChangeEvent, type MouseEvent } from 'react';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type FocusEvent,
+  type KeyboardEvent,
+  type MouseEvent,
+  type PointerEvent,
+} from 'react';
 import { useStudioStore } from '@/store/useStudioStore';
 import type { StudioNodeData } from '@/types/studio';
 
@@ -11,6 +23,28 @@ export const TEXT_NODE_INPUT_HANDLE_ID = 'in';
 function displayTextNodeLabel(label: string | undefined): string {
   if (!label) return '文本卡片';
   return label.trim() || '文本卡片';
+}
+
+function isSingleSymbol(value: string): boolean {
+  return Array.from(value).length === 1 && /[^\p{L}\p{N}\s]/u.test(value);
+}
+
+function findSingleInsertion(previous: string, next: string): { inserted: string; start: number; end: number } | null {
+  if (next.length <= previous.length) return null;
+
+  let start = 0;
+  while (start < previous.length && previous[start] === next[start]) start += 1;
+
+  let previousEnd = previous.length - 1;
+  let nextEnd = next.length - 1;
+  while (previousEnd >= start && nextEnd >= start && previous[previousEnd] === next[nextEnd]) {
+    previousEnd -= 1;
+    nextEnd -= 1;
+  }
+
+  const inserted = next.slice(start, nextEnd + 1);
+  if (Array.from(inserted).length !== 1) return null;
+  return { inserted, start, end: start + inserted.length };
 }
 
 function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
@@ -33,22 +67,129 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
         src: node.data.imageDataUrl,
       }));
   }, [edges, id, nodes]);
-  const [instruction, setInstruction] = useState('');
   const raw = data.raw_text ?? data.input ?? '';
+  const [instruction, setInstruction] = useState('');
+  const [isEditing, setIsEditing] = useState(false);
+  const [draft, setDraft] = useState(raw);
+  const areaRef = useRef<HTMLTextAreaElement | null>(null);
+  const draftRef = useRef(raw);
+  const lastLocalCommitRef = useRef(raw);
+  const draftCommitTimerRef = useRef<number | null>(null);
+  const lastInsertionRef = useRef<{ char: string; at: number; start: number; end: number } | null>(null);
   const busy = data.status === 'IN_PROGRESS';
-  const displayText = busy ? (data.streaming_preview ?? raw) : raw;
+  const displayText = busy ? (data.streaming_preview ?? raw) : draft;
   const displayLabel = displayTextNodeLabel(data.label);
+  const plainMode = data.text_view_mode === 'plain';
   const hasText = Boolean(displayText.trim());
   const hasImages = imageReferences.length > 0;
-  const canGenerate = busy || Boolean(instruction.trim() || raw.trim() || hasImages);
+  const canGenerate = busy || Boolean(instruction.trim() || draft.trim() || hasImages);
+  const editable = isEditing || busy;
+
+  useEffect(() => {
+    if (raw === lastLocalCommitRef.current) return;
+    setDraft(raw);
+    draftRef.current = raw;
+    lastLocalCommitRef.current = raw;
+  }, [raw]);
+
+  const clearDraftCommitTimer = useCallback(() => {
+    if (draftCommitTimerRef.current == null) return;
+    window.clearTimeout(draftCommitTimerRef.current);
+    draftCommitTimerRef.current = null;
+  }, []);
+
+  const commitDraft = useCallback(
+    (value = draftRef.current) => {
+      clearDraftCommitTimer();
+      const latestNode = useStudioStore.getState().nodes.find((node) => node.id === id);
+      const latestText = latestNode?.type === 'textNode' ? (latestNode.data.raw_text ?? latestNode.data.input ?? '') : '';
+      if (value === latestText) return;
+      lastLocalCommitRef.current = value;
+      patchNodeData(id, { raw_text: value, input: value }, false);
+    },
+    [clearDraftCommitTimer, id, patchNodeData],
+  );
+
+  const scheduleDraftCommit = useCallback(
+    (value: string) => {
+      clearDraftCommitTimer();
+      draftCommitTimerRef.current = window.setTimeout(() => {
+        commitDraft(value);
+      }, 220);
+    },
+    [clearDraftCommitTimer, commitDraft],
+  );
+
+  useEffect(() => {
+    return () => {
+      if (draftCommitTimerRef.current != null) {
+        window.clearTimeout(draftCommitTimerRef.current);
+      }
+      const value = draftRef.current;
+      const latestNode = useStudioStore.getState().nodes.find((node) => node.id === id);
+      const latestText = latestNode?.type === 'textNode' ? (latestNode.data.raw_text ?? latestNode.data.input ?? '') : '';
+      if (value !== latestText) {
+        patchNodeData(id, { raw_text: value, input: value }, false);
+      }
+    };
+  }, [id, patchNodeData]);
+
+  useEffect(() => {
+    if (selected) return;
+    commitDraft();
+    setIsEditing(false);
+  }, [commitDraft, selected]);
+
+  useEffect(() => {
+    if (!busy && selected && editable) {
+      areaRef.current?.focus();
+    }
+  }, [busy, editable, selected]);
 
   const onChange = useCallback(
     (event: ChangeEvent<HTMLTextAreaElement>) => {
       const value = event.target.value;
-      patchNodeData(id, { raw_text: value, input: value }, false);
+      const previous = draftRef.current;
+      const insertion = findSingleInsertion(previous, value);
+      const now = window.performance.now();
+      if (insertion && isSingleSymbol(insertion.inserted)) {
+        const lastInsertion = lastInsertionRef.current;
+        const isDuplicatedSymbol =
+          lastInsertion?.char === insertion.inserted &&
+          insertion.start === lastInsertion.end &&
+          now - lastInsertion.at <= 90;
+
+        if (isDuplicatedSymbol) {
+          event.currentTarget.value = previous;
+          event.currentTarget.setSelectionRange(insertion.start, insertion.start);
+          return;
+        }
+        lastInsertionRef.current = {
+          char: insertion.inserted,
+          at: now,
+          start: insertion.start,
+          end: insertion.end,
+        };
+      } else {
+        lastInsertionRef.current = null;
+      }
+      draftRef.current = value;
+      setDraft(value);
+      scheduleDraftCommit(value);
     },
-    [id, patchNodeData],
+    [scheduleDraftCommit],
   );
+
+  const onBlur = useCallback(
+    (_event: FocusEvent<HTMLTextAreaElement>) => {
+      commitDraft();
+    },
+    [commitDraft],
+  );
+
+  const stopKeyboardPropagation = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
+    event.stopPropagation();
+  }, []);
 
   const onInstructionChange = useCallback((event: ChangeEvent<HTMLTextAreaElement>) => {
     setInstruction(event.target.value);
@@ -58,6 +199,26 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
     stopNodeTask(id);
   }, [id, stopNodeTask]);
 
+  const onSwitchToPlainText = useCallback(
+    (event: MouseEvent<HTMLButtonElement> | PointerEvent<HTMLButtonElement>) => {
+      event.stopPropagation();
+      patchNodeData(id, { text_view_mode: 'plain' }, true);
+      setIsEditing(true);
+      window.setTimeout(() => areaRef.current?.focus(), 0);
+    },
+    [id, patchNodeData],
+  );
+
+  const onEnterEdit = useCallback(
+    (event: MouseEvent<HTMLElement>) => {
+      event.stopPropagation();
+      if (busy) return;
+      setIsEditing(true);
+      window.setTimeout(() => areaRef.current?.focus(), 0);
+    },
+    [busy],
+  );
+
   const onGenerate = useCallback(
     (event?: MouseEvent<HTMLButtonElement>) => {
       event?.stopPropagation();
@@ -65,15 +226,18 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
         onStop();
         return;
       }
+      commitDraft();
       const nextInstruction = instruction.trim();
       void runTextPolish(id, nextInstruction ? { instruction: nextInstruction } : undefined);
       if (nextInstruction) setInstruction('');
     },
-    [busy, id, instruction, onStop, runTextPolish],
+    [busy, commitDraft, id, instruction, onStop, runTextPolish],
   );
 
   return (
-    <div className={`text-node ${hasText ? 'text-node--filled' : 'text-node--empty'} ${selected ? 'text-node--selected' : ''}`}>
+    <div
+      className={`text-node ${plainMode ? 'text-node--plain' : ''} ${hasText ? 'text-node--filled' : 'text-node--empty'} ${selected ? 'text-node--selected' : ''}`}
+    >
       <Handle
         type="target"
         position={Position.Left}
@@ -87,17 +251,29 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
           <span className="text-node__title-label">{displayLabel}</span>
         </span>
       </header>
-      <section className="text-node__surface">
-        {hasText || busy ? (
+      <section
+        className={`text-node__surface ${editable ? 'text-node__surface--editing' : ''}`}
+        onDoubleClick={onEnterEdit}
+      >
+        {editable ? (
           <textarea
+            ref={areaRef}
             className="text-node__area nodrag nopan nowheel"
             value={displayText}
             onChange={onChange}
-            placeholder="生成后的文本会出现在这里"
+            onBlur={onBlur}
+            onKeyDown={stopKeyboardPropagation}
+            onKeyUp={stopKeyboardPropagation}
+            onDoubleClick={onEnterEdit}
+            placeholder={editable ? '输入内容...' : '生成后的文本会出现在这里'}
             rows={10}
             spellCheck={false}
             disabled={busy}
           />
+        ) : hasText ? (
+          <div className="text-node__preview" onDoubleClick={onEnterEdit}>
+            {displayText}
+          </div>
         ) : (
           <div className="text-node__empty-state">
             <div className="text-node__empty-mark" aria-hidden>
@@ -106,27 +282,22 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
               <span />
               <span />
             </div>
-            <div className="text-node__try-label">尝试:</div>
-            <div className="text-node__try-list" aria-label="文本节点示例">
-              <div className="text-node__try-item">
-                <span className="text-node__try-icon text-node__try-icon--doc" aria-hidden />
-                <span>自己编写内容</span>
-              </div>
-              <div className="text-node__try-item">
-                <span className="text-node__try-icon text-node__try-icon--video" aria-hidden />
-                <span>文生视频</span>
-              </div>
-              <div className="text-node__try-item">
-                <span className="text-node__try-icon text-node__try-icon--image" aria-hidden />
-                <span>图片反推提示词</span>
-              </div>
-              <div className="text-node__try-item">
-                <span className="text-node__try-icon text-node__try-icon--audio" aria-hidden />
-                <span>文字生音乐</span>
-              </div>
-            </div>
           </div>
         )}
+        {!plainMode ? (
+          <button
+            type="button"
+            className="text-node__mode-switch nodrag nopan"
+            onPointerDown={onSwitchToPlainText}
+            onPointerUp={onSwitchToPlainText}
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={onSwitchToPlainText}
+            aria-label="切换为常规文本节点"
+            title="切换为常规文本节点"
+          >
+            <span aria-hidden />
+          </button>
+        ) : null}
       </section>
       {data.generation_error?.trim() ? (
         <div className="text-node__error">{data.generation_error.trim()}</div>
@@ -148,24 +319,14 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
             className="text-node__workspace-input"
             value={instruction}
             onChange={onInstructionChange}
-            placeholder={
-              hasImages
-                ? '图片会作为视频首帧。输入首帧之后的动作或情绪变化。例如：笑容逐渐变得狰狞，突然冲向镜头。'
-                : '写下你想讲的故事、场景或角色设定。例如：一个来自未来的机器人，在城市屋顶看星星。'
-            }
+            onKeyDown={stopKeyboardPropagation}
+            onKeyUp={stopKeyboardPropagation}
+            placeholder=""
             spellCheck={false}
             disabled={busy}
           />
           <div className="text-node__workspace-footer">
-            <div className="text-node__workspace-model">
-              <span className="text-node__workspace-model-icon" aria-hidden />
-              <span>{hasImages ? '视觉 LLM' : 'LLM'}</span>
-              <span className="text-node__workspace-caret" aria-hidden />
-            </div>
             <div className="text-node__workspace-actions">
-              <span className="text-node__workspace-mini text-node__workspace-mini--translate" aria-hidden />
-              <span className="text-node__workspace-mini text-node__workspace-mini--bolt" aria-hidden />
-              <span className="text-node__workspace-cost">6</span>
               <button
                 type="button"
                 className={`text-node__workspace-submit ${busy ? 'text-node__workspace-submit--stop' : ''}`}
