@@ -21,6 +21,7 @@ import {
   pushStudioRecentProject,
   setActiveStudioProjectRef,
   stringifyStudioProjectPayloadWithMeta,
+  STUDIO_IDB_AUTOSAVE_KEY,
   STUDIO_PROJECT_JSON_VERSION,
   type StudioProjectFilePayload,
   type StudioRecentProjectRef,
@@ -79,13 +80,28 @@ export function StudioProjectMenu() {
 
   const refreshProjectData = useCallback(async () => {
     try {
-      const [recents, summaries] = await Promise.all([
+      const [recents, summaries, autosave] = await Promise.all([
         listStudioRecentProjects(),
         listStudioProjectSummaries(),
+        getStudioAutosave(),
       ]);
       const merged = new Map<string, StudioRecentProjectRef>();
       for (const item of recents) {
         merged.set(item.projectId, item);
+      }
+      if (autosave && payloadHasCanvasContent(autosave)) {
+        const autosaveProjectId = autosave.projectId ?? STUDIO_IDB_AUTOSAVE_KEY;
+        const autosaveName = autosave.projectName?.trim() || '未命名自动存档';
+        const current = merged.get(autosaveProjectId);
+        const nextItem: StudioRecentProjectRef = {
+          projectId: autosaveProjectId,
+          projectName: autosaveName,
+          openedAt: autosave.savedAt,
+          source: 'autosave',
+        };
+        if (!current || nextItem.openedAt > current.openedAt) {
+          merged.set(autosaveProjectId, nextItem);
+        }
       }
       for (const item of summaries) {
         if (merged.has(item.projectId)) continue;
@@ -185,7 +201,14 @@ export function StudioProjectMenu() {
 
   const openProjectRecord = useCallback(
     async (projectId: string) => {
-      const record = await getStudioProjectRecord(projectId);
+      const autosaveRecord = projectId === STUDIO_IDB_AUTOSAVE_KEY ? await getStudioAutosave() : null;
+      const record = autosaveRecord
+        ? {
+            ...autosaveRecord,
+            projectId: autosaveRecord.projectId ?? null,
+            projectName: autosaveRecord.projectName?.trim() || '未命名自动存档',
+          }
+        : await getStudioProjectRecord(projectId);
       if (!record) {
         pushMessage({ role: 'system', text: '打开失败：找不到该工程记录。' });
         await refreshProjectData();
@@ -201,11 +224,15 @@ export function StudioProjectMenu() {
         projectName: record.projectName,
         broadcastText: `已打开工程“${record.projectName}”。`,
       });
-      await setActiveStudioProjectRef({
-        projectId: record.projectId,
-        projectName: record.projectName,
-      });
-      await rememberRecent(record.projectId, record.projectName, 'workspace');
+      if (record.projectId) {
+        await setActiveStudioProjectRef({
+          projectId: record.projectId,
+          projectName: record.projectName,
+        });
+        await rememberRecent(record.projectId, record.projectName, autosaveRecord ? 'autosave' : 'workspace');
+      } else {
+        await rememberRecent(STUDIO_IDB_AUTOSAVE_KEY, record.projectName, 'autosave');
+      }
       closeMenus();
     },
     [closeMenus, hydrateProject, pushMessage, refreshProjectData, rememberRecent],
