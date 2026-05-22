@@ -63,6 +63,11 @@ function env(name: string): string {
   return process.env[name]?.trim() ?? '';
 }
 
+function providerEnv(provider: string, name: string): string {
+  const prefix = provider === 'gpt' ? 'GPT' : provider === 'deepseek' ? 'DEEPSEEK' : '';
+  return prefix ? env(`${prefix}_${name}`) : env(name);
+}
+
 function json(res: ServerResponse, status: number, payload: unknown): void {
   res.statusCode = status;
   res.setHeader('content-type', 'application/json; charset=utf-8');
@@ -271,7 +276,7 @@ function quotaCostForFeature(feature: string, body: ChatRequestBody): number {
 function configuredModelForFeature(feature?: string): string {
   const normalizedFeature = feature?.trim() ?? '';
   if (normalizedFeature === 'image-text-polish') {
-    return env('LLM_DEEP_MODEL') || env('LLM_MODEL');
+    return providerEnv('gpt', 'LLM_MODEL') || env('LLM_MODEL');
   }
   if (normalizedFeature === 'text-polish-simple') {
     return env('LLM_MODEL');

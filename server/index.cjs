@@ -278,6 +278,12 @@ function envForProvider(provider, name) {
   return env(name);
 }
 
+function explicitEnvForProvider(provider, name) {
+  const prefix = providerEnvPrefix(provider);
+  if (prefix) return env(`${prefix}_${name}`);
+  return env(name);
+}
+
 function defaultModelForProvider(provider) {
   return provider === 'deepseek' ? 'deepseek-chat' : DEFAULT_MODEL;
 }
@@ -288,6 +294,30 @@ function hasProviderLlmApiKey(provider) {
 
 function hasProviderLlmUpstream(provider) {
   return Boolean(envForProvider(provider, 'LLM_PROXY_URL') || envForProvider(provider, 'LLM_BASE_URL'));
+}
+
+function hasExplicitProviderLlmUpstream(provider) {
+  return Boolean(explicitEnvForProvider(provider, 'LLM_PROXY_URL') || explicitEnvForProvider(provider, 'LLM_BASE_URL'));
+}
+
+function hasExplicitProviderLlmApiKey(provider) {
+  return Boolean(explicitEnvForProvider(provider, 'LLM_API_KEY'));
+}
+
+function contentContainsImage(value) {
+  if (Array.isArray(value)) {
+    return value.some((part) => contentContainsImage(part));
+  }
+  if (value && typeof value === 'object') {
+    const type = String(value.type || '').toLowerCase();
+    return type.includes('image') || contentContainsImage(value.content) || contentContainsImage(value.image_url);
+  }
+  return false;
+}
+
+function requestNeedsVision(body) {
+  if (String(body?.feature || '').trim() === 'image-text-polish') return true;
+  return Array.isArray(body?.messages) && body.messages.some((message) => contentContainsImage(message?.content));
 }
 
 function sendJson(res, status, payload) {
@@ -408,6 +438,9 @@ function classifyLlmRequestException(error) {
   const text = sanitizeError(error);
   if (/LLM upstream env is missing/i.test(text)) {
     return '模型服务未配置：服务器缺少 LLM_BASE_URL 或 LLM_API_KEY。';
+  }
+  if (/GPT vision upstream env is missing/i.test(text)) {
+    return '图片理解服务未配置：服务器缺少 GPT_LLM_BASE_URL / GPT_LLM_API_KEY / GPT_LLM_MODEL，图片节点需要走支持视觉输入的 GPT 通道。';
   }
   if (/fetch failed|network|econn|enotfound|etimedout|connection|socket/i.test(text)) {
     return '无法访问模型服务：请检查 LLM_BASE_URL、服务器网络或上游服务状态。';
@@ -814,10 +847,13 @@ function quotaCostForFeature(feature, body) {
 
 function configuredModelForFeature(feature, provider = '') {
   const normalizedFeature = String(feature || '').trim();
+  if (normalizedFeature === 'image-text-polish') {
+    return explicitEnvForProvider(provider || 'gpt', 'LLM_MODEL');
+  }
   if (normalizedFeature === 'text-polish-simple') {
     return envForProvider(provider, 'LLM_MODEL');
   }
-  if (normalizedFeature === 'text-polish' || normalizedFeature === 'image-text-polish') {
+  if (normalizedFeature === 'text-polish') {
     return envForProvider(provider, 'LLM_DEEP_MODEL') || envForProvider(provider, 'LLM_MODEL');
   }
   if (normalizedFeature === 'prompt-review') {
@@ -909,6 +945,9 @@ async function writeUsage(serviceClient, usage) {
 }
 
 async function callUpstream(body, provider = '') {
+  if (provider === 'gpt' && requestNeedsVision(body) && (!hasExplicitProviderLlmUpstream('gpt') || !hasExplicitProviderLlmApiKey('gpt'))) {
+    throw new Error('GPT vision upstream env is missing.');
+  }
   const upstreamUrl = getUpstreamUrl(provider);
   const apiKey = envForProvider(provider, 'LLM_API_KEY');
   if (!upstreamUrl || !apiKey) {
