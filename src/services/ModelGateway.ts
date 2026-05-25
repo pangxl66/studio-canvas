@@ -41,13 +41,38 @@ type ChatMessageContentPart = { type?: string; text?: string; content?: string }
 
 type ChatCompletionsResponse = {
   choices?: Array<{
-    message?: { content?: string | null | ChatMessageContentPart[] };
+    message?: {
+      content?: string | null | ChatMessageContentPart | ChatMessageContentPart[];
+      reasoning_content?: string | null;
+    };
+    text?: string | null;
+    delta?: {
+      content?: string | null | ChatMessageContentPart | ChatMessageContentPart[];
+    };
+  }>;
+  message?: { content?: string | null | ChatMessageContentPart | ChatMessageContentPart[] };
+  content?: string | null | ChatMessageContentPart | ChatMessageContentPart[];
+  output_text?: string | null;
+  output?: Array<{
+    content?: string | null | ChatMessageContentPart | ChatMessageContentPart[];
+    text?: string | null;
   }>;
   error?: { message?: string; type?: string; code?: string };
 };
 
 type StreamChunkJson = {
-  choices?: Array<{ delta?: { content?: string | null } }>;
+  choices?: Array<{
+    delta?: { content?: string | null | ChatMessageContentPart | ChatMessageContentPart[] };
+    message?: { content?: string | null | ChatMessageContentPart | ChatMessageContentPart[] };
+    text?: string | null;
+  }>;
+  output_text?: string | null;
+  delta?: string | null;
+  content?: string | null | ChatMessageContentPart | ChatMessageContentPart[];
+  output?: Array<{
+    content?: string | null | ChatMessageContentPart | ChatMessageContentPart[];
+    text?: string | null;
+  }>;
   error?: { message?: string; code?: string; type?: string };
 };
 
@@ -126,23 +151,43 @@ function refreshCreditAfterProxySuccess(config: ModelGatewayConfig): void {
   }
 }
 
-function parseAssistantContent(data: ChatCompletionsResponse): string | null {
-  const raw = data.choices?.[0]?.message?.content;
-  if (raw == null) return null;
+function collectContentText(raw: unknown): string {
+  if (raw == null) return '';
   if (typeof raw === 'string') return raw;
   if (Array.isArray(raw)) {
-    const parts = raw.map((part) => {
-      if (typeof part === 'string') return part;
-      if (part && typeof part === 'object') {
-        if (typeof part.text === 'string') return part.text;
-        if (typeof part.content === 'string') return part.content;
-      }
-      return '';
-    });
+    const parts = raw.map((part) => collectContentText(part));
     const joined = parts.join('');
-    return joined || null;
+    return joined;
+  }
+  if (typeof raw === 'object') {
+    const record = raw as Record<string, unknown>;
+    const text = collectContentText(record.text);
+    if (text) return text;
+    const content = collectContentText(record.content);
+    if (content) return content;
+    const outputText = collectContentText(record.output_text);
+    if (outputText) return outputText;
   }
   return String(raw);
+}
+
+function parseAssistantContent(data: ChatCompletionsResponse): string | null {
+  const candidates: unknown[] = [
+    data.choices?.[0]?.message?.content,
+    data.choices?.[0]?.delta?.content,
+    data.choices?.[0]?.text,
+    data.message?.content,
+    data.content,
+    data.output_text,
+    data.output,
+    data.choices?.[0]?.message?.reasoning_content,
+  ];
+
+  for (const candidate of candidates) {
+    const text = collectContentText(candidate).trim();
+    if (text) return text;
+  }
+  return null;
 }
 
 function normalizeHttpResponseText(raw: string): string {
@@ -278,12 +323,26 @@ function parseChatCompletionsResponseBody(text: string): ChatCompletionsResponse
 
   if (/^data:\s*/m.test(normalized) || /\ndata:\s*/.test(normalized)) {
     const chunks: string[] = [];
+    let accumulated = '';
     for (const line of normalized.split(/\r?\n/)) {
       const match = line.match(/^data:\s*(.*)$/);
       if (!match) continue;
       const payload = match[1].trim();
       if (!payload || payload === '[DONE]') continue;
       chunks.push(payload);
+      const parsed = tryParse(payload) as StreamChunkJson | null;
+      if (!parsed) continue;
+      accumulated +=
+        collectContentText(parsed.choices?.[0]?.delta?.content) ||
+        collectContentText(parsed.choices?.[0]?.message?.content) ||
+        collectContentText(parsed.choices?.[0]?.text) ||
+        collectContentText(parsed.output_text) ||
+        collectContentText(parsed.delta) ||
+        collectContentText(parsed.content) ||
+        collectContentText(parsed.output);
+    }
+    if (accumulated.trim()) {
+      return { choices: [{ message: { content: accumulated } }] };
     }
     const merged = tryParse(chunks.join(''));
     if (merged) return merged;
@@ -868,7 +927,7 @@ async function requestLLMStreamOnce(
             },
           };
         }
-        const piece = json.choices?.[0]?.delta?.content;
+        const piece = collectContentText(json.choices?.[0]?.delta?.content);
         if (piece) {
           accumulated += piece;
           params.onDelta(piece, accumulated);
