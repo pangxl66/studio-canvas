@@ -237,7 +237,6 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
       commitDraft();
       const nextInstruction = instruction.trim();
       void runTextPolish(id, nextInstruction ? { instruction: nextInstruction, mode: polishMode } : { mode: polishMode });
-      if (nextInstruction) setInstruction('');
     },
     [busy, commitDraft, id, instruction, onStop, polishMode, runTextPolish],
   );

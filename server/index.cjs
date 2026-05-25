@@ -971,6 +971,19 @@ async function callUpstream(body, provider = '') {
   }
 }
 
+function shouldRetryTextRequestWithDeepseek(status, body, provider = '') {
+  if (provider !== 'gpt') return false;
+  if (requestNeedsVision(body)) return false;
+  if (status !== 429 && status < 500) return false;
+  return hasExplicitProviderLlmUpstream('deepseek') && hasExplicitProviderLlmApiKey('deepseek');
+}
+
+function buildDeepseekFallbackBody(body) {
+  const fallbackBody = { ...body, provider: 'deepseek' };
+  delete fallbackBody.model;
+  return fallbackBody;
+}
+
 function isSnapshot(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   if (!Array.isArray(value.nodes) || !Array.isArray(value.edges)) return false;
@@ -1680,8 +1693,45 @@ async function handleLlmChat(req, res) {
   }
 
   try {
-    const upstreamResponse = await callUpstream(body, provider);
-    const rawText = await upstreamResponse.text();
+    let upstreamResponse = await callUpstream(body, provider);
+    let rawText = await upstreamResponse.text();
+    let responseProvider = provider;
+    let responseModel = model;
+    if (!upstreamResponse.ok && shouldRetryTextRequestWithDeepseek(upstreamResponse.status, body, provider)) {
+      const fallbackBody = buildDeepseekFallbackBody(body);
+      const fallbackModel = normalizeModel(undefined, feature, 'deepseek');
+      console.warn(
+        'LLM upstream failed, retrying DeepSeek fallback',
+        JSON.stringify({
+          status: upstreamResponse.status,
+          model,
+          provider: provider || null,
+          fallbackModel,
+          fallbackProvider: 'deepseek',
+          feature,
+          body: sanitizeError(rawText),
+        }),
+      );
+      const fallbackResponse = await callUpstream(fallbackBody, 'deepseek');
+      const fallbackText = await fallbackResponse.text();
+      if (fallbackResponse.ok) {
+        upstreamResponse = fallbackResponse;
+        rawText = fallbackText;
+        responseProvider = 'deepseek';
+        responseModel = fallbackModel;
+      } else {
+        console.warn(
+          'DeepSeek fallback failed',
+          JSON.stringify({
+            status: fallbackResponse.status,
+            model: fallbackModel,
+            provider: 'deepseek',
+            feature,
+            body: sanitizeError(fallbackText),
+          }),
+        );
+      }
+    }
     const outChars = outputChars(rawText);
     const isOk = upstreamResponse.ok;
     const failureMessage = isOk ? undefined : classifyUpstreamError(upstreamResponse.status, rawText);
@@ -1689,7 +1739,7 @@ async function handleLlmChat(req, res) {
       user_id: auth.userId,
       project_id: body.projectId || null,
       feature,
-      model,
+      model: responseModel,
       input_chars: inChars,
       output_chars: isOk ? outChars : 0,
       estimated_tokens: estimateTokens(inChars, isOk ? outChars : 0),
@@ -1702,8 +1752,8 @@ async function handleLlmChat(req, res) {
         'LLM upstream failed',
         JSON.stringify({
           status: upstreamResponse.status,
-          model,
-          provider: provider || null,
+          model: responseModel,
+          provider: responseProvider || null,
           feature,
           body: sanitizeError(rawText),
         }),
