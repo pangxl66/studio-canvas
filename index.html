@@ -4,9 +4,166 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Studio Canvas</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, "PingFang SC", "Noto Sans SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+        background: #09090b;
+      }
+
+      body {
+        margin: 0;
+        background: #09090b;
+      }
+
+      .studio-initial-loader {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+        color: #f8fafc;
+        background:
+          radial-gradient(circle at 50% 35%, rgba(20, 184, 166, 0.18), transparent 28%),
+          radial-gradient(circle at 80% 20%, rgba(124, 108, 246, 0.12), transparent 28%),
+          #09090b;
+      }
+
+      .studio-initial-loader::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        opacity: 0.34;
+        background-image:
+          linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+        background-size: 28px 28px;
+        mask-image: radial-gradient(circle at center, #000 0%, transparent 72%);
+      }
+
+      .studio-initial-loader__card {
+        position: relative;
+        width: min(440px, calc(100vw - 40px));
+        padding: 30px 28px 26px;
+        border: 1px solid rgba(94, 234, 212, 0.22);
+        border-radius: 14px;
+        background: rgba(15, 23, 42, 0.72);
+        box-shadow: 0 28px 90px rgba(0, 0, 0, 0.42);
+        backdrop-filter: blur(18px);
+      }
+
+      .studio-initial-loader__eyebrow {
+        color: #5eead4;
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0.18em;
+      }
+
+      .studio-initial-loader__title {
+        margin: 12px 0 8px;
+        font-size: 30px;
+        line-height: 1.1;
+        font-weight: 850;
+      }
+
+      .studio-initial-loader__subtitle {
+        margin: 0;
+        color: #cbd5e1;
+        font-size: 14px;
+        line-height: 1.7;
+      }
+
+      .studio-initial-loader__steps {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+        margin-top: 22px;
+      }
+
+      .studio-initial-loader__step {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 7px;
+        min-height: 34px;
+        padding: 7px 8px;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 999px;
+        color: #d9fff8;
+        background: rgba(2, 6, 23, 0.42);
+        font-size: 12px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+
+      .studio-initial-loader__step::before {
+        content: "";
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+        background: #5eead4;
+        box-shadow: 0 0 18px rgba(94, 234, 212, 0.85);
+        animation: studio-loader-pulse 1.2s ease-in-out infinite;
+      }
+
+      .studio-initial-loader__step:nth-child(2)::before {
+        animation-delay: 0.18s;
+      }
+
+      .studio-initial-loader__step:nth-child(3)::before {
+        animation-delay: 0.36s;
+      }
+
+      .studio-initial-loader__hint {
+        margin-top: 18px;
+        color: #94a3b8;
+        font-size: 12px;
+      }
+
+      @keyframes studio-loader-pulse {
+        0%,
+        100% {
+          opacity: 0.42;
+          transform: scale(0.9);
+        }
+
+        50% {
+          opacity: 1;
+          transform: scale(1.16);
+        }
+      }
+
+      @media (max-width: 520px) {
+        .studio-initial-loader__card {
+          padding: 24px 20px 22px;
+        }
+
+        .studio-initial-loader__title {
+          font-size: 25px;
+        }
+
+        .studio-initial-loader__steps {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="studio-initial-loader" role="status" aria-live="polite">
+        <div class="studio-initial-loader__card">
+          <div class="studio-initial-loader__eyebrow">STUDIO CANVAS</div>
+          <div class="studio-initial-loader__title">正在进入工作区</div>
+          <p class="studio-initial-loader__subtitle">正在准备节点画布、云端连接和最近项目。</p>
+          <div class="studio-initial-loader__steps" aria-label="启动状态">
+            <span class="studio-initial-loader__step">加载界面</span>
+            <span class="studio-initial-loader__step">连接云端</span>
+            <span class="studio-initial-loader__step">恢复项目</span>
+          </div>
+          <div class="studio-initial-loader__hint">首次访问可能需要几秒。</div>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
