@@ -201,12 +201,29 @@ export function hasActivatedTestInviteEmail(email: string): boolean {
   return Boolean(readActivatedTestInviteAuth(email));
 }
 
+export async function checkActivatedTestInviteEmail(email: string): Promise<boolean> {
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) return false;
+  if (hasActivatedTestInviteEmail(normalizedEmail)) return true;
+
+  try {
+    const response = await fetch(`/api/auth/test-invite?email=${encodeURIComponent(normalizedEmail)}`, {
+      headers: { accept: 'application/json' },
+    });
+    if (!response.ok) return false;
+    const data = await response.json();
+    return Boolean(data?.activated);
+  } catch {
+    return false;
+  }
+}
+
 export async function signInWithTestInvite(email: string, inviteCode: string): Promise<Session | null> {
   const normalizedEmail = normalizeEmail(email);
-  const normalizedCode = normalizeInviteCode(inviteCode) || ' ';
+  const normalizedCode = normalizeInviteCode(inviteCode);
 
   const activatedAuth = readActivatedTestInviteAuth(normalizedEmail);
-  if (normalizedEmail && !normalizedCode.trim() && activatedAuth) {
+  if (normalizedEmail && !normalizedCode && activatedAuth) {
     writeStoredLocalAuth(
       activatedAuth.email || normalizedEmail,
       activatedAuth.accessToken,
@@ -216,7 +233,6 @@ export async function signInWithTestInvite(email: string, inviteCode: string): P
   }
 
   if (!normalizedEmail) throw new Error('请输入邮箱。');
-  if (!normalizedCode) throw new Error('请输入测试邀请码。');
 
   const response = await fetch('/api/auth/test-invite', {
     method: 'POST',

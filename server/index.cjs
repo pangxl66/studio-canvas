@@ -1034,10 +1034,15 @@ async function handleHealth(req, res) {
   });
 }
 
-async function handleTestInvite(req, res) {
+async function handleTestInvite(req, res, url) {
   if (req.method === 'GET') {
     const inviteCodes = getTestInviteCodes();
-    sendJson(res, 200, { enabled: Boolean(inviteCodes.length), inviteCount: inviteCodes.length });
+    const email = normalizeEmail(url?.searchParams?.get('email') || '');
+    sendJson(res, 200, {
+      activated: email ? hasActivatedTestInviteEmail(email) : false,
+      enabled: Boolean(inviteCodes.length),
+      inviteCount: inviteCodes.length,
+    });
     return;
   }
   if (req.method !== 'POST') {
@@ -1867,7 +1872,7 @@ async function route(req, res) {
       return;
     }
     if (url.pathname === '/api/auth/test-invite') {
-      await handleTestInvite(req, res);
+      await handleTestInvite(req, res, url);
       return;
     }
     if (url.pathname === '/api/credits/status') {

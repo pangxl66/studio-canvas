@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import type { Session, User } from '@supabase/supabase-js';
 import { CreditStatusPill } from '@/components/CreditStatusPill';
 import {
+  checkActivatedTestInviteEmail,
   getAuthSnapshot,
   getSupabaseClient,
   hasActivatedTestInviteEmail,
@@ -52,6 +53,8 @@ export function AuthGate({ children }: AuthGateProps) {
   const [codeSentTo, setCodeSentTo] = useState('');
   const [sendCooldown, setSendCooldown] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isCheckingInviteActivation, setIsCheckingInviteActivation] = useState(false);
+  const [serverActivatedInviteEmail, setServerActivatedInviteEmail] = useState('');
   const [message, setMessage] = useState('');
 
   useEffect(() => {
@@ -103,6 +106,38 @@ export function AuthGate({ children }: AuthGateProps) {
     };
   }, []);
 
+  useEffect(() => {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (authMode !== 'invite' || !normalizedEmail || !normalizedEmail.includes('@')) {
+      setServerActivatedInviteEmail('');
+      setIsCheckingInviteActivation(false);
+      return;
+    }
+
+    if (hasActivatedTestInviteEmail(normalizedEmail)) {
+      setServerActivatedInviteEmail(normalizedEmail);
+      setIsCheckingInviteActivation(false);
+      return;
+    }
+
+    let isCancelled = false;
+    setIsCheckingInviteActivation(true);
+    const timer = window.setTimeout(() => {
+      void checkActivatedTestInviteEmail(normalizedEmail)
+        .then((activated) => {
+          if (!isCancelled) setServerActivatedInviteEmail(activated ? normalizedEmail : '');
+        })
+        .finally(() => {
+          if (!isCancelled) setIsCheckingInviteActivation(false);
+        });
+    }, 350);
+
+    return () => {
+      isCancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [authMode, email]);
+
   if (!isSaasAuthEnabled()) {
     return <>{children}</>;
   }
@@ -117,6 +152,14 @@ export function AuthGate({ children }: AuthGateProps) {
     setMessage('');
 
     try {
+      if (await checkActivatedTestInviteEmail(email)) {
+        const nextSession = await signInWithTestInvite(email, '');
+        setSession(nextSession);
+        setCodeSentTo('');
+        setVerificationCode('');
+        setMessage('');
+        return;
+      }
       await sendLoginCode(email);
       setCodeSentTo(email.trim());
       setVerificationCode('');
@@ -202,7 +245,13 @@ export function AuthGate({ children }: AuthGateProps) {
   if (!currentUser) {
     const canSendCode = !isSubmitting && sendCooldown <= 0;
     const hasSentCode = Boolean(codeSentTo);
-    const inviteAlreadyActivated = authMode === 'invite' && hasActivatedTestInviteEmail(email);
+    const normalizedInviteEmail = email.trim().toLowerCase();
+    const inviteAlreadyActivated =
+      authMode === 'invite' &&
+      Boolean(
+        normalizedInviteEmail &&
+          (hasActivatedTestInviteEmail(normalizedInviteEmail) || serverActivatedInviteEmail === normalizedInviteEmail),
+      );
 
     return (
       <main className="auth-gate">
@@ -333,9 +382,16 @@ export function AuthGate({ children }: AuthGateProps) {
                   type="password"
                   value={inviteCode}
                 />
+                {isCheckingInviteActivation ? <p className="auth-card__inline-note">正在检查该邮箱是否已激活...</p> : null}
                 {inviteAlreadyActivated ? <p className="auth-card__inline-note">该邮箱已激活，不需要再次输入激活码。</p> : null}
                 <button className="auth-card__button" disabled={isSubmitting} type="submit">
-                  {isSubmitting ? '正在进入...' : inviteAlreadyActivated ? '进入已激活账号' : '使用测试邀请码进入'}
+                  {isSubmitting
+                    ? '正在进入...'
+                    : isCheckingInviteActivation
+                      ? '正在检查邮箱...'
+                      : inviteAlreadyActivated
+                        ? '进入已激活账号'
+                        : '使用测试邀请码进入'}
                 </button>
               </form>
               <p className="auth-card__hint">测试入口用于临时给朋友体验，不占用邮箱验证码额度；测试用户暂不支持云端保存工程。</p>
