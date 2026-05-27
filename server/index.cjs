@@ -1272,6 +1272,14 @@ function isCurrentTestInviteEmail(auth, email) {
   return Boolean(auth?.isTestInvite && normalizeEmail(auth.user?.email) === normalizeEmail(email));
 }
 
+function isKnownTestInviteEmail(email) {
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) return false;
+  if (hasActivatedTestInviteEmail(normalizedEmail)) return true;
+  ensureTestInviteUsageLoaded();
+  return testInviteUsageEvents.some((event) => normalizeEmail(event.email) === normalizedEmail);
+}
+
 function readTestInviteAdminCreditDetails(email) {
   const normalizedEmail = normalizeEmail(email);
   const quota = readTestInviteQuota(normalizedEmail);
@@ -1465,12 +1473,285 @@ async function readAdminUsageEvents(serviceClient, options = {}) {
   };
 }
 
+function normalizeAdminUserStatus(authUser) {
+  if (authUser?.banned_until) return 'banned';
+  if (authUser?.email_confirmed_at || authUser?.confirmed_at) return 'active';
+  return 'pending';
+}
+
+function createEmptyUsageSummary() {
+  return {
+    failedUsage: 0,
+    lastUsageAt: null,
+    successUsage: 0,
+    totalCost: 0,
+    totalUsage: 0,
+  };
+}
+
+function summarizeUsageEvents(events = []) {
+  const summary = createEmptyUsageSummary();
+  const sortedEvents = events
+    .filter((event) => event && typeof event === 'object')
+    .slice()
+    .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+  for (const event of sortedEvents) {
+    if (!summary.lastUsageAt && event.created_at) {
+      summary.lastUsageAt = event.created_at;
+    }
+    summary.totalUsage += 1;
+    summary.totalCost += Number(event.quota_cost || 0);
+    if (event.status === 'success') {
+      summary.successUsage += 1;
+    } else if (event.status === 'failed') {
+      summary.failedUsage += 1;
+    }
+  }
+  return summary;
+}
+
+function readAdminTestInviteUsers(email = '') {
+  ensureTestInviteActivationsLoaded();
+  ensureTestInviteUsageLoaded();
+  const filterEmail = normalizeEmail(email);
+  const emails = new Set([...testInviteActivations]);
+  for (const event of testInviteUsageEvents) {
+    const eventEmail = normalizeEmail(event.email);
+    if (eventEmail) emails.add(eventEmail);
+  }
+
+  return [...emails]
+    .map(normalizeEmail)
+    .filter(Boolean)
+    .filter((item) => !filterEmail || item.includes(filterEmail))
+    .map((item) => {
+      const quota = readTestInviteQuota(item);
+      const usageSummary = summarizeUsageEvents(
+        testInviteUsageEvents.filter((event) => normalizeEmail(event.email) === item),
+      );
+      return {
+        createdAt: null,
+        displayName: '测试邀请码',
+        email: item,
+        emailConfirmedAt: null,
+        failedUsage: usageSummary.failedUsage,
+        lastSignInAt: null,
+        lastUsageAt: usageSummary.lastUsageAt,
+        monthlyQuota: quota.monthlyQuota,
+        plan: 'test',
+        projectCount: 0,
+        provider: 'test-invite',
+        remainingQuota: quota.remainingQuota,
+        source: 'test-invite',
+        status: 'active',
+        successUsage: usageSummary.successUsage,
+        totalCost: usageSummary.totalCost,
+        totalUsage: usageSummary.totalUsage,
+        updatedAt: quota.updatedAt,
+        userId: getTestInviteUserId(item),
+        walletUpdatedAt: quota.updatedAt,
+      };
+    });
+}
+
+async function fetchAuthUsersByProfiles(serviceClient, profiles = []) {
+  const users = [];
+  for (const profile of profiles) {
+    if (!profile?.id) continue;
+    try {
+      const { data, error } = await serviceClient.auth.admin.getUserById(profile.id);
+      if (!error && data?.user) {
+        users.push(data.user);
+      } else {
+        users.push({
+          id: profile.id,
+          email: profile.email,
+          created_at: profile.created_at,
+          updated_at: profile.updated_at,
+        });
+      }
+    } catch {
+      users.push({
+        id: profile.id,
+        email: profile.email,
+        created_at: profile.created_at,
+        updated_at: profile.updated_at,
+      });
+    }
+  }
+  return users;
+}
+
+async function readAdminUsers(serviceClient, options = {}) {
+  const limit = Math.min(Math.max(Number.parseInt(String(options.limit || '80'), 10) || 80, 1), 200);
+  const page = Math.max(Number.parseInt(String(options.page || '1'), 10) || 1, 1);
+  const email = normalizeEmail(options.email);
+  let authUsers = [];
+  let profileRows = [];
+  let totalAuthUsers = null;
+
+  if (email) {
+    const { data: profiles, error: profileError, count } = await serviceClient
+      .from('profiles')
+      .select('id,email,display_name,plan,created_at,updated_at', { count: 'exact' })
+      .ilike('email', `%${email}%`)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (profileError) {
+      throw new Error(profileError.message || '读取用户列表失败。');
+    }
+    profileRows = profiles || [];
+    totalAuthUsers = count ?? profileRows.length;
+    authUsers = await fetchAuthUsersByProfiles(serviceClient, profileRows);
+  } else {
+    const { data, error } = await serviceClient.auth.admin.listUsers({
+      page,
+      perPage: limit,
+    });
+    if (error) {
+      throw new Error(error.message || '读取注册用户失败。');
+    }
+    authUsers = data?.users || [];
+    totalAuthUsers = data?.total ?? authUsers.length;
+  }
+
+  const userIds = [...new Set(authUsers.map((user) => user.id).filter(Boolean))];
+  const [profilesResult, walletsResult, usageResult, projectsResult] = userIds.length
+    ? await Promise.all([
+        email
+          ? Promise.resolve({ data: profileRows, error: null })
+          : serviceClient
+              .from('profiles')
+              .select('id,email,display_name,plan,created_at,updated_at')
+              .in('id', userIds),
+        serviceClient
+          .from('credit_wallets')
+          .select('user_id,monthly_quota,remaining_quota,reset_at,updated_at')
+          .in('user_id', userIds),
+        serviceClient
+          .from('usage_events')
+          .select('user_id,status,quota_cost,created_at')
+          .in('user_id', userIds)
+          .order('created_at', { ascending: false })
+          .limit(Math.min(Math.max(limit * 80, 1000), 5000)),
+        serviceClient
+          .from('projects')
+          .select('user_id,updated_at')
+          .in('user_id', userIds)
+          .limit(Math.min(Math.max(limit * 40, 1000), 5000)),
+      ])
+    : [
+        { data: [], error: null },
+        { data: [], error: null },
+        { data: [], error: null },
+        { data: [], error: null },
+      ];
+
+  if (profilesResult.error) throw new Error(profilesResult.error.message || '读取用户资料失败。');
+  if (walletsResult.error) throw new Error(walletsResult.error.message || '读取用户点数失败。');
+  if (usageResult.error) throw new Error(usageResult.error.message || '读取用户使用统计失败。');
+  if (projectsResult.error) throw new Error(projectsResult.error.message || '读取用户项目统计失败。');
+
+  const profileById = new Map((profilesResult.data || []).map((profile) => [profile.id, profile]));
+  const walletById = new Map((walletsResult.data || []).map((wallet) => [wallet.user_id, wallet]));
+  const usageById = new Map(userIds.map((userId) => [userId, createEmptyUsageSummary()]));
+  for (const event of usageResult.data || []) {
+    const summary = usageById.get(event.user_id);
+    if (!summary) continue;
+    if (!summary.lastUsageAt && event.created_at) {
+      summary.lastUsageAt = event.created_at;
+    }
+    summary.totalUsage += 1;
+    summary.totalCost += Number(event.quota_cost || 0);
+    if (event.status === 'success') {
+      summary.successUsage += 1;
+    } else if (event.status === 'failed') {
+      summary.failedUsage += 1;
+    }
+  }
+  const projectCountById = new Map();
+  for (const project of projectsResult.data || []) {
+    projectCountById.set(project.user_id, (projectCountById.get(project.user_id) || 0) + 1);
+  }
+
+  const users = authUsers.map((authUser) => {
+    const profile = profileById.get(authUser.id) || {};
+    const wallet = walletById.get(authUser.id) || {};
+    const usage = usageById.get(authUser.id) || createEmptyUsageSummary();
+    return {
+      createdAt: authUser.created_at || profile.created_at || null,
+      displayName: profile.display_name || authUser.user_metadata?.name || null,
+      email: normalizeEmail(profile.email || authUser.email) || authUser.id,
+      emailConfirmedAt: authUser.email_confirmed_at || authUser.confirmed_at || null,
+      failedUsage: usage.failedUsage,
+      lastSignInAt: authUser.last_sign_in_at || null,
+      lastUsageAt: usage.lastUsageAt,
+      monthlyQuota: Number(wallet.monthly_quota || 0),
+      plan: profile.plan || 'free',
+      projectCount: Number(projectCountById.get(authUser.id) || 0),
+      provider: authUser.app_metadata?.provider || 'email',
+      remainingQuota: Number(wallet.remaining_quota || 0),
+      source: 'supabase',
+      status: normalizeAdminUserStatus(authUser),
+      successUsage: usage.successUsage,
+      totalCost: usage.totalCost,
+      totalUsage: usage.totalUsage,
+      updatedAt: profile.updated_at || authUser.updated_at || null,
+      userId: authUser.id,
+      walletUpdatedAt: wallet.updated_at || null,
+    };
+  });
+
+  const testUsers = page === 1 ? readAdminTestInviteUsers(email) : [];
+  const allUsers = [...users, ...testUsers]
+    .sort((a, b) => {
+      const aTime = a.lastSignInAt || a.lastUsageAt || a.createdAt || '';
+      const bTime = b.lastSignInAt || b.lastUsageAt || b.createdAt || '';
+      return String(bTime).localeCompare(String(aTime));
+    })
+    .slice(0, limit);
+
+  return {
+    email: email || null,
+    limit,
+    page,
+    totalAuthUsers,
+    totalReturned: allUsers.length,
+    totalTestInviteUsers: testUsers.length,
+    users: allUsers,
+  };
+}
+
 function readCreditAmount(value) {
   const amount = Number.parseInt(String(value ?? ''), 10);
   if (!Number.isFinite(amount) || amount < 0 || amount > 9999) {
     return null;
   }
   return amount;
+}
+
+async function handleAdminUsers(req, res, url) {
+  if (req.method !== 'GET') {
+    sendJson(res, 405, { error: { message: 'Method not allowed.' } });
+    return;
+  }
+
+  const auth = await getAdminContext(req);
+  if (auth.error) {
+    sendJson(res, auth.error.status, { error: { message: auth.error.message } });
+    return;
+  }
+
+  try {
+    const users = await readAdminUsers(auth.serviceClient, {
+      email: url.searchParams.get('email'),
+      limit: url.searchParams.get('limit'),
+      page: url.searchParams.get('page'),
+    });
+    sendJson(res, 200, users);
+  } catch (error) {
+    sendJson(res, 500, { error: { message: sanitizeError(error) || '读取用户列表失败。' } });
+  }
 }
 
 async function handleAdminUsage(req, res, url) {
@@ -1521,6 +1802,10 @@ async function handleAdminCredits(req, res, url) {
       }
       const details = await readAdminCreditDetails(auth.serviceClient, email);
       if (details.notFound) {
+        if (isKnownTestInviteEmail(email)) {
+          sendJson(res, 200, readTestInviteAdminCreditDetails(email));
+          return;
+        }
         sendJson(res, 404, { error: { message: '未找到该邮箱用户。请确认对方已经登录过一次。' } });
         return;
       }
@@ -1555,6 +1840,15 @@ async function handleAdminCredits(req, res, url) {
 
     const details = await readAdminCreditDetails(auth.serviceClient, email);
     if (details.notFound) {
+      if (isKnownTestInviteEmail(email)) {
+        const result = updateTestInviteAdminCredits(email, action, body.amount);
+        if (result.error) {
+          sendJson(res, result.error.status, { error: { message: result.error.message } });
+          return;
+        }
+        sendJson(res, 200, result.details);
+        return;
+      }
       sendJson(res, 404, { error: { message: '未找到该邮箱用户。请确认对方已经登录过一次。' } });
       return;
     }
@@ -2068,6 +2362,10 @@ async function route(req, res) {
     }
     if (url.pathname === '/api/admin/usage') {
       await handleAdminUsage(req, res, url);
+      return;
+    }
+    if (url.pathname === '/api/admin/users') {
+      await handleAdminUsers(req, res, url);
       return;
     }
     if (url.pathname === '/api/projects') {

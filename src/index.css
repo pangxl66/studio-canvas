@@ -8502,6 +8502,10 @@ body,
   gap: 12px;
 }
 
+.admin-credit-panel__controls--three {
+  grid-template-columns: minmax(0, 1fr) 130px 120px;
+}
+
 .admin-credit-panel__controls label {
   display: grid;
   gap: 7px;
@@ -8566,6 +8570,14 @@ body,
   font-size: 12px;
 }
 
+.admin-credit-panel__summary--users {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.admin-credit-panel__summary--users span:last-child {
+  grid-column: auto;
+}
+
 .admin-credit-panel__usage {
   margin-top: 18px;
   overflow-x: auto;
@@ -8588,6 +8600,10 @@ body,
 
 .admin-credit-panel__usage-table--wide {
   min-width: 900px;
+}
+
+.admin-credit-panel__usage-table--users {
+  min-width: 1120px;
 }
 
 .admin-credit-panel__usage th,
@@ -8620,6 +8636,28 @@ body,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.admin-credit-panel__quota {
+  color: #fef08a;
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-credit-panel__table-button {
+  border: 1px solid rgba(45, 212, 191, 0.28);
+  border-radius: 10px;
+  background: rgba(20, 184, 166, 0.14);
+  color: #ccfbf1;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 900;
+  padding: 7px 9px;
+  white-space: nowrap;
+}
+
+.admin-credit-panel__table-button:hover {
+  border-color: rgba(45, 212, 191, 0.5);
+  background: rgba(20, 184, 166, 0.22);
 }
 
 .admin-credit-panel__empty {

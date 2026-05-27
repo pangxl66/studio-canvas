@@ -2,8 +2,11 @@ import { useState } from 'react';
 import {
   fetchAdminCreditDetails,
   fetchAdminUsageEvents,
+  fetchAdminUsers,
   updateAdminCredits,
   type AdminCreditDetails,
+  type AdminUserRecord,
+  type AdminUsersResponse,
   type AdminUsageResponse,
 } from '@/services/adminCreditService';
 
@@ -11,6 +14,8 @@ interface AdminCreditPanelProps {
   onChanged?: () => void;
   onClose: () => void;
 }
+
+type AdminTab = 'credits' | 'usage' | 'users';
 
 function formatDate(value: string | null): string {
   if (!value) return '-';
@@ -30,8 +35,23 @@ function sourceLabel(source?: string): string {
   return '正式';
 }
 
+function statusLabel(status: string): string {
+  if (status === 'active') return '已验证';
+  if (status === 'pending') return '未验证';
+  if (status === 'banned') return '已封禁';
+  return status || '-';
+}
+
+function planLabel(plan: string): string {
+  if (plan === 'test') return '测试';
+  if (plan === 'trial') return '试用';
+  if (plan === 'personal') return '个人';
+  if (plan === 'pro') return 'Pro';
+  return plan || 'free';
+}
+
 export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) {
-  const [activeTab, setActiveTab] = useState<'credits' | 'usage'>('credits');
+  const [activeTab, setActiveTab] = useState<AdminTab>('credits');
   const [email, setEmail] = useState('');
   const [amount, setAmount] = useState('30');
   const [details, setDetails] = useState<AdminCreditDetails | null>(null);
@@ -42,6 +62,12 @@ export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) 
   const [usageResponse, setUsageResponse] = useState<AdminUsageResponse | null>(null);
   const [usageMessage, setUsageMessage] = useState('');
   const [isUsageBusy, setIsUsageBusy] = useState(false);
+  const [userEmail, setUserEmail] = useState('');
+  const [userLimit, setUserLimit] = useState('80');
+  const [userPage, setUserPage] = useState('1');
+  const [usersResponse, setUsersResponse] = useState<AdminUsersResponse | null>(null);
+  const [usersMessage, setUsersMessage] = useState('');
+  const [isUsersBusy, setIsUsersBusy] = useState(false);
 
   const loadDetails = async (targetEmail = email) => {
     const nextEmail = targetEmail.trim();
@@ -110,13 +136,50 @@ export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) 
     }
   };
 
-  const switchTab = (tab: 'credits' | 'usage') => {
+  const loadUsers = async (targetEmail = userEmail, targetLimit = userLimit, targetPage = userPage) => {
+    const limit = Number.parseInt(targetLimit, 10);
+    const page = Number.parseInt(targetPage, 10);
+    if (!Number.isFinite(limit) || limit < 1 || limit > 200) {
+      setUsersMessage('用户条数需要在 1-200 之间。');
+      return;
+    }
+    if (!Number.isFinite(page) || page < 1) {
+      setUsersMessage('页码必须大于 0。');
+      return;
+    }
+
+    setIsUsersBusy(true);
+    setUsersMessage('');
+    try {
+      const response = await fetchAdminUsers(targetEmail, limit, page);
+      setUsersResponse(response);
+      setUsersMessage(response.email ? '已按邮箱筛选用户。' : '已读取用户列表。');
+    } catch (error) {
+      setUsersMessage(error instanceof Error ? error.message : '读取用户列表失败。');
+    } finally {
+      setIsUsersBusy(false);
+    }
+  };
+
+  const switchTab = (tab: AdminTab) => {
     setActiveTab(tab);
     setMessage('');
     setUsageMessage('');
+    setUsersMessage('');
     if (tab === 'usage' && !usageResponse) {
       void loadUsage();
     }
+    if (tab === 'users' && !usersResponse) {
+      void loadUsers();
+    }
+  };
+
+  const openCreditUser = (user: AdminUserRecord) => {
+    setActiveTab('credits');
+    setEmail(user.email);
+    setDetails(null);
+    setMessage('');
+    void loadDetails(user.email);
   };
 
   return (
@@ -136,6 +199,9 @@ export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) 
         <div className="admin-credit-panel__tabs" role="tablist" aria-label="后台管理功能">
           <button className={activeTab === 'credits' ? 'is-active' : ''} type="button" onClick={() => switchTab('credits')}>
             额度管理
+          </button>
+          <button className={activeTab === 'users' ? 'is-active' : ''} type="button" onClick={() => switchTab('users')}>
+            用户管理
           </button>
           <button className={activeTab === 'usage' ? 'is-active' : ''} type="button" onClick={() => switchTab('usage')}>
             使用记录
@@ -225,7 +291,165 @@ export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) 
               </>
             ) : null}
           </>
-        ) : (
+        ) : null}
+
+        {activeTab === 'users' ? (
+          <>
+            <div className="admin-credit-panel__controls admin-credit-panel__controls--three">
+              <label>
+                搜索邮箱
+                <input
+                  disabled={isUsersBusy}
+                  inputMode="email"
+                  onChange={(event) => setUserEmail(event.target.value)}
+                  placeholder="留空查看全部用户"
+                  type="email"
+                  value={userEmail}
+                />
+              </label>
+              <label>
+                条数
+                <input
+                  disabled={isUsersBusy}
+                  max={200}
+                  min={1}
+                  onChange={(event) => setUserLimit(event.target.value)}
+                  type="number"
+                  value={userLimit}
+                />
+              </label>
+              <label>
+                页码
+                <input
+                  disabled={isUsersBusy}
+                  min={1}
+                  onChange={(event) => setUserPage(event.target.value)}
+                  type="number"
+                  value={userPage}
+                />
+              </label>
+            </div>
+
+            <div className="admin-credit-panel__actions">
+              <button
+                disabled={isUsersBusy}
+                type="button"
+                onClick={() => {
+                  setUserPage('1');
+                  void loadUsers(userEmail, userLimit, '1');
+                }}
+              >
+                刷新用户
+              </button>
+              <button
+                disabled={isUsersBusy || Number.parseInt(userPage, 10) <= 1}
+                type="button"
+                onClick={() => {
+                  const nextPage = String(Math.max(Number.parseInt(userPage, 10) - 1, 1));
+                  setUserPage(nextPage);
+                  void loadUsers(userEmail, userLimit, nextPage);
+                }}
+              >
+                上一页
+              </button>
+              <button
+                disabled={isUsersBusy}
+                type="button"
+                onClick={() => {
+                  const nextPage = String((Number.parseInt(userPage, 10) || 1) + 1);
+                  setUserPage(nextPage);
+                  void loadUsers(userEmail, userLimit, nextPage);
+                }}
+              >
+                下一页
+              </button>
+              <button
+                disabled={isUsersBusy}
+                type="button"
+                onClick={() => {
+                  setUserEmail('');
+                  setUserPage('1');
+                  setUsersMessage('');
+                  void loadUsers('', userLimit, '1');
+                }}
+              >
+                清空搜索
+              </button>
+            </div>
+
+            {usersMessage ? <p className="admin-credit-panel__message">{usersMessage}</p> : null}
+
+            {usersResponse ? (
+              <div className="admin-credit-panel__summary admin-credit-panel__summary--users">
+                <span>正式用户：{usersResponse.totalAuthUsers ?? '-'}</span>
+                <span>测试账号：{usersResponse.totalTestInviteUsers}</span>
+                <span>本页显示：{usersResponse.totalReturned}</span>
+              </div>
+            ) : null}
+
+            <div className="admin-credit-panel__usage">
+              <h3>{usersResponse?.email ? `用户管理：${usersResponse.email}` : '已注册用户'}</h3>
+              {usersResponse?.users.length ? (
+                <table className="admin-credit-panel__usage-table--users">
+                  <thead>
+                    <tr>
+                      <th>用户</th>
+                      <th>点数</th>
+                      <th>状态</th>
+                      <th>注册时间</th>
+                      <th>最近登录</th>
+                      <th>最近调用</th>
+                      <th>调用统计</th>
+                      <th>项目</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {usersResponse.users.map((user) => (
+                      <tr key={`${user.source}-${user.userId}`}>
+                        <td>
+                          <span className="admin-credit-panel__user-email">{user.email || '-'}</span>
+                          <small>
+                            {sourceLabel(user.source)} · {user.provider || '-'} · {user.displayName || '未命名'}
+                          </small>
+                        </td>
+                        <td>
+                          <strong className="admin-credit-panel__quota">
+                            {user.remainingQuota}/{user.monthlyQuota}
+                          </strong>
+                          <small>更新：{formatDate(user.walletUpdatedAt)}</small>
+                        </td>
+                        <td>
+                          {statusLabel(user.status)}
+                          <small>{planLabel(user.plan)}</small>
+                        </td>
+                        <td>{formatDate(user.createdAt)}</td>
+                        <td>{formatDate(user.lastSignInAt)}</td>
+                        <td>{formatDate(user.lastUsageAt)}</td>
+                        <td>
+                          {user.successUsage}/{user.failedUsage}
+                          <small>
+                            共 {user.totalUsage} 次，消耗 {user.totalCost}
+                          </small>
+                        </td>
+                        <td>{user.projectCount}</td>
+                        <td>
+                          <button className="admin-credit-panel__table-button" type="button" onClick={() => openCreditUser(user)}>
+                            管理点数
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <p className="admin-credit-panel__empty">{isUsersBusy ? '正在读取用户列表...' : '暂无用户。'}</p>
+              )}
+            </div>
+          </>
+        ) : null}
+
+        {activeTab === 'usage' ? (
           <>
             <div className="admin-credit-panel__controls">
               <label>
@@ -310,7 +534,7 @@ export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) 
               )}
             </div>
           </>
-        )}
+        ) : null}
       </section>
     </div>
   );
