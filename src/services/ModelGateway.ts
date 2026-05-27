@@ -76,7 +76,7 @@ type StreamChunkJson = {
   error?: { message?: string; code?: string; type?: string };
 };
 
-const DEFAULT_TIMEOUT_MS = 180_000;
+const DEFAULT_TIMEOUT_MS = 420_000;
 const CHAT_COMPLETIONS_PATH = '/chat/completions';
 const USER_ABORT_MESSAGE = '当前任务已停止。';
 

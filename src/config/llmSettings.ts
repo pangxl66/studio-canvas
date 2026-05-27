@@ -18,7 +18,7 @@ export const DEFAULT_LLM_PROVIDER: LlmProvider = 'gpt';
 export const DEFAULT_DEEP_LLM_MODEL = 'gpt-5.5';
 export const DEFAULT_LLM_MODEL = DEFAULT_DEEP_LLM_MODEL;
 export const DEFAULT_LLM_MODE: LlmMode = 'deep';
-export const DEFAULT_LLM_TIMEOUT_MS = 180_000;
+export const DEFAULT_LLM_TIMEOUT_MS = 420_000;
 export const DEFAULT_PIPELINE_EXECUTION_MODE: PipelineExecutionMode = 'model';
 
 export type LlmUserSettings = {
@@ -80,7 +80,7 @@ function envTimeoutMs(): number | null {
   const raw = envValue('VITE_LLM_TIMEOUT_MS');
   if (!raw) return null;
   const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 5000 ? n : null;
+  return Number.isFinite(n) && n >= 5000 ? Math.max(n, DEFAULT_LLM_TIMEOUT_MS) : null;
 }
 
 function normalizeProvider(value: unknown): LlmProvider {
@@ -173,7 +173,7 @@ function normalizePipelineMode(_mode: unknown): PipelineExecutionMode {
 
 function normalizeTimeoutMs(value: unknown): number {
   if (typeof value === 'number' && Number.isFinite(value) && value >= 5000) {
-    return Math.min(value, 600_000);
+    return Math.min(Math.max(value, DEFAULT_LLM_TIMEOUT_MS), 600_000);
   }
   return envTimeoutMs() ?? DEFAULT_LLM_TIMEOUT_MS;
 }

@@ -10,12 +10,18 @@ const rootDir = path.resolve(__dirname, '..');
 const distDir = path.join(rootDir, 'dist');
 const port = Number.parseInt(process.env.PORT || '3000', 10);
 
+function parseEnvMs(value, fallback, min, max) {
+  const n = Number.parseInt(String(value || ''), 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
 const MAX_INPUT_CHARS = 80_000;
 const MAX_PROJECT_SNAPSHOT_CHARS = 5_000_000;
 const PROJECT_LIST_LIMIT = 40;
 const DEFAULT_MONTHLY_QUOTA = 30;
 const LEGACY_DEFAULT_MONTHLY_QUOTA = 20;
-const DEFAULT_TIMEOUT_MS = 180_000;
+const DEFAULT_TIMEOUT_MS = parseEnvMs(process.env.LLM_TIMEOUT_MS || process.env.VITE_LLM_TIMEOUT_MS, 420_000, 420_000, 900_000);
 const DEFAULT_MODEL = 'gpt-5.5';
 const TEST_INVITE_TOKEN_PREFIX = 'test-invite';
 const testInviteActivationPath = path.join(rootDir, '.data', 'test-invite-activations.json');
@@ -900,7 +906,32 @@ function inputChars(body) {
   return body.messages.reduce((total, message) => total + String(message?.role || '').length + messageContentChars(message?.content), 0);
 }
 
+function streamContentChars(rawText) {
+  if (!/^data:\s*/m.test(rawText)) return null;
+  let content = '';
+  for (const line of rawText.split(/\r?\n/)) {
+    const match = line.match(/^data:\s*(.*)$/);
+    if (!match) continue;
+    const payload = match[1].trim();
+    if (!payload || payload === '[DONE]') continue;
+    try {
+      const parsed = JSON.parse(payload);
+      const delta = parsed?.choices?.[0]?.delta?.content;
+      const message = parsed?.choices?.[0]?.message?.content;
+      const text = parsed?.choices?.[0]?.text ?? parsed?.output_text ?? parsed?.delta ?? parsed?.content;
+      for (const value of [delta, message, text]) {
+        if (typeof value === 'string') content += value;
+      }
+    } catch {
+      // Ignore malformed SSE utility frames.
+    }
+  }
+  return content ? content.length : rawText.length;
+}
+
 function outputChars(rawText) {
+  const streamChars = streamContentChars(rawText);
+  if (typeof streamChars === 'number') return streamChars;
   try {
     const parsed = JSON.parse(rawText);
     const content = parsed?.choices?.[0]?.message?.content;
@@ -1061,6 +1092,52 @@ function buildDeepseekFallbackBody(body) {
   const fallbackBody = { ...body, provider: 'deepseek' };
   delete fallbackBody.model;
   return fallbackBody;
+}
+
+async function pipeUpstreamStream(upstreamResponse, _req, res) {
+  const reader = upstreamResponse.body?.getReader();
+  if (!reader) {
+    throw new Error('LLM stream response has no readable body.');
+  }
+
+  const contentType = upstreamResponse.headers.get('content-type') || 'text/event-stream; charset=utf-8';
+  res.statusCode = upstreamResponse.status;
+  res.setHeader('content-type', contentType);
+  res.setHeader('cache-control', 'no-store, no-transform');
+  res.setHeader('connection', 'keep-alive');
+  res.setHeader('x-accel-buffering', 'no');
+  if (typeof res.flushHeaders === 'function') {
+    res.flushHeaders();
+  }
+
+  const decoder = new TextDecoder();
+  let rawText = '';
+  let clientClosed = false;
+  const onClose = () => {
+    if (!res.writableEnded) {
+      clientClosed = true;
+      reader.cancel().catch(() => {});
+    }
+  };
+  res.on('close', onClose);
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      rawText += decoder.decode(value, { stream: true });
+      if (clientClosed || res.destroyed || res.writableEnded) {
+        throw new Error('Client disconnected during LLM stream.');
+      }
+      res.write(Buffer.from(value));
+    }
+    rawText += decoder.decode();
+    if (!res.writableEnded) res.end();
+    return rawText;
+  } finally {
+    res.off('close', onClose);
+  }
 }
 
 function isSnapshot(value) {
@@ -2176,10 +2253,11 @@ async function handleLlmChat(req, res) {
 
   try {
     let upstreamResponse = await callUpstream(body, provider);
-    let rawText = await upstreamResponse.text();
     let responseProvider = provider;
     let responseModel = model;
+    let failedText = '';
     if (!upstreamResponse.ok && shouldRetryTextRequestWithDeepseek(upstreamResponse.status, body, provider)) {
+      failedText = await upstreamResponse.text();
       const fallbackBody = buildDeepseekFallbackBody(body);
       const fallbackModel = normalizeModel(undefined, feature, 'deepseek');
       console.warn(
@@ -2191,17 +2269,17 @@ async function handleLlmChat(req, res) {
           fallbackModel,
           fallbackProvider: 'deepseek',
           feature,
-          body: sanitizeError(rawText),
+          body: sanitizeError(failedText),
         }),
       );
       const fallbackResponse = await callUpstream(fallbackBody, 'deepseek');
-      const fallbackText = await fallbackResponse.text();
       if (fallbackResponse.ok) {
         upstreamResponse = fallbackResponse;
-        rawText = fallbackText;
+        failedText = '';
         responseProvider = 'deepseek';
         responseModel = fallbackModel;
       } else {
+        const fallbackText = await fallbackResponse.text();
         console.warn(
           'DeepSeek fallback failed',
           JSON.stringify({
@@ -2212,8 +2290,71 @@ async function handleLlmChat(req, res) {
             body: sanitizeError(fallbackText),
           }),
         );
+        upstreamResponse = fallbackResponse;
+        failedText = fallbackText;
+        responseProvider = 'deepseek';
+        responseModel = fallbackModel;
       }
     }
+
+    if (body.stream === true) {
+      if (!upstreamResponse.ok) {
+        const rawText = failedText || (await upstreamResponse.text());
+        const failureMessage = classifyUpstreamError(upstreamResponse.status, rawText);
+        await recordUsage({
+          user_id: auth.userId,
+          project_id: body.projectId || null,
+          feature,
+          model: responseModel,
+          input_chars: inChars,
+          output_chars: 0,
+          estimated_tokens: estimateTokens(inChars, 0),
+          quota_cost: 0,
+          status: 'failed',
+          error_message: failureMessage,
+        });
+        console.warn(
+          'LLM upstream failed',
+          JSON.stringify({
+            status: upstreamResponse.status,
+            model: responseModel,
+            provider: responseProvider || null,
+            feature,
+            body: sanitizeError(rawText),
+          }),
+        );
+        await refundReservedQuota();
+        sendJson(res, upstreamResponse.status, {
+          error: {
+            message: failureMessage,
+            upstreamStatus: upstreamResponse.status,
+          },
+        });
+        return;
+      }
+
+      const rawText = await pipeUpstreamStream(upstreamResponse, req, res);
+      const outChars = outputChars(rawText);
+      try {
+        await recordUsage({
+          user_id: auth.userId,
+          project_id: body.projectId || null,
+          feature,
+          model: responseModel,
+          input_chars: inChars,
+          output_chars: outChars,
+          estimated_tokens: estimateTokens(inChars, outChars),
+          quota_cost: cost,
+          status: 'success',
+          error_message: null,
+        });
+      } catch (error) {
+        console.warn('LLM stream usage record failed', sanitizeError(error));
+      }
+      return;
+    }
+
+    let rawText = failedText || (await upstreamResponse.text());
     const outChars = outputChars(rawText);
     const isOk = upstreamResponse.ok;
     const failureMessage = isOk ? undefined : classifyUpstreamError(upstreamResponse.status, rawText);
@@ -2268,7 +2409,11 @@ async function handleLlmChat(req, res) {
       status: 'failed',
       error_message: message,
     });
-    sendJson(res, 502, { error: { message } });
+    if (!res.headersSent) {
+      sendJson(res, 502, { error: { message } });
+    } else if (!res.writableEnded) {
+      res.end();
+    }
   }
 }
 
