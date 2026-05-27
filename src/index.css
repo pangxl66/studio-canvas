@@ -8408,7 +8408,7 @@ body,
 
 .admin-credit-panel__card {
   position: relative;
-  width: min(760px, calc(100vw - 32px));
+  width: min(1040px, calc(100vw - 32px));
   max-height: min(760px, calc(100vh - 32px));
   overflow: auto;
   border: 1px solid rgba(45, 212, 191, 0.32);
@@ -8439,6 +8439,32 @@ body,
   margin: 0;
   color: #f8fafc;
   font-size: 24px;
+}
+
+.admin-credit-panel__tabs {
+  display: inline-flex;
+  gap: 4px;
+  margin: 0 0 18px;
+  padding: 4px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 14px;
+  background: rgba(2, 6, 23, 0.42);
+}
+
+.admin-credit-panel__tabs button {
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  font-weight: 900;
+  padding: 9px 13px;
+}
+
+.admin-credit-panel__tabs button.is-active {
+  background: rgba(20, 184, 166, 0.18);
+  color: #ccfbf1;
+  box-shadow: inset 0 0 0 1px rgba(45, 212, 191, 0.3);
 }
 
 .admin-credit-panel__header button,
@@ -8542,6 +8568,7 @@ body,
 
 .admin-credit-panel__usage {
   margin-top: 18px;
+  overflow-x: auto;
 }
 
 .admin-credit-panel__usage h3 {
@@ -8559,6 +8586,10 @@ body,
   font-size: 12px;
 }
 
+.admin-credit-panel__usage-table--wide {
+  min-width: 900px;
+}
+
 .admin-credit-panel__usage th,
 .admin-credit-panel__usage td {
   border-bottom: 1px solid rgba(148, 163, 184, 0.12);
@@ -8573,6 +8604,22 @@ body,
 
 .admin-credit-panel__usage td {
   color: #cbd5e1;
+  vertical-align: top;
+}
+
+.admin-credit-panel__usage td small {
+  display: block;
+  margin-top: 4px;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.admin-credit-panel__user-email {
+  display: block;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .admin-credit-panel__empty {

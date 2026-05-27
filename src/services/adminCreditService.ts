@@ -12,6 +12,16 @@ export type AdminCreditUsageEvent = {
   status: string;
 };
 
+export type AdminUsageEvent = AdminCreditUsageEvent & {
+  source?: string;
+  user: {
+    displayName: string | null;
+    email: string;
+    plan: string;
+    userId: string;
+  };
+};
+
 export type AdminCreditDetails = {
   usageEvents: AdminCreditUsageEvent[];
   user: {
@@ -26,6 +36,13 @@ export type AdminCreditDetails = {
     resetAt: string | null;
     updatedAt: string | null;
   };
+};
+
+export type AdminUsageResponse = {
+  email: string | null;
+  events: AdminUsageEvent[];
+  limit: number;
+  totalReturned: number;
 };
 
 async function getAccessToken(): Promise<string> {
@@ -62,6 +79,19 @@ export async function fetchAdminCreditDetails(email: string): Promise<AdminCredi
     },
   });
   return parseJsonResponse<AdminCreditDetails>(response);
+}
+
+export async function fetchAdminUsageEvents(email = '', limit = 80): Promise<AdminUsageResponse> {
+  const token = await getAccessToken();
+  const params = new URLSearchParams();
+  if (email.trim()) params.set('email', email.trim());
+  params.set('limit', String(limit));
+  const response = await fetch(`/api/admin/usage?${params.toString()}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  return parseJsonResponse<AdminUsageResponse>(response);
 }
 
 export async function updateAdminCredits(

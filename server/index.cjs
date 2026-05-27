@@ -19,9 +19,12 @@ const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_MODEL = 'gpt-5.5';
 const TEST_INVITE_TOKEN_PREFIX = 'test-invite';
 const testInviteActivationPath = path.join(rootDir, '.data', 'test-invite-activations.json');
+const testInviteUsagePath = path.join(rootDir, '.data', 'test-invite-usage-events.json');
 const testInviteActivations = new Set();
 const testInviteQuotas = new Map();
+let testInviteUsageEvents = [];
 let testInviteActivationsLoaded = false;
+let testInviteUsageLoaded = false;
 
 loadLocalEnvFile(path.join(rootDir, '.env.local'));
 
@@ -254,6 +257,82 @@ function rememberActivatedTestInviteEmail(email) {
   if (!normalizedEmail || testInviteActivations.has(normalizedEmail)) return;
   testInviteActivations.add(normalizedEmail);
   saveTestInviteActivations();
+}
+
+function ensureTestInviteUsageLoaded() {
+  if (testInviteUsageLoaded) return;
+  testInviteUsageLoaded = true;
+  try {
+    if (!fs.existsSync(testInviteUsagePath)) return;
+    const raw = fs.readFileSync(testInviteUsagePath, 'utf8');
+    const parsed = JSON.parse(raw);
+    const events = Array.isArray(parsed) ? parsed : parsed?.events;
+    if (Array.isArray(events)) {
+      testInviteUsageEvents = events.filter((event) => event && typeof event === 'object').slice(-1000);
+    }
+  } catch (error) {
+    console.warn('Failed to read test invite usage events', sanitizeError(error));
+  }
+}
+
+function saveTestInviteUsageEvents() {
+  try {
+    fs.mkdirSync(path.dirname(testInviteUsagePath), { recursive: true });
+    const payload = JSON.stringify(
+      {
+        events: testInviteUsageEvents.slice(-1000),
+        updatedAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    );
+    const tempPath = `${testInviteUsagePath}.tmp`;
+    fs.writeFileSync(tempPath, payload);
+    fs.renameSync(tempPath, testInviteUsagePath);
+  } catch (error) {
+    console.warn('Failed to save test invite usage events', sanitizeError(error));
+  }
+}
+
+function writeTestInviteUsage(email, usage) {
+  ensureTestInviteUsageLoaded();
+  const normalizedEmail = normalizeEmail(email) || 'tester@studio-canvas.local';
+  testInviteUsageEvents.push({
+    created_at: new Date().toISOString(),
+    email: normalizedEmail,
+    error_message: usage.error_message || null,
+    estimated_tokens: Number(usage.estimated_tokens || 0),
+    feature: usage.feature || '',
+    input_chars: Number(usage.input_chars || 0),
+    model: usage.model || '',
+    output_chars: Number(usage.output_chars || 0),
+    project_id: usage.project_id || null,
+    quota_cost: Number(usage.quota_cost || 0),
+    status: usage.status || '',
+    user_id: usage.user_id || getTestInviteUserId(normalizedEmail),
+  });
+  testInviteUsageEvents = testInviteUsageEvents.slice(-1000);
+  saveTestInviteUsageEvents();
+}
+
+function readTestInviteUsageEvents(email, limit) {
+  ensureTestInviteUsageLoaded();
+  const normalizedEmail = normalizeEmail(email);
+  return testInviteUsageEvents
+    .filter((event) => !normalizedEmail || normalizeEmail(event.email) === normalizedEmail)
+    .slice()
+    .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
+    .slice(0, limit)
+    .map((event) => ({
+      ...normalizeUsageEvent(event),
+      source: 'test-invite',
+      user: {
+        displayName: '测试邀请码',
+        email: normalizeEmail(event.email) || 'tester@studio-canvas.local',
+        plan: 'test',
+        userId: event.user_id || getTestInviteUserId(event.email),
+      },
+    }));
 }
 
 function normalizeProvider(value) {
@@ -1174,6 +1253,21 @@ function normalizeUsageEvent(row) {
   };
 }
 
+function normalizeAdminUsageEvent(row, profileById = new Map()) {
+  const event = normalizeUsageEvent(row);
+  const profile = profileById.get(row.user_id) || {};
+  return {
+    ...event,
+    source: 'supabase',
+    user: {
+      displayName: profile.display_name || null,
+      email: profile.email || row.user_id || '',
+      plan: profile.plan || 'free',
+      userId: row.user_id || '',
+    },
+  };
+}
+
 function isCurrentTestInviteEmail(auth, email) {
   return Boolean(auth?.isTestInvite && normalizeEmail(auth.user?.email) === normalizeEmail(email));
 }
@@ -1308,12 +1402,98 @@ async function readAdminCreditDetails(serviceClient, email) {
   };
 }
 
+async function readAdminUsageEvents(serviceClient, options = {}) {
+  const limit = Math.min(Math.max(Number.parseInt(String(options.limit || '80'), 10) || 80, 1), 200);
+  const email = normalizeEmail(options.email);
+  let query = serviceClient
+    .from('usage_events')
+    .select('user_id,feature,model,input_chars,output_chars,estimated_tokens,quota_cost,status,error_message,created_at')
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  let filteredProfile = null;
+  if (email) {
+    const { data: profile, error: profileError } = await serviceClient
+      .from('profiles')
+      .select('id,email,display_name,plan')
+      .ilike('email', email)
+      .maybeSingle();
+    if (profileError) {
+      throw new Error(profileError.message || '读取用户资料失败。');
+    }
+    filteredProfile = profile || null;
+    query = filteredProfile?.id
+      ? query.eq('user_id', filteredProfile.id)
+      : query.eq('user_id', '00000000-0000-0000-0000-000000000000');
+  }
+
+  const { data: usageEvents, error: usageError } = await query;
+  if (usageError) {
+    throw new Error(usageError.message || '读取使用记录失败。');
+  }
+
+  const profileById = new Map();
+  if (filteredProfile?.id) {
+    profileById.set(filteredProfile.id, filteredProfile);
+  } else {
+    const userIds = [...new Set((usageEvents || []).map((event) => event.user_id).filter(Boolean))];
+    if (userIds.length) {
+      const { data: profiles, error: profilesError } = await serviceClient
+        .from('profiles')
+        .select('id,email,display_name,plan')
+        .in('id', userIds);
+      if (profilesError) {
+        throw new Error(profilesError.message || '读取用户资料失败。');
+      }
+      for (const profile of profiles || []) {
+        profileById.set(profile.id, profile);
+      }
+    }
+  }
+
+  const supabaseEvents = (usageEvents || []).map((event) => normalizeAdminUsageEvent(event, profileById));
+  const testEvents = readTestInviteUsageEvents(email, limit);
+  const events = [...supabaseEvents, ...testEvents]
+    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+    .slice(0, limit);
+
+  return {
+    email: email || null,
+    events,
+    limit,
+    totalReturned: events.length,
+  };
+}
+
 function readCreditAmount(value) {
   const amount = Number.parseInt(String(value ?? ''), 10);
   if (!Number.isFinite(amount) || amount < 0 || amount > 9999) {
     return null;
   }
   return amount;
+}
+
+async function handleAdminUsage(req, res, url) {
+  if (req.method !== 'GET') {
+    sendJson(res, 405, { error: { message: 'Method not allowed.' } });
+    return;
+  }
+
+  const auth = await getAdminContext(req);
+  if (auth.error) {
+    sendJson(res, auth.error.status, { error: { message: auth.error.message } });
+    return;
+  }
+
+  try {
+    const usage = await readAdminUsageEvents(auth.serviceClient, {
+      email: url.searchParams.get('email'),
+      limit: url.searchParams.get('limit'),
+    });
+    sendJson(res, 200, usage);
+  } catch (error) {
+    sendJson(res, 500, { error: { message: sanitizeError(error) || '读取使用记录失败。' } });
+  }
 }
 
 async function handleAdminCredits(req, res, url) {
@@ -1635,7 +1815,10 @@ async function handleLlmChat(req, res) {
   const isTestInvite = Boolean(auth.isTestInvite);
   const testInviteEmail = normalizeEmail(auth.user?.email) || 'tester@studio-canvas.local';
   const recordUsage = async (event) => {
-    if (isTestInvite) return;
+    if (isTestInvite) {
+      writeTestInviteUsage(testInviteEmail, event);
+      return;
+    }
     await writeUsage(auth.serviceClient, event);
   };
   const refundReservedQuota = async () => {
@@ -1881,6 +2064,10 @@ async function route(req, res) {
     }
     if (url.pathname === '/api/admin/credits') {
       await handleAdminCredits(req, res, url);
+      return;
+    }
+    if (url.pathname === '/api/admin/usage') {
+      await handleAdminUsage(req, res, url);
       return;
     }
     if (url.pathname === '/api/projects') {
