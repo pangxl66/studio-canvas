@@ -1105,7 +1105,7 @@ function buildMustShow(
 
 function buildMicroExpression(shot: StoryboardShot, visibleCharacter: boolean, emotion: string): string {
   if (!visibleCharacter) {
-    return '无人物微表情要求；由光影变化、道具轻微位移、空气扰动或空间静压承担情绪钉子。';
+    return '无人物表演建议；由光影变化、道具轻微位移、空气扰动或空间静压承担情绪钉子。';
   }
   if (shot.content.trim()) {
     return `在台词前后给一个短促可读的停顿、眼神压住或手部收紧，让“${emotion}”落在可拍的细节上。`;
@@ -1366,7 +1366,7 @@ export function buildStoryboardPromptText(shot: StoryboardShot, pack: PromptShot
     `镜头执行：相机位置=${profile.cameraPosition} 相机朝向=${profile.cameraFacing} 角色朝向=${profile.characterFacing} 焦段=${profile.lens} 景深=${profile.depthOfField} 焦点优先级=1.${profile.focusPrimary} 2.${profile.focusSecondary} 3.${profile.focusReaction}`,
     `时间推进：${profile.timeSlices.map((slice) => `${slice.label}:${slice.text}`).join(' ｜ ')}`,
     `声画规则：谁出声=${profile.visibleSpeaker}；谁不露口型=${profile.hiddenSpeaker}；主声源=${profile.primarySound}；次声源=${profile.secondarySound}；声音压住什么=${profile.soundCover}`,
-    `结果锚定：Must-Show=${profile.mustShow.join(' / ')}；微表情=${profile.microExpression}；硬钉子=${profile.hardNails.join('；')}；情绪钉子=${profile.emotionNail}；叙事钉子=${profile.narrativeNail}；承接=${profile.handoff}；过门=${profile.transitionGate}；下一镜接力物=${profile.relayObject}`,
+    `结果锚定：Must-Show=${profile.mustShow.join(' / ')}；表演建议=${profile.microExpression}；硬钉子=${profile.hardNails.join('；')}；情绪钉子=${profile.emotionNail}；叙事钉子=${profile.narrativeNail}；承接=${profile.handoff}；过门=${profile.transitionGate}；下一镜接力物=${profile.relayObject}`,
     '禁项：不要把镜头写成普通文生图词串，不要重发剧情，不要补新人物或新事件，禁字幕、禁水印、禁Logo、禁UI、禁空泛风格词堆砌。',
   ].join('\n');
   return stripLineEndingEllipsis(clampPromptText(body, 2500));
@@ -1531,7 +1531,7 @@ export function buildSeedanceCard(shot: StoryboardShot, pack: PromptShotPack): s
       priority: 'support',
     },
     {
-      heading: '微表情',
+      heading: '表演建议',
       body: profile.microExpression,
       compactBody: summarizeText(profile.microExpression, 16),
       priority: 'support',
