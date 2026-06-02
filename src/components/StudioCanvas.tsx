@@ -578,7 +578,7 @@ export function StudioCanvas() {
           });
           pushMessage({
             role: 'system',
-            text: `已拖入图片“${file.name}”，可以点击“分析画面”，或连接到文本卡片后参与 LLM 润色。`,
+            text: `已拖入图片“${file.name}”，连接到文本卡片后可参与 LLM 润色。`,
             nodeId: imageNodeId,
           });
           focusNode(imageNodeId, { openDetail: false });
@@ -662,7 +662,7 @@ export function StudioCanvas() {
         });
         pushMessage({
           role: 'system',
-          text: '已从剪贴板粘贴图片，可以点击“分析画面”，或连接到文本卡片后参与 LLM 润色。',
+          text: '已从剪贴板粘贴图片，连接到文本卡片后可参与 LLM 润色。',
           nodeId: imageNodeId,
         });
         focusNode(imageNodeId, { openDetail: false });

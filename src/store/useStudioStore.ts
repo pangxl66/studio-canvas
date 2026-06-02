@@ -3383,7 +3383,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     get().pushMessage({
       role: 'system',
       text: opts?.imageDataUrl
-        ? '已创建图片节点。可点击“分析画面”，或连接到文本卡片后参与 LLM 润色。'
+        ? '已创建图片节点。连接到文本卡片后，可参与 LLM 润色。'
         : '已创建图片节点。上传或粘贴图片后，可作为文本润色的视觉参考。',
       nodeId: id,
     });
