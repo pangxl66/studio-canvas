@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState, type MouseEvent } from 'react';
 import {
   fetchAdminCreditDetails,
   fetchAdminUsageEvents,
@@ -15,7 +15,13 @@ interface AdminCreditPanelProps {
   onClose: () => void;
 }
 
-type AdminTab = 'credits' | 'usage' | 'users';
+type AdminTab = 'usage' | 'users';
+
+type QuotaMenuState = {
+  user: AdminUserRecord;
+  x: number;
+  y: number;
+};
 
 function formatDate(value: string | null): string {
   if (!value) return '-';
@@ -51,7 +57,7 @@ function planLabel(plan: string): string {
 }
 
 export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) {
-  const [activeTab, setActiveTab] = useState<AdminTab>('credits');
+  const [activeTab, setActiveTab] = useState<AdminTab>('users');
   const [email, setEmail] = useState('');
   const [amount, setAmount] = useState('30');
   const [details, setDetails] = useState<AdminCreditDetails | null>(null);
@@ -68,6 +74,30 @@ export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) 
   const [usersResponse, setUsersResponse] = useState<AdminUsersResponse | null>(null);
   const [usersMessage, setUsersMessage] = useState('');
   const [isUsersBusy, setIsUsersBusy] = useState(false);
+  const [selectedUserKey, setSelectedUserKey] = useState<string | null>(null);
+  const [quotaMenu, setQuotaMenu] = useState<QuotaMenuState | null>(null);
+
+  const userKey = (user: AdminUserRecord) => `${user.source}-${user.userId}`;
+
+  const patchUserWallet = (nextDetails: AdminCreditDetails) => {
+    setUsersResponse((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        users: current.users.map((user) =>
+          user.email === nextDetails.user.email
+            ? {
+                ...user,
+                monthlyQuota: nextDetails.wallet.monthlyQuota,
+                remainingQuota: nextDetails.wallet.remainingQuota,
+                updatedAt: nextDetails.wallet.updatedAt,
+                walletUpdatedAt: nextDetails.wallet.updatedAt,
+              }
+            : user,
+        ),
+      };
+    });
+  };
 
   const loadDetails = async (targetEmail = email) => {
     const nextEmail = targetEmail.trim();
@@ -81,6 +111,7 @@ export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) 
       const nextDetails = await fetchAdminCreditDetails(nextEmail);
       setDetails(nextDetails);
       setEmail(nextDetails.user.email);
+      patchUserWallet(nextDetails);
       setMessage('已读取用户额度。');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '读取用户额度失败。');
@@ -107,6 +138,7 @@ export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) 
       const nextDetails = await updateAdminCredits(nextEmail, action, numericAmount);
       setDetails(nextDetails);
       setEmail(nextDetails.user.email);
+      patchUserWallet(nextDetails);
       setMessage(action === 'reset' ? '已重置为默认额度。' : '额度已更新。');
       onChanged?.();
     } catch (error) {
@@ -166,6 +198,7 @@ export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) 
     setMessage('');
     setUsageMessage('');
     setUsersMessage('');
+    setQuotaMenu(null);
     if (tab === 'usage' && !usageResponse) {
       void loadUsage();
     }
@@ -174,13 +207,27 @@ export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) 
     }
   };
 
-  const openCreditUser = (user: AdminUserRecord) => {
-    setActiveTab('credits');
+  const selectUser = (user: AdminUserRecord) => {
+    setSelectedUserKey(userKey(user));
     setEmail(user.email);
-    setDetails(null);
     setMessage('');
+  };
+
+  const openCreditUser = (user: AdminUserRecord, event?: MouseEvent) => {
+    event?.preventDefault();
+    event?.stopPropagation();
+    selectUser(user);
+    setDetails(null);
+    const x = event ? Math.min(event.clientX, window.innerWidth - 310) : window.innerWidth / 2 - 150;
+    const y = event ? Math.min(event.clientY, window.innerHeight - 270) : window.innerHeight / 2 - 120;
+    setQuotaMenu({ user, x: Math.max(12, x), y: Math.max(12, y) });
     void loadDetails(user.email);
   };
+
+  useEffect(() => {
+    void loadUsers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className="admin-credit-panel nodrag nopan" role="dialog" aria-modal="true">
@@ -197,9 +244,6 @@ export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) 
         </header>
 
         <div className="admin-credit-panel__tabs" role="tablist" aria-label="后台管理功能">
-          <button className={activeTab === 'credits' ? 'is-active' : ''} type="button" onClick={() => switchTab('credits')}>
-            额度管理
-          </button>
           <button className={activeTab === 'users' ? 'is-active' : ''} type="button" onClick={() => switchTab('users')}>
             用户管理
           </button>
@@ -207,91 +251,6 @@ export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) 
             使用记录
           </button>
         </div>
-
-        {activeTab === 'credits' ? (
-          <>
-            <div className="admin-credit-panel__controls">
-              <label>
-                用户邮箱
-                <input
-                  disabled={isBusy}
-                  inputMode="email"
-                  onChange={(event) => setEmail(event.target.value)}
-                  placeholder="user@example.com"
-                  type="email"
-                  value={email}
-                />
-              </label>
-              <label>
-                次数
-                <input
-                  disabled={isBusy}
-                  min={0}
-                  onChange={(event) => setAmount(event.target.value)}
-                  type="number"
-                  value={amount}
-                />
-              </label>
-            </div>
-
-            <div className="admin-credit-panel__actions">
-              <button disabled={isBusy} type="button" onClick={() => void loadDetails()}>
-                查询
-              </button>
-              <button disabled={isBusy} type="button" onClick={() => void runAction('add')}>
-                增加次数
-              </button>
-              <button disabled={isBusy} type="button" onClick={() => void runAction('set')}>
-                设为次数
-              </button>
-              <button disabled={isBusy} type="button" onClick={() => void runAction('reset')}>
-                重置为 30
-              </button>
-            </div>
-
-            {message ? <p className="admin-credit-panel__message">{message}</p> : null}
-
-            {details ? (
-              <>
-                <div className="admin-credit-panel__summary">
-                  <span>用户：{details.user.email}</span>
-                  <strong>
-                    {details.wallet.remainingQuota}/{details.wallet.monthlyQuota}
-                  </strong>
-                  <span>更新时间：{formatDate(details.wallet.updatedAt)}</span>
-                </div>
-
-                <div className="admin-credit-panel__usage">
-                  <h3>该用户最近调用记录</h3>
-                  {details.usageEvents.length ? (
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>时间</th>
-                          <th>模型</th>
-                          <th>状态</th>
-                          <th>消耗</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {details.usageEvents.map((event, index) => (
-                          <tr key={`${event.createdAt}-${index}`}>
-                            <td>{formatDate(event.createdAt)}</td>
-                            <td>{event.model || '-'}</td>
-                            <td title={event.errorMessage || undefined}>{usageLabel(event.status)}</td>
-                            <td>{event.quotaCost}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  ) : (
-                    <p className="admin-credit-panel__empty">暂无调用记录。</p>
-                  )}
-                </div>
-              </>
-            ) : null}
-          </>
-        ) : null}
 
         {activeTab === 'users' ? (
           <>
@@ -388,7 +347,10 @@ export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) 
             ) : null}
 
             <div className="admin-credit-panel__usage">
-              <h3>{usersResponse?.email ? `用户管理：${usersResponse.email}` : '已注册用户'}</h3>
+              <h3>
+                {usersResponse?.email ? `用户管理：${usersResponse.email}` : '已注册用户'}
+                <small>点击选中用户，右键打开额度菜单。</small>
+              </h3>
               {usersResponse?.users.length ? (
                 <table className="admin-credit-panel__usage-table--users">
                   <thead>
@@ -401,12 +363,20 @@ export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) 
                       <th>最近调用</th>
                       <th>调用统计</th>
                       <th>项目</th>
-                      <th>操作</th>
+                      <th>额度</th>
                     </tr>
                   </thead>
                   <tbody>
                     {usersResponse.users.map((user) => (
-                      <tr key={`${user.source}-${user.userId}`}>
+                      <tr
+                        key={`${user.source}-${user.userId}`}
+                        className={selectedUserKey === userKey(user) ? 'is-selected' : ''}
+                        onClick={() => {
+                          selectUser(user);
+                          setQuotaMenu(null);
+                        }}
+                        onContextMenu={(event) => openCreditUser(user, event)}
+                      >
                         <td>
                           <span className="admin-credit-panel__user-email">{user.email || '-'}</span>
                           <small>
@@ -434,8 +404,12 @@ export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) 
                         </td>
                         <td>{user.projectCount}</td>
                         <td>
-                          <button className="admin-credit-panel__table-button" type="button" onClick={() => openCreditUser(user)}>
-                            管理点数
+                          <button
+                            className="admin-credit-panel__table-button"
+                            type="button"
+                            onClick={(event) => openCreditUser(user, event)}
+                          >
+                            编辑
                           </button>
                         </td>
                       </tr>
@@ -446,6 +420,65 @@ export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) 
                 <p className="admin-credit-panel__empty">{isUsersBusy ? '正在读取用户列表...' : '暂无用户。'}</p>
               )}
             </div>
+
+            {quotaMenu ? (
+              <div
+                className="admin-credit-panel__quota-menu"
+                onClick={(event) => event.stopPropagation()}
+                style={{ left: quotaMenu.x, top: quotaMenu.y }}
+              >
+                <div className="admin-credit-panel__quota-menu-head">
+                  <div>
+                    <span>额度管理</span>
+                    <strong>{quotaMenu.user.email || '-'}</strong>
+                  </div>
+                  <button type="button" onClick={() => setQuotaMenu(null)}>
+                    关闭
+                  </button>
+                </div>
+
+                <div className="admin-credit-panel__quota-menu-status">
+                  <span>当前点数</span>
+                  <strong>
+                    {details?.user.email === quotaMenu.user.email
+                      ? `${details.wallet.remainingQuota}/${details.wallet.monthlyQuota}`
+                      : `${quotaMenu.user.remainingQuota}/${quotaMenu.user.monthlyQuota}`}
+                  </strong>
+                  <small>
+                    更新时间：
+                    {formatDate(details?.user.email === quotaMenu.user.email ? details.wallet.updatedAt : quotaMenu.user.walletUpdatedAt)}
+                  </small>
+                </div>
+
+                <label className="admin-credit-panel__quota-menu-input">
+                  次数
+                  <input
+                    disabled={isBusy}
+                    min={0}
+                    onChange={(event) => setAmount(event.target.value)}
+                    type="number"
+                    value={amount}
+                  />
+                </label>
+
+                <div className="admin-credit-panel__quota-menu-actions">
+                  <button disabled={isBusy} type="button" onClick={() => void loadDetails(quotaMenu.user.email)}>
+                    查询
+                  </button>
+                  <button disabled={isBusy} type="button" onClick={() => void runAction('add')}>
+                    增加
+                  </button>
+                  <button disabled={isBusy} type="button" onClick={() => void runAction('set')}>
+                    设为
+                  </button>
+                  <button disabled={isBusy} type="button" onClick={() => void runAction('reset')}>
+                    重置 30
+                  </button>
+                </div>
+
+                {message ? <p className="admin-credit-panel__quota-menu-message">{message}</p> : null}
+              </div>
+            ) : null}
           </>
         ) : null}
 

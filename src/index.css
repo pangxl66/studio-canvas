@@ -8584,9 +8584,18 @@ body,
 }
 
 .admin-credit-panel__usage h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
   margin: 0 0 10px;
   color: #f8fafc;
   font-size: 16px;
+}
+
+.admin-credit-panel__usage h3 small {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 800;
 }
 
 .admin-credit-panel__usage table {
@@ -8621,6 +8630,19 @@ body,
 .admin-credit-panel__usage td {
   color: #cbd5e1;
   vertical-align: top;
+}
+
+.admin-credit-panel__usage tbody tr {
+  cursor: default;
+}
+
+.admin-credit-panel__usage tbody tr:hover {
+  background: rgba(30, 41, 59, 0.42);
+}
+
+.admin-credit-panel__usage tbody tr.is-selected {
+  background: rgba(20, 184, 166, 0.14);
+  box-shadow: inset 3px 0 0 rgba(45, 212, 191, 0.72);
 }
 
 .admin-credit-panel__usage td small {
@@ -8658,6 +8680,144 @@ body,
 .admin-credit-panel__table-button:hover {
   border-color: rgba(45, 212, 191, 0.5);
   background: rgba(20, 184, 166, 0.22);
+}
+
+.admin-credit-panel__quota-menu {
+  position: fixed;
+  z-index: 130;
+  width: 300px;
+  border: 1px solid rgba(45, 212, 191, 0.34);
+  border-radius: 16px;
+  background: rgba(7, 16, 30, 0.98);
+  box-shadow: 0 22px 56px rgba(0, 0, 0, 0.5);
+  color: #e2e8f0;
+  padding: 12px;
+}
+
+.admin-credit-panel__quota-menu-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.admin-credit-panel__quota-menu-head span {
+  display: block;
+  color: #5eead4;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+}
+
+.admin-credit-panel__quota-menu-head strong {
+  display: block;
+  max-width: 205px;
+  overflow: hidden;
+  color: #f8fafc;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-credit-panel__quota-menu-head button,
+.admin-credit-panel__quota-menu-actions button {
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 11px;
+  background: rgba(15, 23, 42, 0.82);
+  color: #e2e8f0;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 900;
+  padding: 7px 9px;
+}
+
+.admin-credit-panel__quota-menu-actions button:nth-child(2) {
+  border-color: rgba(45, 212, 191, 0.35);
+  background: rgba(20, 184, 166, 0.16);
+  color: #ccfbf1;
+}
+
+.admin-credit-panel__quota-menu-head button:hover,
+.admin-credit-panel__quota-menu-actions button:hover {
+  border-color: rgba(45, 212, 191, 0.45);
+  transform: translateY(-1px);
+}
+
+.admin-credit-panel__quota-menu-head button:disabled,
+.admin-credit-panel__quota-menu-actions button:disabled,
+.admin-credit-panel__quota-menu-input input:disabled {
+  cursor: progress;
+  opacity: 0.6;
+  transform: none;
+}
+
+.admin-credit-panel__quota-menu-status {
+  display: grid;
+  gap: 3px;
+  margin-bottom: 10px;
+  border: 1px solid rgba(45, 212, 191, 0.18);
+  border-radius: 13px;
+  background: rgba(20, 184, 166, 0.08);
+  padding: 10px;
+}
+
+.admin-credit-panel__quota-menu-status span,
+.admin-credit-panel__quota-menu-input {
+  color: #99f6e4;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.admin-credit-panel__quota-menu-status strong {
+  color: #fef08a;
+  font-size: 24px;
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-credit-panel__quota-menu-status small {
+  color: #64748b;
+  font-size: 11px;
+}
+
+.admin-credit-panel__quota-menu-input {
+  display: grid;
+  gap: 7px;
+}
+
+.admin-credit-panel__quota-menu-input input {
+  width: 100%;
+  border: 1px solid rgba(45, 212, 191, 0.24);
+  border-radius: 12px;
+  background: rgba(2, 6, 23, 0.72);
+  color: #f8fafc;
+  font-size: 14px;
+  font-weight: 900;
+  outline: none;
+  padding: 10px 11px;
+}
+
+.admin-credit-panel__quota-menu-input input:focus {
+  border-color: rgba(96, 165, 250, 0.72);
+  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.13);
+}
+
+.admin-credit-panel__quota-menu-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.admin-credit-panel__quota-menu-message {
+  margin: 10px 0 0;
+  border: 1px solid rgba(96, 165, 250, 0.22);
+  border-radius: 12px;
+  background: rgba(30, 64, 175, 0.16);
+  color: #dbeafe;
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 8px 10px;
 }
 
 .admin-credit-panel__empty {
