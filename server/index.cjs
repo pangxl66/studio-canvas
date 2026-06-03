@@ -19,7 +19,7 @@ function parseEnvMs(value, fallback, min, max) {
 const MAX_INPUT_CHARS = 80_000;
 const MAX_PROJECT_SNAPSHOT_CHARS = 5_000_000;
 const PROJECT_LIST_LIMIT = 40;
-const DEFAULT_MONTHLY_QUOTA = 30;
+const DEFAULT_MONTHLY_QUOTA = 10;
 const LEGACY_DEFAULT_MONTHLY_QUOTA = 20;
 const DEFAULT_TIMEOUT_MS = parseEnvMs(process.env.LLM_TIMEOUT_MS || process.env.VITE_LLM_TIMEOUT_MS, 420_000, 420_000, 900_000);
 const DEFAULT_MODEL = 'gpt-5.5';
@@ -27,6 +27,7 @@ const TEST_INVITE_TOKEN_PREFIX = 'test-invite';
 const testInviteActivationPath = path.join(rootDir, '.data', 'test-invite-activations.json');
 const testInviteUsagePath = path.join(rootDir, '.data', 'test-invite-usage-events.json');
 const testInviteActivations = new Set();
+const testInviteActivationTimes = new Map();
 const testInviteQuotas = new Map();
 let testInviteUsageEvents = [];
 let testInviteActivationsLoaded = false;
@@ -105,6 +106,11 @@ function getTestInviteMonthlyQuota() {
   return Number.isFinite(value) && value > 0 ? value : DEFAULT_MONTHLY_QUOTA;
 }
 
+function getLegacyTestInviteMonthlyQuota() {
+  const value = Number.parseInt(env('TEST_INVITE_LEGACY_MONTHLY_QUOTA') || '', 10);
+  return Number.isFinite(value) && value > 0 ? value : 30;
+}
+
 function base64UrlJson(value) {
   return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
 }
@@ -164,10 +170,11 @@ function readTestInviteToken(token) {
 }
 
 function readTestInviteQuota(email) {
+  ensureTestInviteActivationsLoaded();
   const normalizedEmail = normalizeEmail(email) || 'tester@studio-canvas.local';
-  const monthlyQuota = getTestInviteMonthlyQuota();
+  const monthlyQuota = getTestInviteMonthlyQuotaForEmail(normalizedEmail);
   const existing = testInviteQuotas.get(normalizedEmail);
-  if (existing && (existing.isCustom || existing.monthlyQuota === monthlyQuota)) {
+  if (existing) {
     return existing;
   }
   const nextQuota = {
@@ -222,6 +229,19 @@ function ensureTestInviteActivationsLoaded() {
     const raw = fs.readFileSync(testInviteActivationPath, 'utf8');
     const parsed = JSON.parse(raw);
     const emails = Array.isArray(parsed) ? parsed : parsed?.emails;
+    const activations = parsed && !Array.isArray(parsed) && parsed.activations && typeof parsed.activations === 'object'
+      ? parsed.activations
+      : null;
+    if (activations) {
+      for (const [email, activatedAt] of Object.entries(activations)) {
+        const normalizedEmail = normalizeEmail(email);
+        if (!normalizedEmail) continue;
+        testInviteActivations.add(normalizedEmail);
+        if (typeof activatedAt === 'string' && activatedAt.trim()) {
+          testInviteActivationTimes.set(normalizedEmail, activatedAt);
+        }
+      }
+    }
     if (!Array.isArray(emails)) return;
     for (const email of emails) {
       const normalizedEmail = normalizeEmail(email);
@@ -235,9 +255,11 @@ function ensureTestInviteActivationsLoaded() {
 function saveTestInviteActivations() {
   try {
     fs.mkdirSync(path.dirname(testInviteActivationPath), { recursive: true });
+    const emails = [...testInviteActivations].sort();
     const payload = JSON.stringify(
       {
-        emails: [...testInviteActivations].sort(),
+        activations: Object.fromEntries(emails.map((email) => [email, testInviteActivationTimes.get(email) || null])),
+        emails,
         updatedAt: new Date().toISOString(),
       },
       null,
@@ -262,7 +284,21 @@ function rememberActivatedTestInviteEmail(email) {
   const normalizedEmail = normalizeEmail(email);
   if (!normalizedEmail || testInviteActivations.has(normalizedEmail)) return;
   testInviteActivations.add(normalizedEmail);
+  testInviteActivationTimes.set(normalizedEmail, new Date().toISOString());
   saveTestInviteActivations();
+}
+
+function isFreshTestInviteActivation(email) {
+  const activatedAt = Date.parse(String(testInviteActivationTimes.get(email) || ''));
+  return Number.isFinite(activatedAt) && activatedAt >= getNewUserDefaultQuotaEffectiveMs();
+}
+
+function getTestInviteMonthlyQuotaForEmail(email) {
+  const normalizedEmail = normalizeEmail(email);
+  if (normalizedEmail && testInviteActivations.has(normalizedEmail) && !isFreshTestInviteActivation(normalizedEmail)) {
+    return getLegacyTestInviteMonthlyQuota();
+  }
+  return getTestInviteMonthlyQuota();
 }
 
 function ensureTestInviteUsageLoaded() {
@@ -710,6 +746,66 @@ async function ensureUserRows(serviceClient, user) {
       { onConflict: 'user_id', ignoreDuplicates: true },
     ),
   ]);
+  await normalizeFreshUserDefaultQuota(serviceClient, user);
+}
+
+function getNewUserDefaultQuotaEffectiveMs() {
+  const fallback = '2026-06-03T11:30:00+08:00';
+  const parsed = Date.parse(env('NEW_USER_DEFAULT_QUOTA_EFFECTIVE_AT') || fallback);
+  return Number.isFinite(parsed) ? parsed : Date.parse(fallback);
+}
+
+function isNewQuotaPolicyUser(user) {
+  const createdAt = Date.parse(String(user?.created_at || user?.createdAt || ''));
+  return Number.isFinite(createdAt) && createdAt >= getNewUserDefaultQuotaEffectiveMs();
+}
+
+function isUntouchedHigherDefaultWallet(wallet) {
+  if (!wallet) return false;
+  const monthlyQuota = Number(wallet.monthly_quota || 0);
+  const remainingQuota = Number(wallet.remaining_quota || 0);
+  return monthlyQuota > DEFAULT_MONTHLY_QUOTA && remainingQuota === monthlyQuota;
+}
+
+async function normalizeFreshUserDefaultQuota(serviceClient, user) {
+  if (!isNewQuotaPolicyUser(user)) return null;
+
+  const { data: wallet, error } = await serviceClient
+    .from('credit_wallets')
+    .select('monthly_quota,remaining_quota,reset_at,updated_at')
+    .eq('user_id', user.id)
+    .maybeSingle();
+
+  if (error || !isUntouchedHigherDefaultWallet(wallet)) {
+    if (error) console.warn('Fresh default quota read failed', sanitizeError(error.message));
+    return wallet || null;
+  }
+
+  const nextUpdatedAt = new Date().toISOString();
+  const { data, error: updateError } = await serviceClient
+    .from('credit_wallets')
+    .update({
+      monthly_quota: DEFAULT_MONTHLY_QUOTA,
+      remaining_quota: DEFAULT_MONTHLY_QUOTA,
+      updated_at: nextUpdatedAt,
+    })
+    .eq('user_id', user.id)
+    .eq('monthly_quota', Number(wallet.monthly_quota || 0))
+    .eq('remaining_quota', Number(wallet.remaining_quota || 0))
+    .select('monthly_quota,remaining_quota,reset_at,updated_at')
+    .maybeSingle();
+
+  if (updateError) {
+    console.warn('Fresh default quota normalization failed', sanitizeError(updateError.message));
+    return wallet;
+  }
+
+  return data || {
+    ...wallet,
+    monthly_quota: DEFAULT_MONTHLY_QUOTA,
+    remaining_quota: DEFAULT_MONTHLY_QUOTA,
+    updated_at: nextUpdatedAt,
+  };
 }
 
 function shouldUpgradeLegacyDefaultQuota(wallet) {
@@ -1385,7 +1481,7 @@ function updateTestInviteAdminCredits(email, action, rawAmount) {
   let nextRemaining = currentRemaining;
 
   if (action === 'reset') {
-    nextMonthly = getTestInviteMonthlyQuota();
+    nextMonthly = getTestInviteMonthlyQuotaForEmail(email);
     nextRemaining = nextMonthly;
   } else if (action === 'add') {
     const amount = readCreditAmount(rawAmount);

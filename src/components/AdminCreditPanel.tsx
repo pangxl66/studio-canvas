@@ -59,7 +59,7 @@ function planLabel(plan: string): string {
 export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) {
   const [activeTab, setActiveTab] = useState<AdminTab>('users');
   const [email, setEmail] = useState('');
-  const [amount, setAmount] = useState('30');
+  const [amount, setAmount] = useState('10');
   const [details, setDetails] = useState<AdminCreditDetails | null>(null);
   const [message, setMessage] = useState('');
   const [isBusy, setIsBusy] = useState(false);
@@ -472,7 +472,7 @@ export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) 
                     设为
                   </button>
                   <button disabled={isBusy} type="button" onClick={() => void runAction('reset')}>
-                    重置 30
+                    重置默认
                   </button>
                 </div>
 

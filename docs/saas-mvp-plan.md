@@ -103,8 +103,8 @@ create table profiles (
 ```sql
 create table credit_wallets (
   user_id uuid primary key references auth.users(id) on delete cascade,
-  monthly_quota int not null default 30,
-  remaining_quota int not null default 30,
+  monthly_quota int not null default 10,
+  remaining_quota int not null default 10,
   reset_at timestamptz,
   updated_at timestamptz not null default now()
 );
@@ -246,7 +246,7 @@ create table subscriptions (
 - `VITE_SAAS_MOCK=true` 时启用。
 - `src/services/authClient.ts` 会模拟登录，不需要 Supabase。
 - `src/services/cloudProjectService.ts` 会把云端工程写入 `localStorage`，不访问 `/api/projects`。
-- `src/services/creditService.ts` 会提供本地模拟额度，默认 `30/30`。
+- `src/services/creditService.ts` 会提供本地模拟额度，默认剩余 `10` 次。
 - `src/services/ModelGateway.ts` 在 Mock 模式下生成成功后会模拟扣 1 次额度。
 - Mock 模式不会强制使用 `VITE_LLM_PROXY_URL`，所以本地仍可用原来的 Base URL/API Key 测试生成。
 

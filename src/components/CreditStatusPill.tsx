@@ -6,18 +6,11 @@ import {
   type CreditStatus,
 } from '@/services/creditService';
 
-function planLabel(plan: string): string {
-  if (plan === 'pro') return 'Pro';
-  if (plan === 'personal') return '个人版';
-  if (plan === 'trial' || plan === 'test') return '试用';
-  return 'Free';
-}
-
 function quotaText(status: CreditStatus | null): string {
   if (!status) {
-    return '读取中';
+    return '...';
   }
-  return `${status.remainingQuota}/${status.monthlyQuota}`;
+  return String(status.remainingQuota);
 }
 
 function isAdminToolsEnabled(): boolean {
@@ -71,7 +64,7 @@ export function CreditStatusPill() {
   return (
     <>
       <div className="credit-status-pill nodrag nopan" title={error || '当前账号剩余额度'}>
-        <span className="credit-status-pill__label">{status ? planLabel(status.plan) : 'Quota'}</span>
+        <span className="credit-status-pill__label">额度</span>
         <strong>{isLoading && !status ? '...' : quotaText(status)}</strong>
         {adminToolsEnabled ? (
           <button

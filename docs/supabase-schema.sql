@@ -12,8 +12,8 @@ create table if not exists public.profiles (
 
 create table if not exists public.credit_wallets (
   user_id uuid primary key references auth.users(id) on delete cascade,
-  monthly_quota int not null default 30,
-  remaining_quota int not null default 30,
+  monthly_quota int not null default 10,
+  remaining_quota int not null default 10,
   reset_at timestamptz,
   updated_at timestamptz not null default now()
 );
@@ -119,7 +119,7 @@ begin
   on conflict (id) do nothing;
 
   insert into public.credit_wallets (user_id, monthly_quota, remaining_quota)
-  values (new.id, 50, 50)
+  values (new.id, 10, 10)
   on conflict (user_id) do nothing;
 
   return new;

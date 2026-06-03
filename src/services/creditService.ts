@@ -15,7 +15,7 @@ export type CreditStatus = {
 };
 
 const MOCK_CREDIT_KEY = 'studio_canvas_saas_mock_credit_v1';
-const DEFAULT_MOCK_MONTHLY_QUOTA = 30;
+const DEFAULT_MOCK_MONTHLY_QUOTA = 10;
 
 function readMockCredit(): CreditStatus {
   try {
