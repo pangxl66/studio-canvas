@@ -50,9 +50,10 @@ const REQUIRED_NEGATIVE_GROUPS = [
   },
 ] as const;
 const MAX_PROMPT_CHARS = 2500;
-const MAX_SEEDANCE_CARD_CHARS = 2500;
-const MIN_SEEDANCE2_SEGMENTED_CARD_CHARS = 1500;
-const MAX_SEEDANCE2_SEGMENTED_CARD_CHARS = 3000;
+const MIN_SEEDANCE_CARD_CHARS = 2000;
+const MAX_SEEDANCE_CARD_CHARS = 3200;
+const MIN_SEEDANCE2_SEGMENTED_CARD_CHARS = 2000;
+const MAX_SEEDANCE2_SEGMENTED_CARD_CHARS = 3500;
 const SEEDANCE2_SEGMENTED_PROMPT_MARKER = 'Seedance2.0 分段式提示词助手';
 const SEEDANCE2_SEGMENTED_FORMAT = 'seedance2_segmented_15s_v1';
 const SEEDANCE2_SEGMENTED_HEADINGS = [
@@ -87,6 +88,12 @@ function getMaxSeedanceCardChars(styleMode: PromptStyleMode): number {
     : MAX_SEEDANCE_CARD_CHARS;
 }
 
+function getMinSeedanceCardChars(styleMode: PromptStyleMode): number {
+  return isSeedance2SegmentedStyle(styleMode)
+    ? MIN_SEEDANCE2_SEGMENTED_CARD_CHARS
+    : MIN_SEEDANCE_CARD_CHARS;
+}
+
 function normalizeSeedance2CardText(value: string): string {
   return value.replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim();
 }
@@ -107,7 +114,7 @@ function withSeedance2StyleSystemOverride(systemPrompt?: string): string | undef
     'For every shotPrompts[i].seedanceCard, use only the Seedance2.0 four Markdown modules:',
     SEEDANCE2_SEGMENTED_HEADINGS.join('\n'),
     'Do not use the default Studio Canvas card fields such as 挂载 / 相机位置 / 提示词 / 钉子4行 in seedanceCard.',
-    'Each seedanceCard must be 1500-3000 Chinese characters and must contain a continuous [00.0s - 15.0s] timeline.',
+    `Each seedanceCard must be ${MIN_SEEDANCE2_SEGMENTED_CARD_CHARS}-${MAX_SEEDANCE2_SEGMENTED_CARD_CHARS} Chinese characters and must contain a continuous [00.0s - 15.0s] timeline.`,
   ].join('\n');
 }
 
@@ -974,6 +981,7 @@ function outputNeedsCompressionRepair(output: PromptOutput, styleMode: PromptSty
     if (prompt && Array.from(prompt).length > MAX_PROMPT_CHARS) return true;
     const seedanceCard = String(pack.seedanceCard ?? '').trim();
     const seedanceCardLength = Array.from(seedanceCard).length;
+    if (seedanceCard && seedanceCardLength < getMinSeedanceCardChars(styleMode)) return true;
     if (seedanceCard && seedanceCardLength > getMaxSeedanceCardChars(styleMode)) return true;
     if (isSeedance2SegmentedStyle(styleMode)) {
       if (!seedanceCard) return true;
@@ -1022,7 +1030,10 @@ function validatePromptPackContent(pack: PromptShotPack, styleMode: PromptStyleM
     return;
   }
   if (Array.from(seedanceCard).length > MAX_SEEDANCE_CARD_CHARS) {
-    throw new Error(`Prompt 输出超出字数限制：镜头 ${pack.shot_id} 的 seedanceCard 超过 2500 字。`);
+    throw new Error(`Prompt 输出超出字数限制：镜头 ${pack.shot_id} 的 seedanceCard 超过 ${MAX_SEEDANCE_CARD_CHARS} 字。`);
+  }
+  if (Array.from(seedanceCard).length < MIN_SEEDANCE_CARD_CHARS) {
+    throw new Error(`Prompt 输出低于字数下限：镜头 ${pack.shot_id} 的 seedanceCard 低于 ${MIN_SEEDANCE_CARD_CHARS} 字。`);
   }
 }
 
@@ -1461,11 +1472,12 @@ function buildCompressionRepairUserMessageV3(
   draftOutput: PromptOutput,
 ): string {
   return [
-    '你上一次返回的 PromptOutput 语义基本可用，但长度与结构压缩不符合当前工具的规则。请在不破坏镜头语义的前提下，重写为更短、更稳的版本。',
+    '你上一次返回的 PromptOutput 语义基本可用，但 seedanceCard 长度不符合当前工具规则。请在不破坏镜头语义的前提下做长度修订：低于下限时扩写，高于上限时才压缩。',
     '',
     '【本次修订目标】',
     PROMPT_COPY_CHAR_LIMIT_RULE,
     PROMPT_CARD_LENGTH_BUDGET_RULE,
+    '重要：这不是默认压缩轮。只有超过上限时才压缩；如果 seedanceCard 低于 2000 字，必须扩写到 2000 字以上，扩写内容应来自画面空间、前中后景、灯光逻辑、真实表演、声画同步、连续性约束和运镜执行，不要重复堆形容词。',
     PROMPT_LOCAL_COMPRESSION_RULE,
     PROMPT_TIMING_SYSTEM_RULE,
     '禁止简单截断，禁止在结尾补 `...` 或 `…`，禁止删除固定标题，禁止把同一句原文重复灌入多个模块。',
@@ -1477,7 +1489,7 @@ function buildCompressionRepairUserMessageV3(
     JSON.stringify(assetRefs, null, 2),
     '',
     sourceStoryboard ? ['【源镜头表】', JSON.stringify(sourceStoryboard, null, 2), ''].join('\n') : '',
-    '【待压缩的当前输出】',
+    '【待长度修订的当前输出】',
     JSON.stringify(draftOutput, null, 2),
     '',
     '【原始 Input】',
@@ -1669,13 +1681,13 @@ function buildCompressionRepairUserMessageSeedance2(
   draftOutput: PromptOutput,
 ): string {
   return [
-    '上一次 PromptOutput 的语义基本可用，但 Seedance2.0 技能规范仍不合格。请在不改变源分镜事实的前提下重写完整 JSON。',
+    '上一次 PromptOutput 的语义基本可用，但 Seedance2.0 技能规范仍不合格。请在不改变源分镜事实的前提下重写完整 JSON：低于下限时扩写，高于上限时才压缩。',
     buildSeedance2PromptRules(sourceStoryboard),
     '',
     '【本次修订目标】',
     `每个 seedanceCard 必须在 ${MIN_SEEDANCE2_SEGMENTED_CARD_CHARS}-${MAX_SEEDANCE2_SEGMENTED_CARD_CHARS} 个中文字符之间。`,
-    '如果低于 1500 字，优先扩写空间景深、材质细节、微观表情、物理声效和常识动作反馈。',
-    '如果高于 3000 字，优先删除重复形容、重复动作说明和非关键环境铺陈，不得删除四大模块、时间轴、[前景]/[主体]/[背景]、听觉声效和负面约束。',
+    '如果低于 2000 字，优先扩写空间景深、材质细节、微观表情、物理声效和常识动作反馈。',
+    `如果高于 ${MAX_SEEDANCE2_SEGMENTED_CARD_CHARS} 字，优先删除重复形容、重复动作说明和非关键环境铺陈，不得删除四大模块、时间轴、[前景]/[主体]/[背景]、听觉声效和负面约束。`,
     '时间线必须重新校验为严格 15.0 秒，不能超过 15 秒，也不能少于 15 秒。',
     '不得退回默认 Studio Canvas 字段。',
     '',

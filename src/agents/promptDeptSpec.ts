@@ -26,7 +26,7 @@ export const PROMPT_COPY_CHAR_LIMIT_RULE =
   '“提示词”必须控制在 2500 字以内，并保持高密度镜头执行语言，不能退化成普通文生图 prompt，也不能只复述栏目标题。';
 
 export const PROMPT_CARD_LENGTH_BUDGET_RULE =
-  'Length budget: each seedanceCard must stay within 2500 characters total. Target 1600-2200 characters for normal shots and 2200-2450 for multi-shot groups. Keep mount, camera position, camera direction, character direction, lighting, start/end frame, continuity, lens, and camera-dynamic fields concise; do not repeat the same event in every section. Preserve all required headings, but compress each field into dense executable clauses instead of long prose.';
+  'Length budget: each seedanceCard must stay within 2000-3200 characters total. Target 2200-3000 characters for normal shots and 2600-3150 for multi-shot groups. If a card is below 2000 characters, expand cinematic space depth, lighting logic, composition layers, performance detail, sound/foley, continuity constraints, and camera execution instead of padding with repeated adjectives. Keep mount, camera position, camera direction, character direction, lighting, start/end frame, continuity, lens, and camera-dynamic fields specific; do not repeat the same event in every section. Preserve all required headings; only compress when the card exceeds the upper limit.';
 
 export const PROMPT_FORBIDDEN_RULE =
   '所有输出都必须显式加入禁止参数：禁止背景音乐 / BGM，禁止字幕 / subtitle / subtitles / text overlay，禁止 UI / HUD / interface overlay。声画同步只能写画内音、环境音、动作音与对白，不得额外设计背景音乐。';
@@ -47,7 +47,7 @@ export const PROMPT_LITE_RULE =
   'LITE 档优先输出干净、稳定、结构清晰的控制文本：允许密度高，但不允许把原文整句重复灌入多个模块，也不允许为了凑长度保留脏字段与噪声短语。';
 
 export const PROMPT_LOCAL_COMPRESSION_RULE =
-  '当提示词超出当前字数限制时，必须通过 LLM 压缩修订轮重写为更短版本：优先保留镜头任务、空间关系、构图前中后景、灯光任务、起落幅、连续性约束、提示词和钉子4行，再压缩非核心模块。压缩方法必须是改写成更短的控制短句、键值短句或分号短句，不允许简单截断，不允许补省略号，不允许删除固定标题。';
+  '当 seedanceCard 超出当前字数上限时，才通过 LLM 压缩修订轮重写为更短版本：优先保留镜头任务、空间关系、构图前中后景、灯光任务、起落幅、连续性约束、提示词和钉子4行，再压缩非核心模块。低于 2000 字时禁止压缩，必须补足画面、光影、表演、声效、连续性和运镜细节。修订方法必须是改写成更完整或更短的控制短句、键值短句或分号短句，不允许简单截断，不允许补省略号，不允许删除固定标题。';
 
 export const PROMPT_TIMING_SYSTEM_RULE = [
   '【时长规划】不要把 15 秒当作默认值，也不要为了凑满 15 秒而拉长镜头。',
