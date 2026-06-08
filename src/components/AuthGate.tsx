@@ -258,9 +258,6 @@ export function AuthGate({ children }: AuthGateProps) {
         <section className="auth-card">
           <p className="auth-card__eyebrow">Studio Canvas Cloud</p>
           <h1 className="auth-card__title">登录后进入在线工作区</h1>
-          <p className="auth-card__copy">
-            网站版会把工程保存到云端，并通过后端代理安全调用 LLM。可以使用邮箱验证码登录，也可以临时使用测试邀请码进入。
-          </p>
 
           <div className="auth-card__mode-tabs" role="tablist" aria-label="登录方式">
             <button
@@ -399,11 +396,6 @@ export function AuthGate({ children }: AuthGateProps) {
           ) : null}
 
           {message ? <p className="auth-card__message">{message}</p> : null}
-
-          <p className="auth-card__hint">
-            如果还没有 Supabase 项目，请先按文档执行 <code>docs/supabase-schema.sql</code> 并配置 <code>VITE_SUPABASE_URL</code> 与{' '}
-            <code>VITE_SUPABASE_ANON_KEY</code>。
-          </p>
         </section>
       </main>
     );
