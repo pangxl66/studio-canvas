@@ -23,6 +23,9 @@ const DEFAULT_MONTHLY_QUOTA = 10;
 const LEGACY_DEFAULT_MONTHLY_QUOTA = 20;
 const DEFAULT_TIMEOUT_MS = parseEnvMs(process.env.LLM_TIMEOUT_MS || process.env.VITE_LLM_TIMEOUT_MS, 420_000, 420_000, 900_000);
 const DEFAULT_MODEL = 'gpt-5.5';
+const PRIMARY_MODEL_FAILURE_WINDOW_MS = 5 * 60 * 1000;
+const PRIMARY_MODEL_COOLDOWN_MS = 10 * 60 * 1000;
+const PRIMARY_MODEL_FAILURE_THRESHOLD = 2;
 const TEST_INVITE_TOKEN_PREFIX = 'test-invite';
 const testInviteActivationPath = path.join(rootDir, '.data', 'test-invite-activations.json');
 const testInviteUsagePath = path.join(rootDir, '.data', 'test-invite-usage-events.json');
@@ -32,6 +35,7 @@ const testInviteQuotas = new Map();
 let testInviteUsageEvents = [];
 let testInviteActivationsLoaded = false;
 let testInviteUsageLoaded = false;
+const modelFailureState = new Map();
 
 loadLocalEnvFile(path.join(rootDir, '.env.local'));
 
@@ -407,6 +411,64 @@ function explicitEnvForProvider(provider, name) {
 
 function defaultModelForProvider(provider) {
   return provider === 'deepseek' ? 'deepseek-chat' : DEFAULT_MODEL;
+}
+
+function parseModelList(value) {
+  const seen = new Set();
+  const result = [];
+  for (const item of String(value || '').split(/[,;\n]/)) {
+    const trimmed = item.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(trimmed);
+  }
+  return result;
+}
+
+function fallbackModelsForProvider(provider, primaryModel) {
+  const configured = parseModelList(envForProvider(provider, 'LLM_FALLBACK_MODELS'));
+  const inferred =
+    provider !== 'deepseek' && String(primaryModel || '').trim().toLowerCase().includes('gpt-5.5')
+      ? ['gpt-5.4']
+      : [];
+  const primaryKey = String(primaryModel || '').trim().toLowerCase();
+  return parseModelList([...configured, ...inferred].join(',')).filter((model) => model.toLowerCase() !== primaryKey);
+}
+
+function modelFailureKey(provider, primaryModel) {
+  return `${provider || 'default'}|${String(primaryModel || '').trim().toLowerCase()}`;
+}
+
+function isPrimaryModelCoolingDown(provider, primaryModel) {
+  const state = modelFailureState.get(modelFailureKey(provider, primaryModel));
+  return Boolean(state && state.cooldownUntil > Date.now());
+}
+
+function recordPrimaryModelFailure(provider, primaryModel) {
+  const key = modelFailureKey(provider, primaryModel);
+  const now = Date.now();
+  const previous = modelFailureState.get(key);
+  const hits = [...(previous?.hits || []), now].filter((time) => now - time <= PRIMARY_MODEL_FAILURE_WINDOW_MS);
+  modelFailureState.set(key, {
+    hits,
+    cooldownUntil: hits.length >= PRIMARY_MODEL_FAILURE_THRESHOLD ? now + PRIMARY_MODEL_COOLDOWN_MS : previous?.cooldownUntil || 0,
+  });
+}
+
+function clearPrimaryModelFailures(provider, primaryModel) {
+  modelFailureState.delete(modelFailureKey(provider, primaryModel));
+}
+
+function modelAttemptPlan(provider, primaryModel) {
+  const fallbacks = fallbackModelsForProvider(provider, primaryModel);
+  if (!fallbacks.length) return [primaryModel];
+  return isPrimaryModelCoolingDown(provider, primaryModel) ? fallbacks : [primaryModel, ...fallbacks];
+}
+
+function shouldRetrySameProviderFallback(status) {
+  return status === 429 || status >= 500;
 }
 
 function hasProviderLlmApiKey(provider) {
@@ -1086,11 +1148,11 @@ function validateChatBody(body) {
   return null;
 }
 
-function buildUpstreamBody(body, provider = '') {
+function buildUpstreamBody(body, provider = '', modelOverride = '') {
   const maxTokens = body.max_tokens || body.maxOutputTokens;
   const upstreamBody = {
     messages: body.messages,
-    model: normalizeModel(body.model, body.feature, provider),
+    model: modelOverride || normalizeModel(body.model, body.feature, provider),
     stream: body.stream === true,
     temperature: typeof body.temperature === 'number' ? body.temperature : 0.35,
   };
@@ -1150,7 +1212,7 @@ async function writeUsage(serviceClient, usage) {
   await serviceClient.from('usage_events').insert(usage);
 }
 
-async function callUpstream(body, provider = '') {
+async function callUpstream(body, provider = '', modelOverride = '') {
   if (provider === 'gpt' && requestNeedsVision(body) && (!hasExplicitProviderLlmUpstream('gpt') || !hasExplicitProviderLlmApiKey('gpt'))) {
     throw new Error('GPT vision upstream env is missing.');
   }
@@ -1169,12 +1231,60 @@ async function callUpstream(body, provider = '') {
         authorization: `Bearer ${apiKey}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify(buildUpstreamBody(body, provider)),
+      body: JSON.stringify(buildUpstreamBody(body, provider, modelOverride)),
       signal: controller.signal,
     });
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function callUpstreamWithModelFallback(body, provider, primaryModel) {
+  const attempts = modelAttemptPlan(provider, primaryModel);
+  let lastError = null;
+  for (let index = 0; index < attempts.length; index += 1) {
+    const attemptModel = attempts[index];
+    try {
+      const response = await callUpstream(body, provider, attemptModel);
+      if (response.ok) {
+        if (attemptModel === primaryModel) clearPrimaryModelFailures(provider, primaryModel);
+        return { response, model: attemptModel, failedText: '' };
+      }
+      const hasNext = index < attempts.length - 1;
+      if (!hasNext || !shouldRetrySameProviderFallback(response.status)) {
+        return { response, model: attemptModel, failedText: '' };
+      }
+      const failedText = await response.text();
+      if (attemptModel === primaryModel) recordPrimaryModelFailure(provider, primaryModel);
+      console.warn(
+        'LLM primary model failed, retrying same-provider fallback',
+        JSON.stringify({
+          status: response.status,
+          model: attemptModel,
+          fallbackModel: attempts[index + 1],
+          provider: provider || null,
+          feature: String(body.feature || '').trim() || 'llm-chat',
+          body: sanitizeError(failedText),
+        }),
+      );
+    } catch (error) {
+      lastError = error;
+      const hasNext = index < attempts.length - 1;
+      if (!hasNext) throw error;
+      if (attemptModel === primaryModel) recordPrimaryModelFailure(provider, primaryModel);
+      console.warn(
+        'LLM primary model request failed, retrying same-provider fallback',
+        JSON.stringify({
+          model: attemptModel,
+          fallbackModel: attempts[index + 1],
+          provider: provider || null,
+          feature: String(body.feature || '').trim() || 'llm-chat',
+          error: sanitizeError(error),
+        }),
+      );
+    }
+  }
+  throw lastError || new Error('LLM fallback failed.');
 }
 
 function shouldRetryTextRequestWithDeepseek(status, body, provider = '') {
@@ -2348,10 +2458,11 @@ async function handleLlmChat(req, res) {
   }
 
   try {
-    let upstreamResponse = await callUpstream(body, provider);
+    const firstAttempt = await callUpstreamWithModelFallback(body, provider, model);
+    let upstreamResponse = firstAttempt.response;
     let responseProvider = provider;
-    let responseModel = model;
-    let failedText = '';
+    let responseModel = firstAttempt.model;
+    let failedText = firstAttempt.failedText;
     if (!upstreamResponse.ok && shouldRetryTextRequestWithDeepseek(upstreamResponse.status, body, provider)) {
       failedText = await upstreamResponse.text();
       const fallbackBody = buildDeepseekFallbackBody(body);

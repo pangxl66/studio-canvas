@@ -7,6 +7,7 @@ export type ModelGatewayConfig = {
   baseUrl?: string;
   apiKey?: string;
   model?: string;
+  fallbackModels?: string[];
   provider?: 'gpt' | 'deepseek';
   timeoutMs?: number;
 };
@@ -78,6 +79,16 @@ type StreamChunkJson = {
 
 const DEFAULT_TIMEOUT_MS = 420_000;
 const CHAT_COMPLETIONS_PATH = '/chat/completions';
+const PRIMARY_MODEL_FAILURE_WINDOW_MS = 5 * 60 * 1000;
+const PRIMARY_MODEL_COOLDOWN_MS = 10 * 60 * 1000;
+const PRIMARY_MODEL_FAILURE_THRESHOLD = 2;
+
+type ModelFailureState = {
+  hits: number[];
+  cooldownUntil: number;
+};
+
+const modelFailureState = new Map<string, ModelFailureState>();
 const USER_ABORT_MESSAGE = '当前任务已停止。';
 
 function normalizeBaseUrl(baseUrl: string): string {
@@ -285,6 +296,80 @@ function shouldRetryGatewayError(error: RequestLLMError): boolean {
   if (error.code === 'EMPTY_STREAM' || error.code === 'NO_BODY') return true;
   if (/^HTTP_5\d{2}$/.test(error.code) || error.code === 'HTTP_429') return true;
   return false;
+}
+
+function normalizeModelList(models: Array<string | undefined>): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const model of models) {
+    const trimmed = model?.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(trimmed);
+  }
+  return result;
+}
+
+function inferredFallbackModels(primaryModel: string, provider?: ModelGatewayConfig['provider']): string[] {
+  if (provider === 'deepseek') return [];
+  return primaryModel.trim().toLowerCase().includes('gpt-5.5') ? ['gpt-5.4'] : [];
+}
+
+function fallbackModelsForConfig(config: ModelGatewayConfig, primaryModel: string): string[] {
+  const primaryKey = primaryModel.trim().toLowerCase();
+  return normalizeModelList([...(config.fallbackModels ?? []), ...inferredFallbackModels(primaryModel, config.provider)]).filter(
+    (model) => model.toLowerCase() !== primaryKey,
+  );
+}
+
+function modelFailureKey(config: ModelGatewayConfig, primaryModel: string): string {
+  return [
+    config.provider ?? 'default',
+    config.proxyUrl?.trim() || config.baseUrl?.trim() || 'same-origin',
+    primaryModel.trim().toLowerCase(),
+  ].join('|');
+}
+
+function isPrimaryModelCoolingDown(config: ModelGatewayConfig, primaryModel: string): boolean {
+  const state = modelFailureState.get(modelFailureKey(config, primaryModel));
+  return Boolean(state && state.cooldownUntil > Date.now());
+}
+
+function recordPrimaryModelFailure(config: ModelGatewayConfig, primaryModel: string): void {
+  const key = modelFailureKey(config, primaryModel);
+  const now = Date.now();
+  const previous = modelFailureState.get(key);
+  const hits = [...(previous?.hits ?? []), now].filter((time) => now - time <= PRIMARY_MODEL_FAILURE_WINDOW_MS);
+  modelFailureState.set(key, {
+    hits,
+    cooldownUntil: hits.length >= PRIMARY_MODEL_FAILURE_THRESHOLD ? now + PRIMARY_MODEL_COOLDOWN_MS : previous?.cooldownUntil ?? 0,
+  });
+}
+
+function clearPrimaryModelFailures(config: ModelGatewayConfig, primaryModel: string): void {
+  modelFailureState.delete(modelFailureKey(config, primaryModel));
+}
+
+function modelAttemptPlan(config: ModelGatewayConfig, primaryModel: string): string[] {
+  const fallbacks = fallbackModelsForConfig(config, primaryModel);
+  if (!fallbacks.length) return [primaryModel];
+  return isPrimaryModelCoolingDown(config, primaryModel) ? fallbacks : [primaryModel, ...fallbacks];
+}
+
+function markFallbackTried(error: RequestLLMError | null, fallbackModels: string[]): RequestLLMError {
+  const base = error ?? {
+    code: 'MODEL_FALLBACK_FAILED',
+    message: '模型请求失败。',
+    retried: true,
+  };
+  if (!fallbackModels.length) return base;
+  return {
+    ...base,
+    message: `${base.message} 已尝试备用模型 ${fallbackModels.join('、')}，但仍然失败。`,
+    retried: true,
+  };
 }
 
 async function waitBeforeRetry(ms: number, signal?: AbortSignal): Promise<void> {
@@ -552,6 +637,43 @@ async function requestLLMOnce(
   }
 }
 
+async function requestLLMTextWithRetry(
+  config: ModelGatewayConfig,
+  params: RequestLLMParams,
+  model: string,
+): Promise<RequestLLMResult> {
+  const first = await requestLLMOnce(config, params, model);
+  if (first.ok) return first;
+  if (first.error.code === 'USER_ABORT') return first;
+  if (!shouldRetryGatewayError(first.error)) return first;
+
+  try {
+    await waitBeforeRetry(first.error.code === 'HTTP_429' || first.error.code === 'STREAM_ERROR' ? 1600 : 900, params.signal);
+  } catch {
+    return {
+      ok: false,
+      error: {
+        code: 'USER_ABORT',
+        message: USER_ABORT_MESSAGE,
+        retried: false,
+      },
+    };
+  }
+
+  const second = await requestLLMOnce(config, params, model);
+  if (second.ok) return second;
+  if (second.error.code === 'USER_ABORT') return second;
+
+  return {
+    ok: false,
+    error: {
+      code: second.error.code,
+      message: `${second.error.message} 已自动重试 1 次，但仍然失败。`,
+      retried: true,
+    },
+  };
+}
+
 export async function requestLLM(
   config: ModelGatewayConfig,
   params: RequestLLMParams,
@@ -565,6 +687,33 @@ export async function requestLLM(
         message: '未配置模型名称，请在设置或环境变量中补齐。',
         retried: false,
       },
+    };
+  }
+
+  const attemptPlan = modelAttemptPlan(config, model);
+  if (attemptPlan.length > 1 || attemptPlan[0] !== model) {
+    let lastFailure: RequestLLMError | null = null;
+    const triedFallbackModels: string[] = [];
+    for (const attemptModel of attemptPlan) {
+      const result = await requestLLMTextWithRetry(config, params, attemptModel);
+      if (result.ok) {
+        if (attemptModel === model) {
+          clearPrimaryModelFailures(config, model);
+        }
+        return result;
+      }
+      if (result.error.code === 'USER_ABORT') return result;
+      lastFailure = result.error;
+      if (attemptModel === model) {
+        recordPrimaryModelFailure(config, model);
+        if (!shouldRetryGatewayError(result.error)) return result;
+      } else {
+        triedFallbackModels.push(attemptModel);
+      }
+    }
+    return {
+      ok: false,
+      error: markFallbackTried(lastFailure, triedFallbackModels),
     };
   }
 
@@ -756,6 +905,43 @@ async function requestLLMWithImageOnce(
   }
 }
 
+async function requestLLMWithImageRetry(
+  config: ModelGatewayConfig,
+  params: RequestLLMWithImageParams,
+  model: string,
+): Promise<RequestLLMResult> {
+  const first = await requestLLMWithImageOnce(config, params, model);
+  if (first.ok) return first;
+  if (first.error.code === 'USER_ABORT') return first;
+  if (!shouldRetryGatewayError(first.error)) return first;
+
+  try {
+    await waitBeforeRetry(first.error.code === 'HTTP_429' || first.error.code === 'STREAM_ERROR' ? 1600 : 900, params.signal);
+  } catch {
+    return {
+      ok: false,
+      error: {
+        code: 'USER_ABORT',
+        message: USER_ABORT_MESSAGE,
+        retried: false,
+      },
+    };
+  }
+
+  const second = await requestLLMWithImageOnce(config, params, model);
+  if (second.ok) return second;
+  if (second.error.code === 'USER_ABORT') return second;
+
+  return {
+    ok: false,
+    error: {
+      code: second.error.code,
+      message: `${second.error.message} 已自动重试 1 次，但仍然失败。`,
+      retried: true,
+    },
+  };
+}
+
 export async function requestLLMWithImage(
   config: ModelGatewayConfig,
   params: RequestLLMWithImageParams,
@@ -769,6 +955,33 @@ export async function requestLLMWithImage(
         message: '未配置模型名称，请在设置或环境变量中补齐。',
         retried: false,
       },
+    };
+  }
+
+  const attemptPlan = modelAttemptPlan(config, model);
+  if (attemptPlan.length > 1 || attemptPlan[0] !== model) {
+    let lastFailure: RequestLLMError | null = null;
+    const triedFallbackModels: string[] = [];
+    for (const attemptModel of attemptPlan) {
+      const result = await requestLLMWithImageRetry(config, params, attemptModel);
+      if (result.ok) {
+        if (attemptModel === model) {
+          clearPrimaryModelFailures(config, model);
+        }
+        return result;
+      }
+      if (result.error.code === 'USER_ABORT') return result;
+      lastFailure = result.error;
+      if (attemptModel === model) {
+        recordPrimaryModelFailure(config, model);
+        if (!shouldRetryGatewayError(result.error)) return result;
+      } else {
+        triedFallbackModels.push(attemptModel);
+      }
+    }
+    return {
+      ok: false,
+      error: markFallbackTried(lastFailure, triedFallbackModels),
     };
   }
 
@@ -988,10 +1201,81 @@ async function requestLLMStreamOnce(
   }
 }
 
+async function requestLLMStreamWithRetry(
+  config: ModelGatewayConfig,
+  params: RequestLLMStreamParams,
+  model: string,
+): Promise<RequestLLMResult> {
+  const paramsWithModel = { ...params, model };
+  const first = await requestLLMStreamOnce(config, paramsWithModel);
+  if (first.ok) return first;
+  if (first.error.code === 'USER_ABORT') return first;
+  if (!shouldRetryGatewayError(first.error)) return first;
+
+  try {
+    await waitBeforeRetry(
+      first.error.code === 'HTTP_429' || /骞跺彂|闄愭祦/.test(first.error.message) ? 1600 : 900,
+      params.signal,
+    );
+  } catch {
+    return {
+      ok: false,
+      error: {
+        code: 'USER_ABORT',
+        message: USER_ABORT_MESSAGE,
+        retried: false,
+      },
+    };
+  }
+
+  const second = await requestLLMStreamOnce(config, paramsWithModel);
+  if (second.ok) return second;
+  if (second.error.code === 'USER_ABORT') return second;
+
+  return {
+    ok: false,
+    error: {
+      code: second.error.code,
+      message: `${second.error.message} 已自动重试 1 次，但仍然失败。`,
+      retried: true,
+    },
+  };
+}
+
 export async function requestLLMStream(
   config: ModelGatewayConfig,
   params: RequestLLMStreamParams,
 ): Promise<RequestLLMResult> {
+  const model = (params.model ?? config.model)?.trim();
+  if (model) {
+    const attemptPlan = modelAttemptPlan(config, model);
+    if (attemptPlan.length > 1 || attemptPlan[0] !== model) {
+      let lastFailure: RequestLLMError | null = null;
+      const triedFallbackModels: string[] = [];
+      for (const attemptModel of attemptPlan) {
+        const result = await requestLLMStreamWithRetry(config, params, attemptModel);
+        if (result.ok) {
+          if (attemptModel === model) {
+            clearPrimaryModelFailures(config, model);
+          }
+          return result;
+        }
+        if (result.error.code === 'USER_ABORT') return result;
+        lastFailure = result.error;
+        if (attemptModel === model) {
+          recordPrimaryModelFailure(config, model);
+          if (!shouldRetryGatewayError(result.error)) return result;
+        } else {
+          triedFallbackModels.push(attemptModel);
+        }
+      }
+      return {
+        ok: false,
+        error: markFallbackTried(lastFailure, triedFallbackModels),
+      };
+    }
+  }
+
   const first = await requestLLMStreamOnce(config, params);
   if (first.ok) return first;
   if (first.error.code === 'USER_ABORT') return first;

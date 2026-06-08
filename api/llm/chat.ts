@@ -58,6 +58,16 @@ const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_MODEL = 'gpt-5.5';
 const DEFAULT_MONTHLY_QUOTA = 20;
 const CHAT_COMPLETIONS_PATH = '/chat/completions';
+const PRIMARY_MODEL_FAILURE_WINDOW_MS = 5 * 60 * 1000;
+const PRIMARY_MODEL_COOLDOWN_MS = 10 * 60 * 1000;
+const PRIMARY_MODEL_FAILURE_THRESHOLD = 2;
+
+type ModelFailureState = {
+  hits: number[];
+  cooldownUntil: number;
+};
+
+const modelFailureState = new Map<string, ModelFailureState>();
 
 function env(name: string): string {
   return process.env[name]?.trim() ?? '';
@@ -66,6 +76,57 @@ function env(name: string): string {
 function providerEnv(provider: string, name: string): string {
   const prefix = provider === 'gpt' ? 'GPT' : provider === 'deepseek' ? 'DEEPSEEK' : '';
   return prefix ? env(`${prefix}_${name}`) : env(name);
+}
+
+function parseModelList(value: string): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of value.split(/[,;\n]/)) {
+    const trimmed = item.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(trimmed);
+  }
+  return result;
+}
+
+function fallbackModelsForPrimary(primaryModel: string): string[] {
+  const configured = parseModelList(providerEnv('gpt', 'LLM_FALLBACK_MODELS') || env('LLM_FALLBACK_MODELS'));
+  const inferred = primaryModel.trim().toLowerCase().includes('gpt-5.5') ? ['gpt-5.4'] : [];
+  const primaryKey = primaryModel.trim().toLowerCase();
+  return parseModelList([...configured, ...inferred].join(',')).filter((model) => model.toLowerCase() !== primaryKey);
+}
+
+function isPrimaryModelCoolingDown(primaryModel: string): boolean {
+  const state = modelFailureState.get(primaryModel.trim().toLowerCase());
+  return Boolean(state && state.cooldownUntil > Date.now());
+}
+
+function recordPrimaryModelFailure(primaryModel: string): void {
+  const key = primaryModel.trim().toLowerCase();
+  const now = Date.now();
+  const previous = modelFailureState.get(key);
+  const hits = [...(previous?.hits ?? []), now].filter((time) => now - time <= PRIMARY_MODEL_FAILURE_WINDOW_MS);
+  modelFailureState.set(key, {
+    hits,
+    cooldownUntil: hits.length >= PRIMARY_MODEL_FAILURE_THRESHOLD ? now + PRIMARY_MODEL_COOLDOWN_MS : previous?.cooldownUntil ?? 0,
+  });
+}
+
+function clearPrimaryModelFailures(primaryModel: string): void {
+  modelFailureState.delete(primaryModel.trim().toLowerCase());
+}
+
+function modelAttemptPlan(primaryModel: string): string[] {
+  const fallbacks = fallbackModelsForPrimary(primaryModel);
+  if (!fallbacks.length) return [primaryModel];
+  return isPrimaryModelCoolingDown(primaryModel) ? fallbacks : [primaryModel, ...fallbacks];
+}
+
+function shouldRetrySameProviderFallback(status: number): boolean {
+  return status === 429 || status >= 500;
 }
 
 function json(res: ServerResponse, status: number, payload: unknown): void {
@@ -294,11 +355,11 @@ function normalizeModel(model?: string, feature?: string): string {
   return configuredModelForFeature(feature) || model?.trim() || DEFAULT_MODEL;
 }
 
-function buildUpstreamBody(body: ChatRequestBody): Record<string, unknown> {
+function buildUpstreamBody(body: ChatRequestBody, modelOverride = ''): Record<string, unknown> {
   const maxTokens = body.max_tokens ?? body.maxOutputTokens;
   const upstreamBody: Record<string, unknown> = {
     messages: body.messages,
-    model: normalizeModel(body.model, body.feature),
+    model: modelOverride || normalizeModel(body.model, body.feature),
     stream: body.stream === true,
     temperature: typeof body.temperature === 'number' ? body.temperature : 0.35,
   };
@@ -421,7 +482,7 @@ async function refundQuota(serviceClient: AnySupabaseClient, userId: string, quo
   }
 }
 
-async function callUpstream(body: ChatRequestBody): Promise<Response> {
+async function callUpstream(body: ChatRequestBody, modelOverride = ''): Promise<Response> {
   const upstreamUrl = getUpstreamUrl();
   const apiKey = env('LLM_API_KEY');
   if (!upstreamUrl || !apiKey) {
@@ -437,12 +498,61 @@ async function callUpstream(body: ChatRequestBody): Promise<Response> {
         authorization: `Bearer ${apiKey}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify(buildUpstreamBody(body)),
+      body: JSON.stringify(buildUpstreamBody(body, modelOverride)),
       signal: controller.signal,
     });
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function callUpstreamWithModelFallback(
+  body: ChatRequestBody,
+  primaryModel: string,
+): Promise<{ response: Response; model: string }> {
+  const attempts = modelAttemptPlan(primaryModel);
+  let lastError: unknown = null;
+  for (let index = 0; index < attempts.length; index += 1) {
+    const attemptModel = attempts[index];
+    try {
+      const response = await callUpstream(body, attemptModel);
+      if (response.ok) {
+        if (attemptModel === primaryModel) clearPrimaryModelFailures(primaryModel);
+        return { response, model: attemptModel };
+      }
+      const hasNext = index < attempts.length - 1;
+      if (!hasNext || !shouldRetrySameProviderFallback(response.status)) {
+        return { response, model: attemptModel };
+      }
+      const failedText = await response.text();
+      if (attemptModel === primaryModel) recordPrimaryModelFailure(primaryModel);
+      console.warn(
+        'LLM primary model failed, retrying fallback model',
+        JSON.stringify({
+          status: response.status,
+          model: attemptModel,
+          fallbackModel: attempts[index + 1],
+          feature: body.feature?.trim() || 'llm-chat',
+          body: sanitizeError(failedText),
+        }),
+      );
+    } catch (error) {
+      lastError = error;
+      const hasNext = index < attempts.length - 1;
+      if (!hasNext) throw error;
+      if (attemptModel === primaryModel) recordPrimaryModelFailure(primaryModel);
+      console.warn(
+        'LLM primary model request failed, retrying fallback model',
+        JSON.stringify({
+          model: attemptModel,
+          fallbackModel: attempts[index + 1],
+          feature: body.feature?.trim() || 'llm-chat',
+          error: sanitizeError(error),
+        }),
+      );
+    }
+  }
+  throw lastError || new Error('LLM fallback failed.');
 }
 
 export default async function handler(req: IncomingMessage, res: ServerResponse) {
@@ -532,7 +642,9 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   }
 
   try {
-    const upstreamResponse = await callUpstream(body);
+    const upstreamAttempt = await callUpstreamWithModelFallback(body, model);
+    const upstreamResponse = upstreamAttempt.response;
+    const responseModel = upstreamAttempt.model;
     const rawText = await upstreamResponse.text();
     const outputChars = extractOutputChars(rawText);
     const isOk = upstreamResponse.ok;
@@ -542,7 +654,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       user_id: userId,
       project_id: body.projectId ?? null,
       feature,
-      model,
+      model: responseModel,
       input_chars: inputChars,
       output_chars: isOk ? outputChars : 0,
       estimated_tokens: estimateTokens(inputChars, isOk ? outputChars : 0),
@@ -556,7 +668,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         'LLM upstream failed',
         JSON.stringify({
           status: upstreamResponse.status,
-          model,
+          model: responseModel,
           feature,
           body: sanitizeError(rawText),
         }),

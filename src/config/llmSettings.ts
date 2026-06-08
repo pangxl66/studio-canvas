@@ -72,6 +72,20 @@ function envDeepModel(): string {
   return envValue('VITE_LLM_DEEP_MODEL') || envModel();
 }
 
+function parseModelList(value: string): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of value.split(/[,;\n]/)) {
+    const trimmed = item.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(trimmed);
+  }
+  return result;
+}
+
 function envMode(): LlmMode | null {
   return envValue('VITE_LLM_MODE') ? DEFAULT_LLM_MODE : null;
 }
@@ -103,6 +117,16 @@ function providerDefaultModel(provider: LlmProvider): string {
 
 function providerEnvValue(provider: LlmProvider, suffix: string): string {
   return envValue(`VITE_${providerPrefix(provider)}_LLM_${suffix}`);
+}
+
+function fallbackModelsForProvider(provider: LlmProvider, primaryModel: string): string[] {
+  const configured = parseModelList(
+    providerEnvValue(provider, 'FALLBACK_MODELS') || (providerUsesDefaultEnv(provider) ? envValue('VITE_LLM_FALLBACK_MODELS') : ''),
+  );
+  const inferred =
+    provider !== 'deepseek' && primaryModel.trim().toLowerCase().includes('gpt-5.5') ? ['gpt-5.4'] : [];
+  const primaryKey = primaryModel.trim().toLowerCase();
+  return parseModelList([...configured, ...inferred].join(',')).filter((model) => model.toLowerCase() !== primaryKey);
 }
 
 function providerUsesDefaultEnv(provider: LlmProvider): boolean {
@@ -181,7 +205,7 @@ function normalizeTimeoutMs(value: unknown): number {
 function normalizeModelName(model: string, fallback: string): string {
   const trimmed = model.trim();
   if (!trimmed) return fallback;
-  if (trimmed === 'gpt-5.3-codex-spark' || trimmed === 'gpt-5.4') return fallback;
+  if (trimmed === 'gpt-5.3-codex-spark') return fallback;
   return trimmed;
 }
 
@@ -247,6 +271,7 @@ export function getResolvedLlmGatewayConfig(): ModelGatewayConfig | null {
     baseUrl: forcedSaasProxyUrl ? undefined : baseUrl || undefined,
     apiKey: forcedSaasProxyUrl ? undefined : apiKey || undefined,
     model: deepModel,
+    fallbackModels: fallbackModelsForProvider(selectedProvider, deepModel),
     provider: selectedProvider,
     timeoutMs,
   };
@@ -276,6 +301,7 @@ export function getResolvedVisionLlmGatewayConfig(): ModelGatewayConfig | null {
     baseUrl: forcedSaasProxyUrl ? undefined : baseUrl || undefined,
     apiKey: forcedSaasProxyUrl ? undefined : apiKey || undefined,
     model: visionModel,
+    fallbackModels: fallbackModelsForProvider('gpt', visionModel),
     provider: 'gpt',
     timeoutMs,
   };
