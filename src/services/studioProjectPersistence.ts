@@ -61,6 +61,7 @@ const STUDIO_PROJECT_NODE_TYPES = new Set<StudioRFNode['type']>([
   'shotList',
   'storyboardFile',
   'imageNode',
+  'videoNode',
   'promptReview',
   'scriptInput',
   'scriptAnalyzer',

@@ -42,6 +42,7 @@ function nodeKindLabel(node: StudioRFNode): string {
   if (node.type === 'promptReview') return '提示词审核节点';
   if (node.type === 'storyboardFile') return '分镜表文件';
   if (node.type === 'imageNode') return '图片表格';
+  if (node.type === 'videoNode') return '视频节点';
   return node.data.label || '未知节点';
 }
 

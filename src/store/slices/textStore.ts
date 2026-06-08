@@ -28,6 +28,17 @@ type ImageReference = {
   summary?: string;
 };
 
+type VideoReference = {
+  nodeId: string;
+  label: string;
+  fileName: string;
+  frameDataUrl?: string;
+  durationSec?: number;
+  width?: number;
+  height?: number;
+  summary?: string;
+};
+
 function stripTextPolishWrapper(raw: string): string {
   let text = raw.replace(/^\uFEFF/, '').trim();
   const fenced = text.match(/^```(?:text|markdown|md)?\s*([\s\S]*?)\s*```$/i);
@@ -51,6 +62,24 @@ function connectedImageReferences(textId: string, nodes: StudioRFNode[], edges: 
       fileName: node.data.imageFileName?.trim() || '',
       imageDataUrl: node.data.imageDataUrl,
       summary: node.data.imageAnalysisSummary?.trim() || undefined,
+    }));
+}
+
+function connectedVideoReferences(textId: string, nodes: StudioRFNode[], edges: StudioState['edges']): VideoReference[] {
+  const incoming = edges.filter((edge) => edge.target === textId && (edge.targetHandle === 'in' || edge.targetHandle == null));
+  return incoming
+    .map((edge) => nodes.find((node) => node.id === edge.source))
+    .filter((node): node is StudioRFNode => Boolean(node))
+    .filter((node) => node.type === 'videoNode' && node.data.type === 'video_node')
+    .map((node) => ({
+      nodeId: node.id,
+      label: node.data.label?.trim() || '视频节点',
+      fileName: node.data.videoFileName?.trim() || '',
+      frameDataUrl: node.data.videoFrameDataUrl,
+      durationSec: typeof node.data.videoDurationSec === 'number' ? node.data.videoDurationSec : undefined,
+      width: typeof node.data.videoWidth === 'number' ? node.data.videoWidth : undefined,
+      height: typeof node.data.videoHeight === 'number' ? node.data.videoHeight : undefined,
+      summary: node.data.videoAnalysisSummary?.trim() || undefined,
     }));
 }
 
@@ -173,6 +202,39 @@ function buildImageAwareUserPrompt(sourceText: string, references: ImageReferenc
   ].join('\n');
 }
 
+function buildVideoAwareSystemPrompt(): string {
+  return [
+    '你是院线影视级视频画面分析与提示词整理导演。输入给你的视觉素材是一张视频抽帧联系表，通常包含 START / MID / END 三个时间点。',
+    '你的任务不是自由编故事，而是读取视频中的可见信息，并结合文本卡片内容或用户指令，生成一段可继续用于视频生成、分镜或导演沟通的中文描述。',
+    '必须覆盖：场景时间与地点氛围、画面构图、主要人物/物体/环境元素、角色站位或物体空间关系、相机景别、镜头运动或运动趋势、表演/动作节奏、影视级光影、色彩风格、质感与情绪。',
+    '如果三帧之间存在位移、景别变化、主体运动、焦点变化、光影变化，请明确推断运镜和调度；如果变化不明显，请说明画面更像固定机位或轻微运动。',
+    '文本卡片正文是已有描述；用户指令是本次调整要求。请在原有内容基础上补全视频画面事实，不要新增无关人物、地点、剧情反转或世界观。',
+    '输出纯中文正文，不要 JSON，不要 Markdown 表格，不要解释分析过程。结果要具体、可拍、可执行。',
+  ].join('\n');
+}
+
+function buildVideoAwareUserPrompt(sourceText: string, references: VideoReference[], instruction = ''): string {
+  const referenceLines = references.map((reference, index) => {
+    const name = reference.fileName || reference.label || '未命名视频';
+    const size = reference.width && reference.height ? `${reference.width} x ${reference.height}` : '未知分辨率';
+    const duration = typeof reference.durationSec === 'number' ? `${reference.durationSec.toFixed(1)} 秒` : '未知时长';
+    const summary = reference.summary ? `\n已有视频分析：${reference.summary}` : '';
+    return `视频${index + 1}：${name}；${size}；${duration}${summary}`;
+  });
+  return [
+    ...(instruction.trim() ? ['本次用户指令：', instruction.trim(), ''] : []),
+    '请根据随请求附带的视频抽帧联系表，分析视频的构图、元素、景别、运镜、动作/表演、光影和色彩。',
+    '如果文本卡片已有内容，请以它为基础进行补充和修正；如果文本很短或为空，请直接输出视频画面分析与可执行描述。',
+    '请先写清起始画面，再写中段/结尾体现出的运动变化或镜头趋势；不要把画面事实压缩得过短。',
+    '',
+    '视频参考：',
+    referenceLines.join('\n') || '未提供视频元信息。',
+    '',
+    '文本卡片已有内容：',
+    sourceText || '无',
+  ].join('\n');
+}
+
 export function createTextStoreSlice(
   set: StudioSet,
   get: StudioGet,
@@ -192,9 +254,18 @@ export function createTextStoreSlice(
       const imageRefs = connectedImageReferences(nodeId, get().nodes, get().edges);
       const primaryImage = imageRefs.find((reference) => reference.imageDataUrl);
       const hasImageContext = imageRefs.length > 0;
+      const videoRefs = connectedVideoReferences(nodeId, get().nodes, get().edges);
+      const primaryVideo = videoRefs.find((reference) => reference.frameDataUrl);
+      const hasVideoContext = videoRefs.length > 0;
 
-      if (!sourceText && !hasImageContext) {
+      if (!sourceText && !hasImageContext && !hasVideoContext) {
         get().pushMessage({ role: 'system', text: '文本卡片没有可润色的内容。', nodeId });
+        return;
+      }
+      if (hasVideoContext && !primaryVideo?.frameDataUrl) {
+        const message = '视频节点还没有完成抽帧，请等待缩略图生成后再提交。';
+        get().patchNodeData(nodeId, { generation_error: message }, true);
+        get().pushMessage({ role: 'system', text: message, nodeId });
         return;
       }
       const config = getResolvedLlmGatewayConfig();
@@ -216,7 +287,9 @@ export function createTextStoreSlice(
         {
           status: 'IN_PROGRESS',
           generation_error: undefined,
-          streaming_preview: hasImageContext
+          streaming_preview: hasVideoContext
+            ? 'LLM 正在读取连接的视频抽帧，并分析构图、元素、景别与运镜...'
+            : hasImageContext
             ? 'LLM 正在读取连接的图片节点，并生成影视级画面提示词...'
             : mode === 'simple'
               ? 'LLM 正在以简单模式轻量优化文本...\n\n完成后会自动写回正文。'
@@ -226,17 +299,35 @@ export function createTextStoreSlice(
       );
       get().pushMessage({
         role: 'broadcast',
-        text: hasImageContext ? '文本节点正在结合图片节点调用 LLM 生成影视级提示词。' : '文本节点正在调用 LLM 按剧本格式润色正文。',
+        text: hasVideoContext
+          ? '文本节点正在结合视频节点调用 LLM 分析构图、元素和运镜。'
+          : hasImageContext
+            ? '文本节点正在结合图片节点调用 LLM 生成影视级提示词。'
+            : '文本节点正在调用 LLM 按剧本格式润色正文。',
         nodeId,
       });
 
       try {
         const settings = getLlmSettingsFormDefaults();
-        const imageConfig = hasImageContext && primaryImage?.imageDataUrl ? getResolvedVisionLlmGatewayConfig() ?? config : config;
+        const hasVisionPayload = Boolean(primaryVideo?.frameDataUrl || primaryImage?.imageDataUrl);
+        const imageConfig = hasVisionPayload ? getResolvedVisionLlmGatewayConfig() ?? config : config;
         const textModel = mode === 'simple' ? config.model?.trim() : settings.deepModel?.trim();
-        const model = (hasImageContext && primaryImage?.imageDataUrl ? imageConfig.model : textModel)?.trim() || config.model?.trim();
+        const model = (hasVisionPayload ? imageConfig.model : textModel)?.trim() || config.model?.trim();
         const finalResult =
-          hasImageContext && primaryImage?.imageDataUrl
+          hasVideoContext && primaryVideo?.frameDataUrl
+            ? await requestLLMWithImage(imageConfig, {
+                model,
+                imageDataUrl: primaryVideo.frameDataUrl,
+                imageDetail: 'auto',
+                systemPrompt: buildVideoAwareSystemPrompt(),
+                userPrompt: buildVideoAwareUserPrompt(sourceText, videoRefs, instructionForPrompt),
+                temperature: 0.24,
+                jsonMode: false,
+                feature: 'video-text-analysis',
+                maxOutputTokens: 3000,
+                signal: controller.signal,
+              })
+            : hasImageContext && primaryImage?.imageDataUrl
             ? await requestLLMWithImage(imageConfig, {
                 model,
                 imageDataUrl: primaryImage.imageDataUrl,
@@ -332,15 +423,21 @@ export function createTextStoreSlice(
             raw_text: polished,
             generation_error: undefined,
             streaming_preview: undefined,
-            review_result: hasImageContext ? `已结合 ${imageRefs.length} 个图片节点生成影视级提示词。` : undefined,
+            review_result: hasVideoContext
+              ? `已结合 ${videoRefs.length} 个视频节点完成构图、元素和运镜分析。`
+              : hasImageContext
+                ? `已结合 ${imageRefs.length} 个图片节点生成影视级提示词。`
+                : undefined,
           },
           true,
         );
         get().pushMessage({
           role: 'broadcast',
-          text: hasImageContext
-            ? '文本节点已结合图片生成影视级提示词，并已写回正文。'
-            : `文本节点 LLM ${mode === 'simple' ? '简单优化' : '深度优化'}已完成，并已写回正文。`,
+          text: hasVideoContext
+            ? '文本节点已结合视频完成构图、元素和运镜分析，并已写回正文。'
+            : hasImageContext
+              ? '文本节点已结合图片生成影视级提示词，并已写回正文。'
+              : `文本节点 LLM ${mode === 'simple' ? '简单优化' : '深度优化'}已完成，并已写回正文。`,
           nodeId,
         });
       } finally {

@@ -105,6 +105,9 @@ export function normalizeRestoredStudioNode(node: StudioRFNode): StudioRFNode {
       },
     };
   }
+  if (safeNode.type === 'videoNode' && safeNode.data.type === 'video_node') {
+    return safeNode;
+  }
   if (safeNode.type === 'department' && safeNode.data.type === 'storyboard') {
     return {
       ...safeNode,

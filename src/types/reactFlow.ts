@@ -8,6 +8,7 @@ export type StudioRFNode =
   | Node<StudioNodeData, 'storyboardFile'>
   | Node<StudioNodeData, 'promptReview'>
   | Node<StudioNodeData, 'imageNode'>
+  | Node<StudioNodeData, 'videoNode'>
   | Node<StudioNodeData, 'scriptInput'>
   | Node<StudioNodeData, 'scriptAnalyzer'>
   | Node<StudioNodeData, 'scriptOutput'>;

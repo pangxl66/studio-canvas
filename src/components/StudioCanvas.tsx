@@ -38,6 +38,7 @@ import {
   DEPT_OUTPUT_HANDLE_ID,
 } from '@/components/DepartmentNode';
 import { ImageTableNode, IMAGE_NODE_OUTPUT_HANDLE_ID } from '@/components/ImageTableNode';
+import { VideoNode, VIDEO_NODE_OUTPUT_HANDLE_ID } from '@/components/VideoNode';
 import { PromptReviewNode } from '@/components/PromptReviewNode';
 import { StoryboardFileNode } from '@/components/StoryboardFileNode';
 import { ShotListNode } from '@/components/ShotListNode';
@@ -72,12 +73,14 @@ const nodeTypes: NodeTypes = {
   shotList: ShotListNode,
   storyboardFile: StoryboardFileNode,
   imageNode: ImageTableNode,
+  videoNode: VideoNode,
   promptReview: PromptReviewNode,
 };
 
 type CreateNodeKind =
   | 'text_node'
   | 'image_node'
+  | 'video_node'
   | 'storyboard_file_node'
   | 'prompt_review_node'
   | 'shot_list_node'
@@ -155,6 +158,15 @@ const PANE_GALLERY_ITEMS_BASE: NodeGalleryItem[] = [
     icon: '图',
   },
   {
+    id: 'video_node',
+    kind: 'video_node',
+    title: '视频节点',
+    subtitle: '上传视频并抽帧；连接到文本卡片后分析构图、元素和运镜。',
+    badge: '视频参考',
+    accentClass: 'node-picker__card--storyboard',
+    icon: '视',
+  },
+  {
     id: 'storyboard_file_node',
     kind: 'storyboard_file_node',
     title: '分镜表文件',
@@ -214,6 +226,7 @@ export function StudioCanvas() {
   const addDepartmentNode = useStudioStore((s) => s.addDepartmentNode);
   const addTextNode = useStudioStore((s) => s.addTextNode);
   const addImageNode = useStudioStore((s) => s.addImageNode);
+  const addVideoNode = useStudioStore((s) => s.addVideoNode);
   const addPromptReviewNode = useStudioStore((s) => s.addPromptReviewNode);
   const addStoryboardFileNode = useStudioStore((s) => s.addStoryboardFileNode);
   const addShotListNode = useStudioStore((s) => s.addShotListNode);
@@ -477,6 +490,12 @@ export function StudioCanvas() {
         focusNode(id, { openDetail: false });
         return;
       }
+      if (kind === 'video_node') {
+        id = addVideoNode(pos);
+        setPaneCreateMenu(null);
+        focusNode(id, { openDetail: false });
+        return;
+      }
       if (kind === 'prompt_review_node') {
         id = addPromptReviewNode(pos);
         setPaneCreateMenu(null);
@@ -503,6 +522,7 @@ export function StudioCanvas() {
       addDepartmentNode,
       addShotListNode,
       addImageNode,
+      addVideoNode,
       addPromptReviewNode,
       addStoryboardFileNode,
       addTextNode,
@@ -590,6 +610,34 @@ export function StudioCanvas() {
         return;
       }
 
+      if (file.type.startsWith('video/') || /\.(mp4|mov|m4v|webm|avi|mkv)$/i.test(file.name)) {
+        try {
+          const dataUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result ?? ''));
+            reader.onerror = () => reject(reader.error ?? new Error('视频读取失败'));
+            reader.readAsDataURL(file);
+          });
+          const videoNodeId = addVideoNode(flowPosition, {
+            videoDataUrl: dataUrl,
+            videoMimeType: file.type,
+            videoFileName: file.name,
+            label: file.name.replace(/\.[^.]+$/u, ''),
+          });
+          pushMessage({
+            role: 'system',
+            text: `已拖入视频“${file.name}”，连接到文本卡片后可分析构图、元素和运镜。`,
+            nodeId: videoNodeId,
+          });
+          focusNode(videoNodeId, { openDetail: false });
+        } catch (error) {
+          const message =
+            error instanceof Error && error.message.trim() ? error.message.trim() : '拖入失败：无法读取视频文件。';
+          pushMessage({ role: 'system', text: message });
+        }
+        return;
+      }
+
       if (!/\.(xlsx|xls)$/i.test(file.name)) return;
 
       try {
@@ -609,7 +657,7 @@ export function StudioCanvas() {
         pushMessage({ role: 'system', text: message });
       }
     },
-    [addImageNode, addShotListNode, focusNode, hydrateProject, pushMessage],
+    [addImageNode, addShotListNode, addVideoNode, focusNode, hydrateProject, pushMessage],
   );
 
   const handleCanvasDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
@@ -749,6 +797,12 @@ export function StudioCanvas() {
 
           if (a.type === 'imageNode' && b.type === 'textNode') {
             if (edge.sourceHandle != null && edge.sourceHandle !== IMAGE_NODE_OUTPUT_HANDLE_ID) return false;
+            if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
+            return true;
+          }
+
+          if (a.type === 'videoNode' && b.type === 'textNode') {
+            if (edge.sourceHandle != null && edge.sourceHandle !== VIDEO_NODE_OUTPUT_HANDLE_ID) return false;
             if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
             return true;
           }
@@ -910,6 +964,26 @@ export function StudioCanvas() {
                 }}
               >
                 创建图片节点
+              </button>
+              <button
+                type="button"
+                className="node-picker__btn"
+                onClick={() => {
+                  const p = nodePicker;
+                  const nid = completeConnectionMenuPick({
+                    fromNodeId: p.fromNodeId,
+                    fromHandleId: p.fromHandleId,
+                    fromHandleType: p.fromHandleType,
+                    pick: 'video_node',
+                    flowPosition: { x: p.flowX, y: p.flowY },
+                  });
+                  if (nid) {
+                    setNodePicker(null);
+                    focusNode(nid, { openDetail: false });
+                  }
+                }}
+              >
+                创建视频节点
               </button>
               {!HIDE_TEMPORARY_NODE_ENTRIES ? (
                 <button

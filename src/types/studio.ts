@@ -9,6 +9,7 @@ export type Department =
   | 'STORYBOARD_FILE'
   | 'PROMPT_REVIEW'
   | 'IMAGE'
+  | 'VIDEO'
   | 'SCRIPT_INPUT'
   | 'SCRIPT_SCENE'
   | 'SCRIPT_CHARACTER'
@@ -32,6 +33,7 @@ export type NodeKind =
   | 'storyboard_file_node'
   | 'prompt_review_node'
   | 'image_node'
+  | 'video_node'
   | 'script_input_node'
   | 'script_scene_node'
   | 'script_character_node'
@@ -269,6 +271,14 @@ export type StudioNodeData = {
   imageMimeType?: string;
   imageFileName?: string;
   imageAnalysisSummary?: string;
+  videoDataUrl?: string;
+  videoMimeType?: string;
+  videoFileName?: string;
+  videoFrameDataUrl?: string;
+  videoDurationSec?: number;
+  videoWidth?: number;
+  videoHeight?: number;
+  videoAnalysisSummary?: string;
   canvasWidth?: number;
   canvasHeight?: number;
   /**

@@ -35,7 +35,8 @@ function isPaneDropMenuHandle(
       nodeType === 'shotList' ||
       nodeType === 'storyboardFile' ||
       nodeType === 'promptReview' ||
-      nodeType === 'imageNode'
+      nodeType === 'imageNode' ||
+      nodeType === 'videoNode'
     );
   }
   if (handleType === 'source' && handleId === DEPT_INPUT_PULL_HANDLE_ID) {

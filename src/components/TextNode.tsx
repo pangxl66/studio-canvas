@@ -63,8 +63,24 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
       .filter((node): node is Node<StudioNodeData, 'imageNode'> => node != null && node.type === 'imageNode')
       .map((node) => ({
         id: node.id,
+        kind: 'image' as const,
         label: node.data.imageFileName?.trim() || node.data.label?.trim() || '图片参考',
         src: node.data.imageDataUrl,
+      }));
+  }, [edges, id, nodes]);
+  const videoReferences = useMemo(() => {
+    const incoming = edges.filter((edge) => {
+      if (edge.target !== id || (edge.targetHandle != null && edge.targetHandle !== TEXT_NODE_INPUT_HANDLE_ID)) return false;
+      return nodes.find((node) => node.id === edge.source)?.type === 'videoNode';
+    });
+    return incoming
+      .map((edge) => nodes.find((node) => node.id === edge.source))
+      .filter((node): node is Node<StudioNodeData, 'videoNode'> => node != null && node.type === 'videoNode')
+      .map((node) => ({
+        id: node.id,
+        kind: 'video' as const,
+        label: node.data.videoFileName?.trim() || node.data.label?.trim() || '视频参考',
+        src: node.data.videoFrameDataUrl,
       }));
   }, [edges, id, nodes]);
   const raw = data.raw_text ?? data.input ?? '';
@@ -83,7 +99,9 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
   const polishMode = data.text_polish_mode === 'simple' ? 'simple' : 'deep';
   const hasText = Boolean(displayText.trim());
   const hasImages = imageReferences.length > 0;
-  const canGenerate = busy || Boolean(instruction.trim() || draft.trim() || hasImages);
+  const hasVideos = videoReferences.length > 0;
+  const visualReferences = [...imageReferences, ...videoReferences];
+  const canGenerate = busy || Boolean(instruction.trim() || draft.trim() || hasImages || hasVideos);
   const editable = isEditing || busy;
 
   useEffect(() => {
@@ -311,15 +329,15 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
       ) : null}
       {selected ? (
         <div className="text-node__workspace nodrag nopan nowheel">
-          {hasImages ? (
+          {visualReferences.length > 0 ? (
             <div className="text-node__workspace-images">
-              {imageReferences.slice(0, 4).map((image, index) => (
-                <div className="text-node__workspace-thumb" key={image.id} title={image.label}>
-                  {image.src ? <img src={image.src} alt={image.label} /> : <span className="text-node__workspace-thumb-empty">图</span>}
+              {visualReferences.slice(0, 4).map((visual, index) => (
+                <div className="text-node__workspace-thumb" key={visual.id} title={visual.label}>
+                  {visual.src ? <img src={visual.src} alt={visual.label} /> : <span className="text-node__workspace-thumb-empty">{visual.kind === 'video' ? '视' : '图'}</span>}
                   <span className="text-node__workspace-thumb-count">{index + 1}</span>
                 </div>
               ))}
-              {imageReferences.length > 4 ? <span className="text-node__workspace-more">+{imageReferences.length - 4}</span> : null}
+              {visualReferences.length > 4 ? <span className="text-node__workspace-more">+{visualReferences.length - 4}</span> : null}
             </div>
           ) : null}
           <textarea

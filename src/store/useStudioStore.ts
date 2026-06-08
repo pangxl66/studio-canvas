@@ -94,6 +94,7 @@ type PipelineKind = Exclude<
   | 'storyboard_file_node'
   | 'prompt_review_node'
   | 'image_node'
+  | 'video_node'
   | 'script_input_node'
   | 'script_scene_node'
   | 'script_character_node'
@@ -122,6 +123,7 @@ function deptLabel(d: Department): string {
   if (d === 'STORYBOARD_FILE') return '分镜表文件';
   if (d === 'PROMPT_REVIEW') return '提示词审核';
   if (d === 'IMAGE') return '图片表格';
+  if (d === 'VIDEO') return '视频节点';
   if (d === 'SCRIPT_INPUT') return '剧本输入';
   if (d === 'SCRIPT_SCENE') return '场景拆解';
   if (d === 'SCRIPT_CHARACTER') return '角色分析';
@@ -179,6 +181,7 @@ function defaultNodeSize(node: StudioRFNode): { width: number; height: number } 
   if (node.type === 'textNode') return { width: 430, height: 420 };
   if (node.type === 'storyboardFile') return { width: 260, height: 190 };
   if (node.type === 'imageNode') return { width: 560, height: 390 };
+  if (node.type === 'videoNode') return { width: 620, height: 430 };
   if (node.type === 'scriptInput') return { width: 360, height: 360 };
   if (node.type === 'scriptAnalyzer') return { width: 300, height: 260 };
   if (node.type === 'scriptOutput') return { width: 360, height: 300 };
@@ -362,6 +365,41 @@ function makeImageNodeData(
     imageDataUrl: opts?.imageDataUrl,
     imageMimeType: opts?.imageMimeType,
     imageFileName: opts?.imageFileName,
+    assistant_preferences: '',
+    assistant_task_instruction: '',
+  };
+}
+
+function makeVideoNodeData(
+  id: string,
+  opts?: {
+    label?: string;
+    videoDataUrl?: string;
+    videoMimeType?: string;
+    videoFileName?: string;
+    videoFrameDataUrl?: string;
+    videoDurationSec?: number;
+    videoWidth?: number;
+    videoHeight?: number;
+  },
+): StudioNodeData {
+  return {
+    id,
+    type: 'video_node',
+    department: 'VIDEO',
+    status: 'APPROVED',
+    input: '',
+    output: null,
+    review_result: null,
+    version: 0,
+    label: opts?.label?.trim() || `视频节点 · ${id.slice(-4)}`,
+    videoDataUrl: opts?.videoDataUrl,
+    videoMimeType: opts?.videoMimeType,
+    videoFileName: opts?.videoFileName,
+    videoFrameDataUrl: opts?.videoFrameDataUrl,
+    videoDurationSec: opts?.videoDurationSec,
+    videoWidth: opts?.videoWidth,
+    videoHeight: opts?.videoHeight,
     assistant_preferences: '',
     assistant_task_instruction: '',
   };
@@ -551,6 +589,19 @@ export type StudioState = {
     position?: { x: number; y: number },
     opts?: { imageDataUrl?: string; imageMimeType?: string; imageFileName?: string; label?: string },
   ) => string;
+  addVideoNode: (
+    position?: { x: number; y: number },
+    opts?: {
+      videoDataUrl?: string;
+      videoMimeType?: string;
+      videoFileName?: string;
+      videoFrameDataUrl?: string;
+      videoDurationSec?: number;
+      videoWidth?: number;
+      videoHeight?: number;
+      label?: string;
+    },
+  ) => string;
   addShotListNode: (
     position?: { x: number; y: number },
     output?: StoryboardOutput | null,
@@ -592,6 +643,7 @@ export type StudioState = {
     pick:
       | 'text_node'
       | 'image_node'
+      | 'video_node'
       | 'storyboard_file_node'
       | 'prompt_review_node'
       | 'writing'
@@ -2306,8 +2358,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
     if (feedingDept) {
       const dk = from.data.type as PipelineKind;
-      if (p.pick === 'image_node') {
-        return pushErr('图片节点目前作为文本卡片的视觉参考使用，请连接到文本卡片。');
+      if (p.pick === 'image_node' || p.pick === 'video_node') {
+        return pushErr('图片/视频节点目前作为文本卡片的视觉参考使用，请连接到文本卡片。');
       }
       if (p.pick === 'text_node') {
         const id = uid('text');
@@ -2450,6 +2502,23 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         get().pushMessage({ role: 'system', text: '已创建图片节点，并接入当前文本卡片。', nodeId: id });
         return id;
       }
+      if (p.pick === 'video_node') {
+        const id = get().addVideoNode(upstreamPos);
+        set((s) => ({
+          edges: addEdge(
+            {
+              source: id,
+              target: from.id,
+              sourceHandle: 'out',
+              targetHandle: 'in',
+              animated: true,
+            },
+            s.edges,
+          ),
+        }));
+        get().pushMessage({ role: 'system', text: '已创建视频节点，并接入当前文本卡片。', nodeId: id });
+        return id;
+      }
       if (p.pick === 'prompt_review_node') {
         return pushErr('提示词审核节点只能从 Prompt 节点右侧 Output 创建。');
       }
@@ -2472,9 +2541,9 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     }
 
     if (fromDownstreamOut) {
-      if (from.type === 'imageNode') {
+      if (from.type === 'imageNode' || from.type === 'videoNode') {
         if (p.pick !== 'text_node') {
-          return pushErr('图片节点 Output 目前只支持连接到文本卡片。');
+          return pushErr('图片/视频节点 Output 目前只支持连接到文本卡片。');
         }
         const id = uid('text');
         const data = makeTextNodeData(id, '');
@@ -2500,13 +2569,13 @@ export const useStudioStore = create<StudioState>((set, get) => ({
             s.edges,
           ),
         }));
-        get().pushMessage({ role: 'system', text: '已创建文本卡片，并接入当前图片作为视觉参考。', nodeId: id });
+        get().pushMessage({ role: 'system', text: '已创建文本卡片，并接入当前视觉参考。', nodeId: id });
         return id;
       }
 
       if (from.type === 'textNode') {
-        if (p.pick === 'image_node') {
-          return pushErr('文本卡片 Output 暂不连接到图片节点；请把图片节点 Output 接到文本卡片 Input。');
+        if (p.pick === 'image_node' || p.pick === 'video_node') {
+          return pushErr('文本卡片 Output 暂不连接到图片/视频节点；请把图片/视频节点 Output 接到文本卡片 Input。');
         }
         if (p.pick === 'text_node') {
           const id = uid('text');
@@ -2623,8 +2692,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
       if (from.type === 'department') {
         const fk = from.data.type as PipelineKind;
-        if (p.pick === 'image_node') {
-          return pushErr('部门 Output 暂不连接到图片节点；请把图片节点 Output 接到文本卡片 Input。');
+        if (p.pick === 'image_node' || p.pick === 'video_node') {
+          return pushErr('部门 Output 暂不连接到图片/视频节点；请把图片/视频节点 Output 接到文本卡片 Input。');
         }
         if (p.pick === 'prompt_review_node') {
           if (fk !== 'prompt') {
@@ -2717,8 +2786,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       }
 
       if (from.type === 'promptReview') {
-        if (p.pick === 'image_node') {
-          return pushErr('提示词审核节点 Output 暂不连接到图片节点；请把图片节点 Output 接到文本卡片 Input。');
+        if (p.pick === 'image_node' || p.pick === 'video_node') {
+          return pushErr('提示词审核节点 Output 暂不连接到图片/视频节点；请把图片/视频节点 Output 接到文本卡片 Input。');
         }
         if (p.pick === 'text_node') {
           const id = uid('text');
@@ -3390,6 +3459,33 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     return id;
   },
 
+  addVideoNode: (position, opts) => {
+    pushUndoSnapshot(set);
+    const id = uid('video');
+    const pos = position ?? { x: 340, y: 260 };
+    const data = makeVideoNodeData(id, opts);
+    set((s) => ({
+      nodes: [
+        ...s.nodes,
+        {
+          id,
+          type: 'videoNode',
+          position: pos,
+          selected: false,
+          data,
+        },
+      ],
+    }));
+    get().pushMessage({
+      role: 'system',
+      text: opts?.videoDataUrl
+        ? '已创建视频节点。连接到文本卡片后，可分析构图、元素和运镜。'
+        : '已创建视频节点。上传视频后，可作为文本卡片的视频参考。',
+      nodeId: id,
+    });
+    return id;
+  },
+
   addShotListNode: (position, output, opts) => {
     pushUndoSnapshot(set);
     const id = uid('shotlist');
@@ -3870,6 +3966,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
               ? uid('storyfile')
               : sourceNode.type === 'imageNode'
                 ? uid('image')
+              : sourceNode.type === 'videoNode'
+                ? uid('video')
               : sourceNode.type === 'shotList'
                 ? uid('shotlist')
                 : uid('node');
