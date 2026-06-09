@@ -8105,8 +8105,131 @@ body,
   padding: 3px 7px;
 }
 
+.credit-status-pill__recharge {
+  border: 1px solid rgba(96, 165, 250, 0.3);
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.14);
+  color: #bfdbfe;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 900;
+  padding: 3px 7px;
+}
+
 .credit-status-pill__admin:hover {
   background: rgba(20, 184, 166, 0.24);
+}
+
+.credit-status-pill__recharge:hover {
+  background: rgba(37, 99, 235, 0.24);
+}
+
+.recharge-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 121;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.recharge-panel__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.7);
+  backdrop-filter: blur(8px);
+}
+
+.recharge-panel__card {
+  position: relative;
+  width: min(440px, calc(100vw - 32px));
+  border: 1px solid rgba(45, 212, 191, 0.34);
+  border-radius: 22px;
+  background: linear-gradient(145deg, rgba(15, 23, 42, 0.98), rgba(7, 16, 30, 0.96));
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.54);
+  color: #e2e8f0;
+  padding: 22px;
+}
+
+.recharge-panel__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.recharge-panel__header p {
+  margin: 0 0 6px;
+  color: #5eead4;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.22em;
+}
+
+.recharge-panel__header h2 {
+  margin: 0;
+  color: #f8fafc;
+  font-size: 24px;
+}
+
+.recharge-panel__header button,
+.recharge-panel__contact button {
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #e2e8f0;
+  cursor: pointer;
+  font-weight: 900;
+  padding: 10px 14px;
+}
+
+.recharge-panel__header button:hover,
+.recharge-panel__contact button:hover {
+  border-color: rgba(45, 212, 191, 0.4);
+  color: #ccfbf1;
+}
+
+.recharge-panel__contact {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px 12px;
+  align-items: center;
+  padding: 16px;
+  border: 1px solid rgba(45, 212, 191, 0.22);
+  border-radius: 16px;
+  background: rgba(2, 6, 23, 0.42);
+}
+
+.recharge-panel__contact span {
+  color: #99f6e4;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.recharge-panel__contact strong {
+  color: #f8fafc;
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+.recharge-panel__contact button {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+}
+
+.recharge-panel__note,
+.recharge-panel__message {
+  margin: 14px 0 0;
+  color: #bfdbfe;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.recharge-panel__message {
+  color: #99f6e4;
+  font-weight: 900;
 }
 
 .admin-credit-panel {

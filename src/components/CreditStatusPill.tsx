@@ -6,6 +6,8 @@ import {
   type CreditStatus,
 } from '@/services/creditService';
 
+const RECHARGE_WECHAT_ID = 'hb1115686003';
+
 function quotaText(status: CreditStatus | null): string {
   if (!status) {
     return '...';
@@ -23,6 +25,8 @@ export function CreditStatusPill() {
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [isAdminPanelOpen, setIsAdminPanelOpen] = useState(false);
+  const [isRechargePanelOpen, setIsRechargePanelOpen] = useState(false);
+  const [copyMessage, setCopyMessage] = useState('');
   const adminToolsEnabled = isAdminToolsEnabled() || Boolean(status?.isAdmin);
 
   const refresh = useCallback(async () => {
@@ -61,9 +65,29 @@ export function CreditStatusPill() {
     };
   }, [refresh]);
 
+  const copyRechargeWechatId = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(RECHARGE_WECHAT_ID);
+      setCopyMessage('已复制微信号。');
+    } catch {
+      setCopyMessage('复制失败，请手动复制微信号。');
+    }
+  }, []);
+
   return (
     <>
       <div className="credit-status-pill nodrag nopan" title={error || '当前账号剩余额度'}>
+        <button
+          className="credit-status-pill__recharge"
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            setCopyMessage('');
+            setIsRechargePanelOpen(true);
+          }}
+        >
+          充值
+        </button>
         <span className="credit-status-pill__label">额度</span>
         <strong>{isLoading && !status ? '...' : quotaText(status)}</strong>
         {adminToolsEnabled ? (
@@ -82,6 +106,31 @@ export function CreditStatusPill() {
       </div>
       {isAdminPanelOpen ? (
         <AdminCreditPanel onChanged={() => void refresh()} onClose={() => setIsAdminPanelOpen(false)} />
+      ) : null}
+      {isRechargePanelOpen ? (
+        <div className="recharge-panel nodrag nopan" role="dialog" aria-modal="true" aria-label="充值额度">
+          <div className="recharge-panel__backdrop" onClick={() => setIsRechargePanelOpen(false)} />
+          <section className="recharge-panel__card">
+            <header className="recharge-panel__header">
+              <div>
+                <p>RECHARGE</p>
+                <h2>充值额度</h2>
+              </div>
+              <button type="button" onClick={() => setIsRechargePanelOpen(false)}>
+                关闭
+              </button>
+            </header>
+            <div className="recharge-panel__contact">
+              <span>线上充值添加 VX</span>
+              <strong>{RECHARGE_WECHAT_ID}</strong>
+              <button type="button" onClick={() => void copyRechargeWechatId()}>
+                复制
+              </button>
+            </div>
+            <p className="recharge-panel__note">添加时请备注登录邮箱，方便核对额度。</p>
+            {copyMessage ? <p className="recharge-panel__message">{copyMessage}</p> : null}
+          </section>
+        </div>
       ) : null}
     </>
   );
