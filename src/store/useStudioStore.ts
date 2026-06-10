@@ -22,6 +22,7 @@ import { createProjectStoreSlice } from './slices/projectStore';
 import { createPromptReviewStoreSlice } from './slices/promptReviewStore';
 import { createShotListStoreSlice } from './slices/shotListStore';
 import { createTextStoreSlice } from './slices/textStore';
+import { createAiFilmmakingStoreSlice } from './slices/aiFilmmakingStore';
 import {
   cloneStoryboardOutput,
   tryParseStoryboardOutput,
@@ -95,6 +96,9 @@ type PipelineKind = Exclude<
   | 'prompt_review_node'
   | 'image_node'
   | 'video_node'
+  | 'film_character_node'
+  | 'film_storyboard_node'
+  | 'film_video_prompt_node'
   | 'script_input_node'
   | 'script_scene_node'
   | 'script_character_node'
@@ -124,6 +128,9 @@ function deptLabel(d: Department): string {
   if (d === 'PROMPT_REVIEW') return '提示词审核';
   if (d === 'IMAGE') return '图片表格';
   if (d === 'VIDEO') return '视频节点';
+  if (d === 'FILM_CHARACTER') return '角色设定';
+  if (d === 'FILM_STORYBOARD') return '影视分镜';
+  if (d === 'FILM_VIDEO_PROMPT') return '影视分镜提示词';
   if (d === 'SCRIPT_INPUT') return '剧本输入';
   if (d === 'SCRIPT_SCENE') return '场景拆解';
   if (d === 'SCRIPT_CHARACTER') return '角色分析';
@@ -182,6 +189,13 @@ function defaultNodeSize(node: StudioRFNode): { width: number; height: number } 
   if (node.type === 'storyboardFile') return { width: 260, height: 190 };
   if (node.type === 'imageNode') return { width: 560, height: 390 };
   if (node.type === 'videoNode') return { width: 620, height: 430 };
+  if (
+    node.type === 'aiFilmCharacter' ||
+    node.type === 'aiFilmStoryboard' ||
+    node.type === 'aiFilmVideoPrompt'
+  ) {
+    return { width: 430, height: 460 };
+  }
   if (node.type === 'scriptInput') return { width: 360, height: 360 };
   if (node.type === 'scriptAnalyzer') return { width: 300, height: 260 };
   if (node.type === 'scriptOutput') return { width: 360, height: 300 };
@@ -405,6 +419,37 @@ function makeVideoNodeData(
   };
 }
 
+type AiFilmNodeKind = 'film_character_node' | 'film_storyboard_node' | 'film_video_prompt_node';
+
+function aiFilmDepartmentForKind(kind: AiFilmNodeKind): Department {
+  if (kind === 'film_character_node') return 'FILM_CHARACTER';
+  if (kind === 'film_storyboard_node') return 'FILM_STORYBOARD';
+  return 'FILM_VIDEO_PROMPT';
+}
+
+function aiFilmLabelForKind(kind: AiFilmNodeKind): string {
+  if (kind === 'film_character_node') return '角色设定';
+  if (kind === 'film_storyboard_node') return '影视分镜';
+  return '影视分镜提示词';
+}
+
+function makeAiFilmNodeData(id: string, kind: AiFilmNodeKind): StudioNodeData {
+  return {
+    id,
+    type: kind,
+    department: aiFilmDepartmentForKind(kind),
+    status: 'APPROVED',
+    input: '',
+    raw_text: '',
+    output: null,
+    review_result: null,
+    version: 0,
+    label: `${aiFilmLabelForKind(kind)} · ${id.slice(-4)}`,
+    assistant_preferences: '',
+    assistant_task_instruction: '',
+  };
+}
+
 function makePromptReviewNodeData(id: string, text = '', positionLabel?: string): StudioNodeData {
   return {
     id,
@@ -602,6 +647,9 @@ export type StudioState = {
       label?: string;
     },
   ) => string;
+  addAiFilmCharacterNode: (position?: { x: number; y: number }) => string;
+  addAiFilmStoryboardNode: (position?: { x: number; y: number }) => string;
+  addAiFilmVideoPromptNode: (position?: { x: number; y: number }) => string;
   addShotListNode: (
     position?: { x: number; y: number },
     output?: StoryboardOutput | null,
@@ -646,6 +694,9 @@ export type StudioState = {
       | 'video_node'
       | 'storyboard_file_node'
       | 'prompt_review_node'
+      | 'film_character_node'
+      | 'film_storyboard_node'
+      | 'film_video_prompt_node'
       | 'writing'
       | 'storyboard'
       | 'prompt';
@@ -665,6 +716,7 @@ export type StudioState = {
    * `optimizeFromReviewed`閿涙矮绮庡鏌ユ閹焦瀵滈幇蹇氼潌鏉╊厺鍞妴鍌濇硶闁劑妫潏鎾冲弳娴犲秳绶风挧鏍︾瑐濞?APPROVED 鐠у嫪楠囬妴?
    */
   executeNodeTask: (nodeId: string, opts?: { optimizeFromReviewed?: boolean; force?: boolean }) => Promise<void>;
+  runAiFilmmakingNode: (nodeId: string) => Promise<void>;
   stopNodeTask: (nodeId?: string | null) => void;
   /** 瀹告煡妲勯敍姘殺閵嗗本澧界悰?AI 娴兼ê瀵查妴宥呭晸閸忋儱宸婚崣鎻掕嫙闁插秵鏌婄捄鎴濇喅瀹?+ 閹崵娲?*/
   runReviewedOptimization: (nodeId?: string | null) => void;
@@ -1098,6 +1150,10 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     stopTaskMessage: STOP_TASK_MESSAGE,
   }),
   ...createPromptReviewStoreSlice(set, get, {
+    activeTaskAbortControllers,
+    stopTaskMessage: STOP_TASK_MESSAGE,
+  }),
+  ...createAiFilmmakingStoreSlice(set, get, {
     activeTaskAbortControllers,
     stopTaskMessage: STOP_TASK_MESSAGE,
   }),
@@ -1838,6 +1894,9 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         target.data.type !== 'shot_list_node' &&
         target.data.type !== 'storyboard_file_node' &&
         target.data.type !== 'prompt_review_node' &&
+        target.data.type !== 'film_character_node' &&
+        target.data.type !== 'film_storyboard_node' &&
+        target.data.type !== 'film_video_prompt_node' &&
         target.data.type !== 'script_input_node' &&
         target.data.type !== 'script_scene_node' &&
         target.data.type !== 'script_character_node' &&
@@ -2344,6 +2403,37 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       }
     };
 
+    const isAiFilmPick = (
+      pick: typeof p.pick,
+    ): pick is 'film_character_node' | 'film_storyboard_node' | 'film_video_prompt_node' =>
+      pick === 'film_character_node' ||
+      pick === 'film_storyboard_node' ||
+      pick === 'film_video_prompt_node';
+
+    const addAiFilmNodeForPick = (
+      pick: 'film_character_node' | 'film_storyboard_node' | 'film_video_prompt_node',
+      position: { x: number; y: number },
+    ) => {
+      if (pick === 'film_character_node') return get().addAiFilmCharacterNode(position);
+      if (pick === 'film_storyboard_node') return get().addAiFilmStoryboardNode(position);
+      return get().addAiFilmVideoPromptNode(position);
+    };
+
+    const connectToAiFilmNode = (sourceId: string, targetId: string, sourceHandle = 'out') => {
+      set((s) => ({
+        edges: addEdge(
+          {
+            source: sourceId,
+            target: targetId,
+            sourceHandle,
+            targetHandle: 'in',
+            animated: true,
+          },
+          s.edges,
+        ),
+      }));
+    };
+
     const INPUT_PULL = 'input-pull';
 
     const feedingDept =
@@ -2352,14 +2442,75 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
     const feedingText = from.type === 'textNode' && hid === 'in' && ht === 'target';
 
+    const feedingAiFilm =
+      (from.type === 'aiFilmCharacter' ||
+        from.type === 'aiFilmStoryboard' ||
+        from.type === 'aiFilmVideoPrompt') &&
+      hid === 'in' &&
+      ht === 'target';
+
     const fromDownstreamOut =
       ht === 'source' &&
       (hid === 'out' || (from.type === 'shotList' && isShotListItemOutputHandleId(hid)));
+
+    if (feedingAiFilm) {
+      if (p.pick === 'text_node') {
+        const id = uid('text');
+        const data = makeTextNodeData(id, '');
+        set((s) => ({
+          nodes: [
+            ...s.nodes,
+            {
+              id,
+              type: 'textNode',
+              position: upstreamPos,
+              selected: false,
+              data,
+            },
+          ],
+          edges: addEdge(
+            {
+              source: id,
+              target: from.id,
+              sourceHandle: 'out',
+              targetHandle: 'in',
+              animated: true,
+            },
+            s.edges,
+          ),
+        }));
+        get().pushMessage({ role: 'system', text: '已创建文本卡片，并接入当前新模式节点。', nodeId: id });
+        return id;
+      }
+      if (p.pick === 'image_node') {
+        if (from.type === 'aiFilmStoryboard') {
+          return pushErr('影视分镜节点主要读取文本；如要读取九宫格图，请连接到影视分镜提示词节点。');
+        }
+        const id = get().addImageNode(upstreamPos);
+        connectToAiFilmNode(id, from.id, 'out');
+        return id;
+      }
+      if (
+        (p.pick === 'film_character_node' || p.pick === 'film_storyboard_node') &&
+        from.type === 'aiFilmVideoPrompt'
+      ) {
+        const id = addAiFilmNodeForPick(p.pick, upstreamPos);
+        connectToAiFilmNode(id, from.id, 'out');
+        return id;
+      }
+      if (isAiFilmPick(p.pick)) {
+        return pushErr('当前新模式节点 Input 不支持这种上游新模式组合。');
+      }
+      return pushErr('当前新模式节点 Input 建议接入文本、图片、角色设定或影视分镜节点。');
+    }
 
     if (feedingDept) {
       const dk = from.data.type as PipelineKind;
       if (p.pick === 'image_node' || p.pick === 'video_node') {
         return pushErr('图片/视频节点目前作为文本卡片的视觉参考使用，请连接到文本卡片。');
+      }
+      if (isAiFilmPick(p.pick)) {
+        return pushErr('AI Filmmaking 新模式节点请从文本、图片或新模式节点 Output 创建。');
       }
       if (p.pick === 'text_node') {
         const id = uid('text');
@@ -2439,6 +2590,23 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     }
 
     if (feedingText) {
+      if (isAiFilmPick(p.pick)) {
+        const id = addAiFilmNodeForPick(p.pick, upstreamPos);
+        set((s) => ({
+          edges: addEdge(
+            {
+              source: id,
+              target: from.id,
+              sourceHandle: 'out',
+              targetHandle: 'in',
+              animated: true,
+            },
+            s.edges,
+          ),
+        }));
+        syncTextIn(from.id);
+        return id;
+      }
       if (p.pick === 'text_node') {
         const id = uid('text');
         const data = makeTextNodeData(id, '');
@@ -2542,6 +2710,18 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
     if (fromDownstreamOut) {
       if (from.type === 'imageNode' || from.type === 'videoNode') {
+        if (from.type === 'imageNode' && (p.pick === 'film_character_node' || p.pick === 'film_video_prompt_node')) {
+          const id = addAiFilmNodeForPick(p.pick, downstreamPos);
+          connectToAiFilmNode(from.id, id, 'out');
+          return id;
+        }
+        if (isAiFilmPick(p.pick)) {
+          return pushErr(
+            from.type === 'imageNode'
+              ? '图片节点可连接到角色设定或影视分镜提示词节点。'
+              : '视频节点请先连接到文本卡片，再由文本卡片连接新模式提示词节点。',
+          );
+        }
         if (p.pick !== 'text_node') {
           return pushErr('图片/视频节点 Output 目前只支持连接到文本卡片。');
         }
@@ -2576,6 +2756,11 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       if (from.type === 'textNode') {
         if (p.pick === 'image_node' || p.pick === 'video_node') {
           return pushErr('文本卡片 Output 暂不连接到图片/视频节点；请把图片/视频节点 Output 接到文本卡片 Input。');
+        }
+        if (isAiFilmPick(p.pick)) {
+          const id = addAiFilmNodeForPick(p.pick, downstreamPos);
+          connectToAiFilmNode(from.id, id, 'out');
+          return id;
         }
         if (p.pick === 'text_node') {
           const id = uid('text');
@@ -2632,6 +2817,9 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
       if (from.type === 'shotList') {
         if (from.data.type !== 'shot_list_node') return pushErr('当前镜头表节点类型不支持该操作。');
+        if (isAiFilmPick(p.pick)) {
+          return pushErr('镜头表暂不直接接入 AI Filmmaking 新模式，请先转成文本卡片。');
+        }
         if (p.pick !== 'prompt') {
           return pushErr('镜头表节点的整表 Output 或逐镜头 Output 只能连接到 Prompt 节点。');
         }
@@ -2665,6 +2853,9 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       }
 
       if (from.type === 'storyboardFile') {
+        if (isAiFilmPick(p.pick)) {
+          return pushErr('分镜表文件暂不直接接入 AI Filmmaking 新模式，请先转成文本卡片。');
+        }
         if (p.pick !== 'prompt') {
           return pushErr('分镜表文件节点的 Output 只能连接到 Prompt 节点。');
         }
@@ -2694,6 +2885,14 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         const fk = from.data.type as PipelineKind;
         if (p.pick === 'image_node' || p.pick === 'video_node') {
           return pushErr('部门 Output 暂不连接到图片/视频节点；请把图片/视频节点 Output 接到文本卡片 Input。');
+        }
+        if (isAiFilmPick(p.pick)) {
+          if (p.pick === 'film_character_node') {
+            return pushErr('角色设定节点建议连接图片或文本卡片，不直接接部门 Output。');
+          }
+          const id = addAiFilmNodeForPick(p.pick, downstreamPos);
+          connectToAiFilmNode(from.id, id, DEPT_OUTPUT_HANDLE_ID);
+          return id;
         }
         if (p.pick === 'prompt_review_node') {
           if (fk !== 'prompt') {
@@ -2789,6 +2988,14 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         if (p.pick === 'image_node' || p.pick === 'video_node') {
           return pushErr('提示词审核节点 Output 暂不连接到图片/视频节点；请把图片/视频节点 Output 接到文本卡片 Input。');
         }
+        if (p.pick === 'film_video_prompt_node') {
+          const id = addAiFilmNodeForPick(p.pick, downstreamPos);
+          connectToAiFilmNode(from.id, id, DEPT_OUTPUT_HANDLE_ID);
+          return id;
+        }
+        if (p.pick === 'film_character_node' || p.pick === 'film_storyboard_node') {
+          return pushErr('提示词审核节点 Output 建议连接到影视分镜提示词节点。');
+        }
         if (p.pick === 'text_node') {
           const id = uid('text');
           const data = makeTextNodeData(id, '');
@@ -2836,6 +3043,50 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           return id;
         }
         return pushErr('提示词审核节点 Output 目前只支持继续接文本卡片或审核节点。');
+      }
+
+      if (
+        from.type === 'aiFilmCharacter' ||
+        from.type === 'aiFilmStoryboard' ||
+        from.type === 'aiFilmVideoPrompt'
+      ) {
+        if (p.pick === 'text_node') {
+          const id = uid('text');
+          const data = makeTextNodeData(id, '');
+          set((s) => ({
+            nodes: [
+              ...s.nodes,
+              {
+                id,
+                type: 'textNode',
+                position: downstreamPos,
+                selected: false,
+                data,
+              },
+            ],
+            edges: addEdge(
+              {
+                source: from.id,
+                target: id,
+                sourceHandle: 'out',
+                targetHandle: 'in',
+                animated: true,
+              },
+              s.edges,
+            ),
+          }));
+          syncTextIn(id);
+          return id;
+        }
+        if (p.pick === 'film_video_prompt_node' && from.type !== 'aiFilmVideoPrompt') {
+          const id = addAiFilmNodeForPick(p.pick, downstreamPos);
+          connectToAiFilmNode(from.id, id, 'out');
+          return id;
+        }
+        if (isAiFilmPick(p.pick)) {
+          return pushErr('新模式节点 Output 目前只支持接文本卡片，或由角色设定/影视分镜接入影视分镜提示词。');
+        }
+        return pushErr('新模式节点 Output 暂不直接连接旧部门节点。');
       }
     }
 
@@ -3481,6 +3732,81 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       text: opts?.videoDataUrl
         ? '已创建视频节点。连接到文本卡片后，可分析构图、元素和运镜。'
         : '已创建视频节点。上传视频后，可作为文本卡片的视频参考。',
+      nodeId: id,
+    });
+    return id;
+  },
+
+  addAiFilmCharacterNode: (position) => {
+    pushUndoSnapshot(set);
+    const id = uid('filmchar');
+    const pos = position ?? { x: 420, y: 260 };
+    const data = makeAiFilmNodeData(id, 'film_character_node');
+    set((s) => ({
+      nodes: [
+        ...s.nodes,
+        {
+          id,
+          type: 'aiFilmCharacter',
+          position: pos,
+          selected: false,
+          data,
+        },
+      ],
+    }));
+    get().pushMessage({
+      role: 'system',
+      text: '已创建角色设定节点。连接图片或文本后，点击生成角色设定。',
+      nodeId: id,
+    });
+    return id;
+  },
+
+  addAiFilmStoryboardNode: (position) => {
+    pushUndoSnapshot(set);
+    const id = uid('filmstory');
+    const pos = position ?? { x: 520, y: 300 };
+    const data = makeAiFilmNodeData(id, 'film_storyboard_node');
+    set((s) => ({
+      nodes: [
+        ...s.nodes,
+        {
+          id,
+          type: 'aiFilmStoryboard',
+          position: pos,
+          selected: false,
+          data,
+        },
+      ],
+    }));
+    get().pushMessage({
+      role: 'system',
+      text: '已创建影视分镜节点。连接文本节点后，可生成九宫格分镜提示词。',
+      nodeId: id,
+    });
+    return id;
+  },
+
+  addAiFilmVideoPromptNode: (position) => {
+    pushUndoSnapshot(set);
+    const id = uid('filmvideo');
+    const pos = position ?? { x: 620, y: 340 };
+    const data = makeAiFilmNodeData(id, 'film_video_prompt_node');
+    set((s) => ({
+      nodes: [
+        ...s.nodes,
+        {
+          id,
+          type: 'aiFilmVideoPrompt',
+          position: pos,
+          selected: false,
+          data,
+        },
+      ],
+    }));
+    get().pushMessage({
+      role: 'system',
+      text: '已创建影视分镜提示词节点。连接文本、角色设定、分镜或图片后会自动识别 A/B/C 模式。',
       nodeId: id,
     });
     return id;

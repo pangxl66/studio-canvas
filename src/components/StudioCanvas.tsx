@@ -39,6 +39,11 @@ import {
 } from '@/components/DepartmentNode';
 import { ImageTableNode, IMAGE_NODE_OUTPUT_HANDLE_ID } from '@/components/ImageTableNode';
 import { VideoNode, VIDEO_NODE_OUTPUT_HANDLE_ID } from '@/components/VideoNode';
+import {
+  AiFilmCharacterNode,
+  AiFilmStoryboardNode,
+  AiFilmVideoPromptNode,
+} from '@/components/AiFilmmakingNode';
 import { PromptReviewNode } from '@/components/PromptReviewNode';
 import { StoryboardFileNode } from '@/components/StoryboardFileNode';
 import { ShotListNode } from '@/components/ShotListNode';
@@ -58,6 +63,7 @@ import {
   setActiveStudioProjectRef,
 } from '@/services/studioProjectPersistence';
 import { useStudioStore } from '@/store/useStudioStore';
+import { FILM_INPUT_HANDLE_ID, FILM_OUTPUT_HANDLE_ID } from '@/store/slices/aiFilmmakingStore';
 import type { StudioRFNode } from '@/types/reactFlow';
 import { isDeprecatedScriptFlowNode, removeDeprecatedScriptNodes } from '@/utils/deprecatedScriptNodes';
 import { parseStoryboardWorkbookFile } from '@/utils/storyboardWorkbook';
@@ -74,6 +80,9 @@ const nodeTypes: NodeTypes = {
   storyboardFile: StoryboardFileNode,
   imageNode: ImageTableNode,
   videoNode: VideoNode,
+  aiFilmCharacter: AiFilmCharacterNode,
+  aiFilmStoryboard: AiFilmStoryboardNode,
+  aiFilmVideoPrompt: AiFilmVideoPromptNode,
   promptReview: PromptReviewNode,
 };
 
@@ -81,6 +90,9 @@ type CreateNodeKind =
   | 'text_node'
   | 'image_node'
   | 'video_node'
+  | 'film_character_node'
+  | 'film_storyboard_node'
+  | 'film_video_prompt_node'
   | 'storyboard_file_node'
   | 'prompt_review_node'
   | 'shot_list_node'
@@ -167,6 +179,33 @@ const PANE_GALLERY_ITEMS_BASE: NodeGalleryItem[] = [
     icon: '视',
   },
   {
+    id: 'film_character_node',
+    kind: 'film_character_node',
+    title: '角色设定',
+    subtitle: '连接图片或文本，按技能规范生成角色参考表提示词。',
+    badge: '新模式',
+    accentClass: 'node-picker__card--film',
+    icon: '角',
+  },
+  {
+    id: 'film_storyboard_node',
+    kind: 'film_storyboard_node',
+    title: '影视分镜',
+    subtitle: '读取文本内容，生成九宫格分镜图提示词。',
+    badge: '新模式',
+    accentClass: 'node-picker__card--film',
+    icon: '九',
+  },
+  {
+    id: 'film_video_prompt_node',
+    kind: 'film_video_prompt_node',
+    title: '分镜提示词',
+    subtitle: '自动识别 A/B/C 输入模式，生成 Seedance 视频提示词。',
+    badge: '新模式',
+    accentClass: 'node-picker__card--film',
+    icon: '影',
+  },
+  {
     id: 'storyboard_file_node',
     kind: 'storyboard_file_node',
     title: '分镜表文件',
@@ -227,6 +266,9 @@ export function StudioCanvas() {
   const addTextNode = useStudioStore((s) => s.addTextNode);
   const addImageNode = useStudioStore((s) => s.addImageNode);
   const addVideoNode = useStudioStore((s) => s.addVideoNode);
+  const addAiFilmCharacterNode = useStudioStore((s) => s.addAiFilmCharacterNode);
+  const addAiFilmStoryboardNode = useStudioStore((s) => s.addAiFilmStoryboardNode);
+  const addAiFilmVideoPromptNode = useStudioStore((s) => s.addAiFilmVideoPromptNode);
   const addPromptReviewNode = useStudioStore((s) => s.addPromptReviewNode);
   const addStoryboardFileNode = useStudioStore((s) => s.addStoryboardFileNode);
   const addShotListNode = useStudioStore((s) => s.addShotListNode);
@@ -496,6 +538,24 @@ export function StudioCanvas() {
         focusNode(id, { openDetail: false });
         return;
       }
+      if (kind === 'film_character_node') {
+        id = addAiFilmCharacterNode(pos);
+        setPaneCreateMenu(null);
+        focusNode(id, { openDetail: false });
+        return;
+      }
+      if (kind === 'film_storyboard_node') {
+        id = addAiFilmStoryboardNode(pos);
+        setPaneCreateMenu(null);
+        focusNode(id, { openDetail: false });
+        return;
+      }
+      if (kind === 'film_video_prompt_node') {
+        id = addAiFilmVideoPromptNode(pos);
+        setPaneCreateMenu(null);
+        focusNode(id, { openDetail: false });
+        return;
+      }
       if (kind === 'prompt_review_node') {
         id = addPromptReviewNode(pos);
         setPaneCreateMenu(null);
@@ -521,6 +581,9 @@ export function StudioCanvas() {
     [
       addDepartmentNode,
       addShotListNode,
+      addAiFilmCharacterNode,
+      addAiFilmStoryboardNode,
+      addAiFilmVideoPromptNode,
       addImageNode,
       addVideoNode,
       addPromptReviewNode,
@@ -770,6 +833,17 @@ export function StudioCanvas() {
             return true;
           }
 
+          if (
+            a.type === 'textNode' &&
+            (b.type === 'aiFilmCharacter' ||
+              b.type === 'aiFilmStoryboard' ||
+              b.type === 'aiFilmVideoPrompt')
+          ) {
+            if (edge.sourceHandle != null && edge.sourceHandle !== TEXT_NODE_OUTPUT_HANDLE_ID) return false;
+            if (edge.targetHandle != null && edge.targetHandle !== FILM_INPUT_HANDLE_ID) return false;
+            return true;
+          }
+
           if (a.type === 'department' && b.type === 'textNode') {
             if (edge.sourceHandle != null && edge.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) return false;
             if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
@@ -801,8 +875,34 @@ export function StudioCanvas() {
             return true;
           }
 
+          if (a.type === 'imageNode' && (b.type === 'aiFilmCharacter' || b.type === 'aiFilmVideoPrompt')) {
+            if (edge.sourceHandle != null && edge.sourceHandle !== IMAGE_NODE_OUTPUT_HANDLE_ID) return false;
+            if (edge.targetHandle != null && edge.targetHandle !== FILM_INPUT_HANDLE_ID) return false;
+            return true;
+          }
+
           if (a.type === 'videoNode' && b.type === 'textNode') {
             if (edge.sourceHandle != null && edge.sourceHandle !== VIDEO_NODE_OUTPUT_HANDLE_ID) return false;
+            if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
+            return true;
+          }
+
+          if (
+            (a.type === 'aiFilmCharacter' || a.type === 'aiFilmStoryboard') &&
+            b.type === 'aiFilmVideoPrompt'
+          ) {
+            if (edge.sourceHandle != null && edge.sourceHandle !== FILM_OUTPUT_HANDLE_ID) return false;
+            if (edge.targetHandle != null && edge.targetHandle !== FILM_INPUT_HANDLE_ID) return false;
+            return true;
+          }
+
+          if (
+            (a.type === 'aiFilmCharacter' ||
+              a.type === 'aiFilmStoryboard' ||
+              a.type === 'aiFilmVideoPrompt') &&
+            b.type === 'textNode'
+          ) {
+            if (edge.sourceHandle != null && edge.sourceHandle !== FILM_OUTPUT_HANDLE_ID) return false;
             if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
             return true;
           }
@@ -985,6 +1085,66 @@ export function StudioCanvas() {
               >
                 创建视频节点
               </button>
+              <button
+                type="button"
+                className="node-picker__btn"
+                onClick={() => {
+                  const p = nodePicker;
+                  const nid = completeConnectionMenuPick({
+                    fromNodeId: p.fromNodeId,
+                    fromHandleId: p.fromHandleId,
+                    fromHandleType: p.fromHandleType,
+                    pick: 'film_character_node',
+                    flowPosition: { x: p.flowX, y: p.flowY },
+                  });
+                  if (nid) {
+                    setNodePicker(null);
+                    focusNode(nid, { openDetail: false });
+                  }
+                }}
+              >
+                创建角色设定
+              </button>
+              <button
+                type="button"
+                className="node-picker__btn"
+                onClick={() => {
+                  const p = nodePicker;
+                  const nid = completeConnectionMenuPick({
+                    fromNodeId: p.fromNodeId,
+                    fromHandleId: p.fromHandleId,
+                    fromHandleType: p.fromHandleType,
+                    pick: 'film_storyboard_node',
+                    flowPosition: { x: p.flowX, y: p.flowY },
+                  });
+                  if (nid) {
+                    setNodePicker(null);
+                    focusNode(nid, { openDetail: false });
+                  }
+                }}
+              >
+                创建影视分镜
+              </button>
+              <button
+                type="button"
+                className="node-picker__btn"
+                onClick={() => {
+                  const p = nodePicker;
+                  const nid = completeConnectionMenuPick({
+                    fromNodeId: p.fromNodeId,
+                    fromHandleId: p.fromHandleId,
+                    fromHandleType: p.fromHandleType,
+                    pick: 'film_video_prompt_node',
+                    flowPosition: { x: p.flowX, y: p.flowY },
+                  });
+                  if (nid) {
+                    setNodePicker(null);
+                    focusNode(nid, { openDetail: false });
+                  }
+                }}
+              >
+                创建分镜提示词
+              </button>
               {!HIDE_TEMPORARY_NODE_ENTRIES ? (
                 <button
                   type="button"
@@ -1144,7 +1304,7 @@ function NodeGalleryMenu({
   onPick: (kind: CreateNodeKind) => void;
 }) {
   const orbitItems = items.filter((item): item is NodeGalleryItem & { kind: CreateNodeKind } => Boolean(item.kind));
-  const radius = 84;
+  const radius = orbitItems.length > 8 ? 112 : 84;
   const angleStep = 360 / Math.max(orbitItems.length, 1);
 
   return (

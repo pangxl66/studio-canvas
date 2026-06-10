@@ -9,6 +9,9 @@ export type StudioRFNode =
   | Node<StudioNodeData, 'promptReview'>
   | Node<StudioNodeData, 'imageNode'>
   | Node<StudioNodeData, 'videoNode'>
+  | Node<StudioNodeData, 'aiFilmCharacter'>
+  | Node<StudioNodeData, 'aiFilmStoryboard'>
+  | Node<StudioNodeData, 'aiFilmVideoPrompt'>
   | Node<StudioNodeData, 'scriptInput'>
   | Node<StudioNodeData, 'scriptAnalyzer'>
   | Node<StudioNodeData, 'scriptOutput'>;

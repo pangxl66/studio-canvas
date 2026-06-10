@@ -36,14 +36,23 @@ function isPaneDropMenuHandle(
       nodeType === 'storyboardFile' ||
       nodeType === 'promptReview' ||
       nodeType === 'imageNode' ||
-      nodeType === 'videoNode'
+      nodeType === 'videoNode' ||
+      nodeType === 'aiFilmCharacter' ||
+      nodeType === 'aiFilmStoryboard' ||
+      nodeType === 'aiFilmVideoPrompt'
     );
   }
   if (handleType === 'source' && handleId === DEPT_INPUT_PULL_HANDLE_ID) {
     return nodeType === 'department';
   }
   if (handleType === 'target' && handleId === 'in') {
-    return nodeType === 'textNode' || nodeType === 'department';
+    return (
+      nodeType === 'textNode' ||
+      nodeType === 'department' ||
+      nodeType === 'aiFilmCharacter' ||
+      nodeType === 'aiFilmStoryboard' ||
+      nodeType === 'aiFilmVideoPrompt'
+    );
   }
   return false;
 }
