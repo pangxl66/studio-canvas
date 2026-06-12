@@ -5,10 +5,12 @@ import {
   buildSeedanceVideoUserPrompt,
   buildStoryboardGridUserPrompt,
   stripAiFilmmakingPromptWrapper,
+  type AiFilmStoryboardSkillPrompt,
   type AiFilmmakingPromptNodeKind,
   type AiFilmmakingSourceSummary,
   type AiFilmmakingVideoMode,
 } from '@/services/aiFilmmakingPrompts';
+import { DEFAULT_STORYBOARD_SKILL_ID, getSkillById } from '@/services/skillLoader';
 import { requestLLM, requestLLMWithImage } from '@/services/ModelGateway';
 import type { StudioRFNode } from '@/types/reactFlow';
 import type { StudioNodeData } from '@/types/studio';
@@ -43,6 +45,14 @@ type FilmPromptSource = {
   primaryImage?: ImageReference;
   videoMode?: AiFilmmakingVideoMode;
 };
+
+type ResolvedFilmStoryboardSkill = AiFilmStoryboardSkillPrompt & {
+  id: string;
+};
+
+function featureSafeId(id: string): string {
+  return id.replace(/[^a-z0-9_-]+/gi, '_');
+}
 
 export const FILM_INPUT_HANDLE_ID = 'in';
 export const FILM_OUTPUT_HANDLE_ID = 'out';
@@ -179,18 +189,42 @@ function collectFilmPromptSource(
   return { summary, images, primaryImage, videoMode };
 }
 
-function statusText(kind: AiFilmmakingPromptNodeKind, mode?: AiFilmmakingVideoMode): string {
+function resolveFilmStoryboardSkill(data: StudioNodeData): ResolvedFilmStoryboardSkill | undefined {
+  const rawId =
+    typeof data.film_storyboard_skill_id === 'string' && data.film_storyboard_skill_id.trim()
+      ? data.film_storyboard_skill_id.trim()
+      : DEFAULT_STORYBOARD_SKILL_ID;
+  const skill = getSkillById(rawId) ?? getSkillById(DEFAULT_STORYBOARD_SKILL_ID);
+  if (!skill || skill.folder !== 'storyboard') return undefined;
+  return {
+    id: skill.id,
+    name: skill.name,
+    instruction: skill.system_instruction,
+  };
+}
+
+function statusText(
+  kind: AiFilmmakingPromptNodeKind,
+  mode?: AiFilmmakingVideoMode,
+  storyboardSkillName?: string,
+): string {
   if (kind === 'film_character_node') return 'LLM 正在按角色参考表规范生成角色设定提示词...';
-  if (kind === 'film_storyboard_node') return 'LLM 正在按 9 宫格影视分镜规范生成提示词...';
+  if (kind === 'film_storyboard_node') {
+    return `LLM 正在按${storyboardSkillName ? `「${storyboardSkillName}」` : ''}分镜 Skill 生成九宫格提示词...`;
+  }
   return `LLM 正在按 Seedance 2.0 ${mode ?? 'A'} 模式生成视频提示词...`;
 }
 
-function buildUserPrompt(kind: AiFilmmakingPromptNodeKind, source: FilmPromptSource): string {
+function buildUserPrompt(
+  kind: AiFilmmakingPromptNodeKind,
+  source: FilmPromptSource,
+  storyboardSkill?: ResolvedFilmStoryboardSkill,
+): string {
   if (kind === 'film_character_node') {
     return buildCharacterSheetUserPrompt(source.summary, Boolean(source.primaryImage?.dataUrl));
   }
   if (kind === 'film_storyboard_node') {
-    return buildStoryboardGridUserPrompt(source.summary);
+    return buildStoryboardGridUserPrompt(source.summary, storyboardSkill);
   }
   return buildSeedanceVideoUserPrompt(source.summary, source.videoMode ?? 'A');
 }
@@ -243,6 +277,7 @@ export function createAiFilmmakingStoreSlice(
       }
       const kind = node.data.type as AiFilmmakingPromptNodeKind;
       const source = collectFilmPromptSource(nodeId, kind, get().nodes, get().edges);
+      const storyboardSkill = kind === 'film_storyboard_node' ? resolveFilmStoryboardSkill(node.data) : undefined;
 
       if (!hasUsableSource(kind, source)) {
         const message = sourceMissingMessage(kind);
@@ -268,7 +303,7 @@ export function createAiFilmmakingStoreSlice(
         {
           status: 'IN_PROGRESS',
           generation_error: undefined,
-          streaming_preview: statusText(kind, source.videoMode),
+          streaming_preview: statusText(kind, source.videoMode, storyboardSkill?.name),
         },
         true,
       );
@@ -278,7 +313,7 @@ export function createAiFilmmakingStoreSlice(
           kind === 'film_character_node'
             ? '角色设定节点正在调用 LLM 生成角色参考表提示词。'
             : kind === 'film_storyboard_node'
-              ? '影视分镜节点正在调用 LLM 生成九宫格分镜提示词。'
+              ? `影视分镜节点正在调用 LLM，使用 Skill：${storyboardSkill?.name ?? '默认分镜'}。`
               : `影视分镜提示词节点正在调用 LLM，自动识别为 ${source.videoMode ?? 'A'} 模式。`,
         nodeId,
       });
@@ -286,8 +321,8 @@ export function createAiFilmmakingStoreSlice(
       try {
         const hasImage = Boolean(source.primaryImage?.dataUrl);
         const requestConfig = hasImage ? getResolvedVisionLlmGatewayConfig() ?? config : config;
-        const systemPrompt = buildAiFilmmakingSystemPrompt(kind);
-        const userPrompt = buildUserPrompt(kind, source);
+        const systemPrompt = buildAiFilmmakingSystemPrompt(kind, storyboardSkill);
+        const userPrompt = buildUserPrompt(kind, source, storyboardSkill);
         const result =
           hasImage && source.primaryImage?.dataUrl
             ? await requestLLMWithImage(requestConfig, {
@@ -297,7 +332,7 @@ export function createAiFilmmakingStoreSlice(
                 userPrompt,
                 temperature: 0.24,
                 jsonMode: false,
-                feature: `ai-filmmaking-${kind}`,
+                feature: `ai-filmmaking-${kind}${storyboardSkill ? `-${featureSafeId(storyboardSkill.id)}` : ''}`,
                 maxOutputTokens: maxOutputTokensFor(kind),
                 signal: controller.signal,
               })
@@ -306,7 +341,7 @@ export function createAiFilmmakingStoreSlice(
                 userPrompt,
                 temperature: kind === 'film_character_node' ? 0.2 : 0.28,
                 jsonMode: false,
-                feature: `ai-filmmaking-${kind}`,
+                feature: `ai-filmmaking-${kind}${storyboardSkill ? `-${featureSafeId(storyboardSkill.id)}` : ''}`,
                 maxOutputTokens: maxOutputTokensFor(kind),
                 signal: controller.signal,
               });
@@ -355,6 +390,7 @@ export function createAiFilmmakingStoreSlice(
               text: prompt,
               aiFilmmakingKind: kind,
               videoMode: kind === 'film_video_prompt_node' ? source.videoMode : undefined,
+              storyboardSkillId: kind === 'film_storyboard_node' ? storyboardSkill?.id : undefined,
               sourceImageCount: source.images.length,
             },
             streaming_preview: undefined,

@@ -27,7 +27,7 @@ function downloadSkillJson(skill: SkillFileRecord) {
 const folderLabel: Record<string, string> = {
   writing: '编剧',
   storyboard: '分镜',
-  prompt: 'Prompt 增强',
+  prompt: '提示词',
 };
 
 function skillDisplayLabel(id: string): string {
@@ -73,10 +73,15 @@ export function SkillSlotSection(props: {
         setMounted([id, ...normalizedMounted.filter((mountedId) => !isPromptStyleSkillId(mountedId))]);
         return;
       }
+      const skill = getSkillById(id);
+      if (kind === 'storyboard' && skill?.folder === 'storyboard') {
+        setMounted([id, ...normalizedMounted.filter((mountedId) => getSkillById(mountedId)?.folder !== 'storyboard')]);
+        return;
+      }
       if (normalizedMounted.includes(id)) return;
       setMounted([...normalizedMounted, id]);
     },
-    [isPromptKind, normalizedMounted, setMounted],
+    [isPromptKind, kind, normalizedMounted, setMounted],
   );
 
   const unmount = useCallback(
@@ -130,8 +135,10 @@ export function SkillSlotSection(props: {
       <div className="detail-panel__hint">{isPromptKind ? 'Prompt 规范技能槽' : '技能插槽'}</div>
       <p className="detail-panel__tip">
         {isPromptKind
-          ? 'Prompt 节点现在分成一个主规范槽和多个增强技能。规范槽决定最终提示词结构；增强技能只补风格、动作、清晰度等偏好，不能改掉主结构。以后新增提示词规范时，把规范技能插入这里即可生效。'
-          : '执行时 LLM 的 system = 部门基础指令 + 下方挂载技能的片段；user 侧为任务输入。编剧/分镜列表含本部门与「Prompt 增强」；Prompt 部列表含全部技能目录。从部门 Output 拉线创建下游节点时，会按 Skill Chain 自动继承/对齐技能。'}
+          ? '提示词节点只显示提示词类 Skill。主规范槽决定最终提示词结构；增强技能只补风格、动作、清晰度等偏好，不能改掉主结构。'
+            : kind === 'storyboard'
+              ? '分镜节点只显示分镜类 Skill，一次只启用一个；选择新的分镜 Skill 会替换当前分镜规范。'
+              : '编剧节点只显示编剧类 Skill。执行时 LLM 的 system = 部门基础指令 + 下方挂载技能片段，user 侧为任务输入。'}
       </p>
 
       {isPromptKind ? (
@@ -190,6 +197,7 @@ export function SkillSlotSection(props: {
             <ul className="skill-picker__list">
               {catalog.map((skill) => {
                 const styleSlot = isPromptStyleSkillId(skill.id);
+                const storyboardSlot = kind === 'storyboard' && skill.folder === 'storyboard';
                 const on = styleSlot ? activePromptStyleId === skill.id : normalizedMounted.includes(skill.id);
                 const fixed = fixedSet.has(skill.id);
                 const rowClass = styleSlot ? 'skill-picker__row skill-picker__row--style' : 'skill-picker__row';
@@ -213,11 +221,11 @@ export function SkillSlotSection(props: {
                         </button>
                       ) : on ? (
                         <button type="button" className="skill-picker__btn skill-picker__btn--muted" disabled>
-                          {styleSlot ? '当前规范' : '已挂载'}
+                          {styleSlot ? '当前规范' : storyboardSlot ? '当前' : '已挂载'}
                         </button>
                       ) : (
                         <button type="button" className="skill-picker__btn" onClick={() => mount(skill.id)}>
-                          {styleSlot ? '使用规范' : '挂载'}
+                          {styleSlot ? '使用规范' : storyboardSlot ? '使用' : '挂载'}
                         </button>
                       )}
                       <button

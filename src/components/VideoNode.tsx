@@ -47,7 +47,10 @@ function VideoNodeInner({ id, data, selected }: NodeProps<VideoRF>) {
     let cancelled = false;
     extractingKeyRef.current = data.videoDataUrl;
     setExtracting(true);
-    extractVideoContactSheet(data.videoDataUrl)
+    extractVideoContactSheet(data.videoDataUrl, {
+      fileName: data.videoFileName,
+      mimeType: data.videoMimeType,
+    })
       .then((sheet) => {
         if (cancelled) return;
         patchNodeData(
@@ -173,7 +176,7 @@ function VideoNodeInner({ id, data, selected }: NodeProps<VideoRF>) {
           ref={inputRef}
           className="image-table-node__input"
           type="file"
-          accept="video/*"
+          accept="video/*,.mov,.m4v,.mp4,.webm,.avi,.mkv"
           onChange={onVideoPicked}
         />
         {data.generation_error?.trim() ? (

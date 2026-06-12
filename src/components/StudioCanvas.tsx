@@ -18,9 +18,11 @@ import '@xyflow/react/dist/style.css';
 import {
   useCallback,
   useEffect,
+  lazy,
   useMemo,
   useRef,
   useState,
+  Suspense,
   type DragEvent as ReactDragEvent,
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
@@ -30,7 +32,6 @@ import {
   type ConnectionDragStart,
   type NodePickerState,
 } from '@/components/ConnectEndBinder';
-import { ChatDock } from '@/components/ChatDock';
 import {
   DepartmentNode,
   DEPT_INPUT_HANDLE_ID,
@@ -48,13 +49,9 @@ import { PromptReviewNode } from '@/components/PromptReviewNode';
 import { StoryboardFileNode } from '@/components/StoryboardFileNode';
 import { ShotListNode } from '@/components/ShotListNode';
 import { TextNode, TEXT_NODE_OUTPUT_HANDLE_ID } from '@/components/TextNode';
-import { DetailPanel } from '@/components/DetailPanel';
-import { NodeContextMenu, type ContextMenuState } from '@/components/NodeContextMenu';
+import type { ContextMenuState } from '@/components/NodeContextMenu';
 import { ScissorCutLayer } from '@/components/ScissorCutLayer';
 import { StudioErrorBoundary } from '@/components/StudioErrorBoundary';
-import { StudioProjectMenu } from '@/components/StudioProjectMenu';
-import { StudioSettings } from '@/components/StudioSettings';
-import { StudioWelcomePanel } from '@/components/StudioWelcomePanel';
 import {
   createStudioProjectId,
   parseStudioProjectJsonFile,
@@ -85,6 +82,21 @@ const nodeTypes: NodeTypes = {
   aiFilmVideoPrompt: AiFilmVideoPromptNode,
   promptReview: PromptReviewNode,
 };
+
+const ChatDock = lazy(() => import('@/components/ChatDock').then((module) => ({ default: module.ChatDock })));
+const DetailPanel = lazy(() => import('@/components/DetailPanel').then((module) => ({ default: module.DetailPanel })));
+const NodeContextMenu = lazy(() =>
+  import('@/components/NodeContextMenu').then((module) => ({ default: module.NodeContextMenu })),
+);
+const StudioProjectMenu = lazy(() =>
+  import('@/components/StudioProjectMenu').then((module) => ({ default: module.StudioProjectMenu })),
+);
+const StudioSettings = lazy(() =>
+  import('@/components/StudioSettings').then((module) => ({ default: module.StudioSettings })),
+);
+const StudioWelcomePanel = lazy(() =>
+  import('@/components/StudioWelcomePanel').then((module) => ({ default: module.StudioWelcomePanel })),
+);
 
 type CreateNodeKind =
   | 'text_node'
@@ -977,7 +989,9 @@ export function StudioCanvas() {
         />
         <FlowProjectionBridge onReady={(projector) => { screenToFlowRef.current = projector; }} />
         <PaneCreateMenuBinder seed={paneMenuSeed} onResolve={setPaneCreateMenu} onConsume={() => setPaneMenuSeed(null)} />
-        <StudioProjectMenu />
+        <Suspense fallback={null}>
+          <StudioProjectMenu />
+        </Suspense>
         <Panel position="top-center" className="studio-edge-panel">
           {selectedEdgeIds.length > 0 ? (
             <button
@@ -1002,11 +1016,15 @@ export function StudioCanvas() {
         <Controls className="studio-controls" showInteractive={false} />
         <MiniMap className="studio-minimap" maskColor="rgba(0,0,0,0.55)" nodeColor={() => '#3d3d46'} />
         <ScissorCutLayer />
-        <StudioSettings />
-        <ChatDock />
+        <Suspense fallback={null}>
+          <StudioSettings />
+          <ChatDock />
+        </Suspense>
       </ReactFlow>
-      <StudioWelcomePanel />
-      <NodeContextMenu menu={contextMenu} onClose={() => setContextMenu(null)} />
+      <Suspense fallback={null}>
+        <StudioWelcomePanel />
+        <NodeContextMenu menu={contextMenu} onClose={() => setContextMenu(null)} />
+      </Suspense>
       {nodePicker ? (
         <div
           className="node-picker"
@@ -1286,7 +1304,9 @@ export function StudioCanvas() {
           </button>
         </div>
       ) : null}
-      <DetailPanel />
+      <Suspense fallback={null}>
+        <DetailPanel />
+      </Suspense>
       </StudioErrorBoundary>
     </div>
   );

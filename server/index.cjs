@@ -1,14 +1,18 @@
 const fs = require('node:fs');
 const https = require('node:https');
 const http = require('node:http');
+const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
+const { execFile } = require('node:child_process');
+const { promisify } = require('node:util');
 const { createClient } = require('@supabase/supabase-js');
 
 const rootDir = path.resolve(__dirname, '..');
 const distDir = path.join(rootDir, 'dist');
 const port = Number.parseInt(process.env.PORT || '3000', 10);
+const execFileAsync = promisify(execFile);
 
 function parseEnvMs(value, fallback, min, max) {
   const n = Number.parseInt(String(value || ''), 10);
@@ -19,6 +23,7 @@ function parseEnvMs(value, fallback, min, max) {
 const MAX_INPUT_CHARS = 80_000;
 const MAX_PROJECT_SNAPSHOT_CHARS = 5_000_000;
 const PROJECT_LIST_LIMIT = 40;
+const MAX_VIDEO_UPLOAD_BYTES = Number.parseInt(process.env.VIDEO_FRAME_MAX_UPLOAD_BYTES || '', 10) || 300 * 1024 * 1024;
 const DEFAULT_MONTHLY_QUOTA = 10;
 const LEGACY_DEFAULT_MONTHLY_QUOTA = 20;
 const DEFAULT_TIMEOUT_MS = parseEnvMs(process.env.LLM_TIMEOUT_MS || process.env.VITE_LLM_TIMEOUT_MS, 420_000, 420_000, 900_000);
@@ -647,6 +652,158 @@ async function readRawBody(req) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   return Buffer.concat(chunks);
+}
+
+function parseVideoDataUrl(dataUrl) {
+  const match = String(dataUrl || '').match(/^data:([^;,]+)?(?:;[^,]*)?;base64,(.+)$/);
+  if (!match) return null;
+  const mimeType = match[1] || 'application/octet-stream';
+  const buffer = Buffer.from(match[2], 'base64');
+  return { buffer, mimeType };
+}
+
+function safeVideoExtension(fileName, mimeType) {
+  const fromName = String(fileName || '').toLowerCase().match(/\.([a-z0-9]{2,5})$/)?.[1];
+  const allowed = new Set(['mp4', 'mov', 'm4v', 'webm', 'avi', 'mkv', 'qt']);
+  if (fromName && allowed.has(fromName)) return fromName === 'qt' ? 'mov' : fromName;
+  const lowerMime = String(mimeType || '').toLowerCase();
+  if (lowerMime.includes('quicktime')) return 'mov';
+  if (lowerMime.includes('mp4')) return 'mp4';
+  if (lowerMime.includes('webm')) return 'webm';
+  if (lowerMime.includes('x-matroska')) return 'mkv';
+  if (lowerMime.includes('x-msvideo')) return 'avi';
+  return 'mp4';
+}
+
+function resolveServerFrameTimes(duration) {
+  if (!Number.isFinite(duration) || duration <= 0.2) return [0, 0, 0];
+  const start = Math.min(0.3, duration * 0.08);
+  const mid = duration * 0.5;
+  const end = Math.max(start, duration - Math.min(0.35, duration * 0.08));
+  return [start, mid, end];
+}
+
+async function probeVideoFile(filePath) {
+  const { stdout } = await execFileAsync(
+    'ffprobe',
+    [
+      '-v',
+      'error',
+      '-select_streams',
+      'v:0',
+      '-show_entries',
+      'stream=width,height:format=duration',
+      '-of',
+      'json',
+      filePath,
+    ],
+    { timeout: 20_000, maxBuffer: 1024 * 1024 },
+  );
+  const parsed = JSON.parse(stdout || '{}');
+  const stream = Array.isArray(parsed.streams) ? parsed.streams[0] : null;
+  const format = parsed.format || {};
+  return {
+    width: Number(stream?.width) || undefined,
+    height: Number(stream?.height) || undefined,
+    durationSec: Number(format.duration) || undefined,
+  };
+}
+
+async function extractVideoFrame(filePath, outputPath, time) {
+  await execFileAsync(
+    'ffmpeg',
+    [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-y',
+      '-ss',
+      String(Math.max(0, Number(time) || 0)),
+      '-i',
+      filePath,
+      '-frames:v',
+      '1',
+      '-q:v',
+      '3',
+      outputPath,
+    ],
+    { timeout: 90_000, maxBuffer: 1024 * 1024 },
+  );
+}
+
+async function handleVideoContactSheet(req, res) {
+  if (req.method !== 'POST') {
+    sendJson(res, 405, { error: { message: 'Method not allowed.' } });
+    return;
+  }
+
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: { message: '请求体不是合法 JSON。' } });
+    return;
+  }
+
+  const parsed = parseVideoDataUrl(body.videoDataUrl);
+  if (!parsed) {
+    sendJson(res, 400, { error: { message: '缺少可处理的视频 Data URL。' } });
+    return;
+  }
+  if (parsed.buffer.length > MAX_VIDEO_UPLOAD_BYTES) {
+    sendJson(res, 413, { error: { message: '视频文件过大，无法在线抽帧。请先压缩或转成较小的 H.264 MP4。' } });
+    return;
+  }
+
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'studio-video-'));
+  try {
+    const mimeType = String(body.mimeType || parsed.mimeType || '').trim();
+    const ext = safeVideoExtension(body.fileName, mimeType);
+    const inputPath = path.join(tmpDir, `input.${ext}`);
+    await fs.promises.writeFile(inputPath, parsed.buffer);
+
+    const meta = await probeVideoFile(inputPath);
+    const times = resolveServerFrameTimes(meta.durationSec || 0);
+    const frameDataUrls = [];
+
+    for (let index = 0; index < times.length; index += 1) {
+      const outputPath = path.join(tmpDir, `frame-${index}.jpg`);
+      try {
+        await extractVideoFrame(inputPath, outputPath, times[index]);
+      } catch (error) {
+        if ((times[index] || 0) > 0) {
+          await extractVideoFrame(inputPath, outputPath, 0);
+        } else {
+          throw error;
+        }
+      }
+      const frame = await fs.promises.readFile(outputPath);
+      frameDataUrls.push(`data:image/jpeg;base64,${frame.toString('base64')}`);
+    }
+
+    sendJson(res, 200, {
+      ok: true,
+      frameDataUrls,
+      times,
+      durationSec: meta.durationSec,
+      width: meta.width,
+      height: meta.height,
+    });
+  } catch (error) {
+    const text = sanitizeError(error);
+    const errorCode = error && typeof error === 'object' ? String(error.code || '') : '';
+    const isMissingFfmpeg = errorCode === 'ENOENT' || /\bENOENT\b|not found|not recognized/i.test(text);
+    console.warn('Video contact sheet extraction failed', text);
+    sendJson(res, 500, {
+      error: {
+        message: isMissingFfmpeg
+          ? '服务器视频抽帧组件不可用：请确认线上容器已安装 ffmpeg 并重新部署。'
+          : `服务器视频抽帧失败：${text || '无法读取当前视频编码。'}`,
+      },
+    });
+  } finally {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 function getBearerToken(req) {
@@ -2731,6 +2888,10 @@ async function route(req, res) {
     }
     if (url.pathname === '/api/llm/chat') {
       await handleLlmChat(req, res);
+      return;
+    }
+    if (url.pathname === '/api/video/contact-sheet') {
+      await handleVideoContactSheet(req, res);
       return;
     }
     if (url.pathname === '/supabase' || url.pathname.startsWith('/supabase/')) {

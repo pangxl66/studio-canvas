@@ -144,6 +144,7 @@ function normalizeSkill(mod: SkillJson, id: string, folder: SkillFolder, fileNam
 const rawModules = import.meta.glob<{ default: SkillJson }>('../skills/**/*.json', { eager: true });
 
 export const DEFAULT_PROMPT_STYLE_SKILL_ID = 'prompt/studio_canvas_prompt_spec_v1';
+export const DEFAULT_STORYBOARD_SKILL_ID = 'storyboard/xuke_storyboard_v1';
 
 const registry = new Map<string, SkillFileRecord>();
 const allSkills: SkillFileRecord[] = [];
@@ -194,16 +195,9 @@ export function listSkillsInFolder(folder?: SkillFolder): SkillFileRecord[] {
   return getVisibleSkills().filter((s) => s.folder === folder);
 }
 
-/**
- * 流水线节点可选技能：
- * - 编剧 / 分镜：本部门 + `prompt` 增强目录
- * - Prompt 部：全部目录（可叠编剧/分镜风格类技能）
- */
+/** 流水线节点可选技能：严格按节点部门目录分类，避免跨部门技能混入选择框。 */
 export function listSkillsForPipelineKind(kind: 'writing' | 'storyboard' | 'prompt'): SkillFileRecord[] {
-  if (kind === 'prompt') return listAllSkills();
-  const folders: SkillFolder[] = kind === 'writing' ? ['writing', 'prompt'] : ['storyboard', 'prompt'];
-  const set = new Set(folders);
-  return getVisibleSkills().filter((s) => set.has(s.folder));
+  return getVisibleSkills().filter((s) => s.folder === kind);
 }
 
 export function getSkillById(id: string): SkillFileRecord | undefined {
@@ -242,9 +236,7 @@ export function buildMountedSkillsInstructionBlock(orderedIds: string[]): string
 
 export type PipelineKindForSkills = 'writing' | 'storyboard' | 'prompt';
 
-const FIXED_SKILLS_BY_KIND: Partial<Record<PipelineKindForSkills, readonly string[]>> = {
-  storyboard: ['storyboard/xuke_storyboard_v1'],
-};
+const FIXED_SKILLS_BY_KIND: Partial<Record<PipelineKindForSkills, readonly string[]>> = {};
 
 export function getFixedSkillIdsForPipelineKind(kind: PipelineKindForSkills): string[] {
   const ids = FIXED_SKILLS_BY_KIND[kind] ?? [];

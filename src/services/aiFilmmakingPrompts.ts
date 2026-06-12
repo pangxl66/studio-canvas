@@ -5,6 +5,11 @@ export type AiFilmmakingPromptNodeKind =
 
 export type AiFilmmakingVideoMode = 'A' | 'B' | 'C';
 
+export type AiFilmStoryboardSkillPrompt = {
+  name: string;
+  instruction: string;
+};
+
 export type AiFilmmakingSourceSummary = {
   textBlocks: string[];
   characterPrompts: string[];
@@ -24,7 +29,69 @@ export function stripAiFilmmakingPromptWrapper(raw: string): string {
   return text;
 }
 
-export function buildAiFilmmakingSystemPrompt(kind: AiFilmmakingPromptNodeKind): string {
+function buildCharacterSheetSystemPrompt(): string {
+  return [
+    'You are using the AI_CHARACTER_SHEET_GPT55_SKILL specification for a character-setting node.',
+    'This node generates production-grade character-sheet prompts for image models such as Nano Banana Pro, GPT Image, Flux, and Midjourney.',
+    'Goal: produce a clean reusable identity-locking prompt for AI filmmaking. Do not write a character biography or dramatic scene.',
+    '',
+    'Output contract for this app:',
+    'Return only one final paste-ready prompt text. No explanation, no analysis, no JSON, no note, no checklist.',
+    'If you use a fenced code block, it must contain only the final prompt text.',
+    'Never leave bracketed placeholders. Replace every bracket with concrete text inferred conservatively from the input.',
+    'If source material is mainly Chinese, write the final prompt in Chinese. If source material is mainly English, write it in English.',
+    '',
+    'Core priorities:',
+    '1. identity consistency',
+    '2. accurate facial structure',
+    '3. stable hairstyle and headwear',
+    '4. stable body proportions',
+    '5. practical costume continuity',
+    '6. neutral lighting',
+    '7. simple background',
+    '8. clean multi-angle layout',
+    '',
+    'Mode selection:',
+    'Mode A - full reference image available: use when the attached image clearly shows enough face, hairstyle, costume, and body. Treat the uploaded image as the primary source of truth. Do not over-describe what the image already shows. State identity, face, hairstyle, costume, textures, and proportions must be preserved. Add only layout, lighting, background, consistency, and exclusion rules.',
+    'Mode B - partial reference image available: use when the attached image shows face or upper body but not full costume, lower body, footwear, or back structure. Preserve visible face, apparent age, facial structure, expression, hairstyle, headwear, visible upper-body costume, material texture, and temperament exactly. Complete missing lower-body/back/footwear details conservatively with practical, low-risk design. Never invent ornate decorations, armor, glowing effects, elaborate accessories, or unrelated historical redesign unless clearly supported or requested.',
+    'Mode C - description only: use when no reference image is attached. Create a compact identity anchor of about 30-80 Chinese characters or 30-60 English words containing only age range, body type, face impression, hair, key wardrobe, headwear, and one essential prop if needed. Avoid narrative prose and scene effects.',
+    '',
+    'Default 8-shot 16:9 layout:',
+    'Generate a horizontal 16:9 professional character sheet divided into four columns and eight views.',
+    'Top row: 1 full-body front view, 2 full-body side view, 3 full-body three-quarter view, 4 full-body back view.',
+    'Bottom row: 1 front face close-up, 2 side profile close-up, 3 three-quarter face close-up, 4 back hairstyle/headwear/structural detail close-up.',
+    'Top-row full-body views must show the complete figure from head to toe. No cropping at the head, knees, ankles, shoes, or hems.',
+    'All views must depict the same person with the same face, hairstyle, apparent age, body proportions, costume construction, and accessories.',
+    'Use neutral standing poses with relaxed hands. Do not use battle poses unless explicitly requested.',
+    '',
+    'Identity lock when an image is attached:',
+    'Strictly reference the uploaded image. Preserve the same face and apparent age. Preserve facial proportions, eyebrow shape, eye expression, nose, mouth, jawline, hairstyle silhouette, hairline, headwear, and temperament. Maintain the highest possible similarity to the uploaded character. Do not change the actor or replace the face. Do not identify a real person by name. Do not beautify excessively, do not apply influencer-style makeup, and do not smooth skin into plastic texture.',
+    '',
+    'Conservative completion:',
+    'When the reference image does not show full costume, explicitly say that missing areas are restrained completion, not redesign. Good completions include simple trousers, practical boots, understated waist sash, matching fabric and palette, restrained layering, and live-action feasibility. Avoid ornate armor without evidence, glowing fantasy effects, elaborate embroidery without evidence, giant shoulder pads, excessive accessories, random jewelry, genre drift, and unrelated costume redesign.',
+    '',
+    'Lighting and background:',
+    'Default to neutral soft studio lighting, even facial illumination, realistic skin texture, practical costume-test photography, and no scene-specific light contamination.',
+    'Avoid moonlight, firelight, neon light, colored rim light, fog beams, dramatic backlight, battle sparks, and rain unless explicitly requested.',
+    'Background should be simple and not distracting from character design. Use low-saturation gray, dark gray, warm neutral gray, or clean studio backdrop. Avoid forest, rooftop, palace, city street, battlefield, complex architecture, and unrelated props.',
+    '',
+    'Visual style blocks. Choose the closest one and adapt it concretely:',
+    'Live-action wuxia: 真人写实，东方古装武侠院线电影质感，真实皮肤纹理，真实布料质感，接近实拍定妆照，不要游戏建模感，不要 3D 渲染感。',
+    'Republican-era spy thriller: 真人写实，民国谍战电影定妆照质感，克制低调，真实旧布料纹理，接近实拍服装测试照，不要时尚大片感。',
+    'Historical realism: 真人写实，历史题材院线电影质感，服装结构实拍可行，材质自然，妆造克制，不做夸张幻想化处理。',
+    'Modern realistic drama: 真人写实，影视定妆照质感，自然皮肤纹理，中性棚拍光，真实服装材质，不做商业广告式过度精修。',
+    '',
+    'Required negative constraints:',
+    'Do not include complex environments, poster text, watermark, UI elements, game-model look, 3D render look, anime style, plastic skin, excessive retouching, or unsupported redesign.',
+  ].join('\n');
+}
+
+export function buildAiFilmmakingSystemPrompt(
+  kind: AiFilmmakingPromptNodeKind,
+  storyboardSkill?: AiFilmStoryboardSkillPrompt,
+): string {
+  if (kind === 'film_character_node') return buildCharacterSheetSystemPrompt();
+
   const base = [
     'You are an AI filmmaking prompt designer. Follow the provided ai-filmmaking SKILL.md rules exactly.',
     'Core rules: fill every placeholder; keep prompts lean, concrete, cinematic, and paste-ready; preserve character identity verbatim across downstream templates; keep style language consistent; do not use the project legacy PromptOutput JSON schema.',
@@ -34,19 +101,16 @@ export function buildAiFilmmakingSystemPrompt(kind: AiFilmmakingPromptNodeKind):
     'Never leave bracketed placeholders like [CHARACTER DESCRIPTION] or [STYLE BLOCK]. Replace every bracket with concrete copy inferred from the input.',
   ];
 
-  if (kind === 'film_character_node') {
-    return [
-      ...base,
-      '',
-      'Template 1: Character Sheet.',
-      'Generate one image-model prompt for Nano Banana Pro / GPT Image 2 / Midjourney / Flux.',
-      'If a reference image is attached, use Mode A: do not re-describe the character in prose; the image is the identity anchor. Ask for strong reference matching, 1:1 similarity, neutral studio lighting, simple background, 8-shot grid, 16:9.',
-      'If no reference image is attached, use Mode B: write a tight 30-60 word character identity description, then the same 8-shot grid character sheet prompt.',
-      'Keep lighting neutral. Always include: Background should be simple and not distracting from character design.',
-    ].join('\n');
-  }
-
   if (kind === 'film_storyboard_node') {
+    const skillBlock =
+      storyboardSkill?.instruction.trim()
+        ? [
+            '',
+            `Selected storyboard Skill: ${storyboardSkill.name}.`,
+            'Apply this Skill as the director-style and shot-design focus for the 3x3 storyboard prompt. It must not change the output contract: still return one paste-ready prompt for a single 3x3 storyboard grid image, not JSON, not a shot table, and not an explanation.',
+            storyboardSkill.instruction.trim(),
+          ]
+        : [];
     return [
       ...base,
       '',
@@ -56,6 +120,7 @@ export function buildAiFilmmakingSystemPrompt(kind: AiFilmmakingPromptNodeKind):
       'Each panel needs a thin annotation strip under it with three short uppercase lines: CAM, MOVE, and MOOD. Use VOICE instead of MOOD for vlog/dialogue-driven scenes, or STYLE instead of MOOD for action/martial-arts scenes.',
       'Character descriptions must be one tight sentence each. If input lacks specifics, infer conservative defaults from the scene.',
       'Default visual style: cinematic live-action, photorealistic, lifelike, 35mm film grain, 16:9 page layout, unless the input clearly asks otherwise.',
+      ...skillBlock,
     ].join('\n');
   }
 
@@ -99,24 +164,31 @@ function formatSourceSummary(summary: AiFilmmakingSourceSummary): string {
 export function buildCharacterSheetUserPrompt(summary: AiFilmmakingSourceSummary, hasReferenceImage: boolean): string {
   return [
     hasReferenceImage
-      ? 'A reference image is attached. Generate Template 1 Mode A character sheet prompt. Do not re-describe the attached image; use it as the character identity anchor.'
-      : 'No reference image is attached. Generate Template 1 Mode B character sheet prompt from the available text.',
-    'The final prompt must be a single paste-ready image generation prompt. No commentary.',
+      ? 'A reference image is attached. First inspect the image and choose Mode A if it is a full reference, or Mode B if it is partial. The uploaded image is the identity anchor. Preserve visible identity exactly and complete only missing areas conservatively.'
+      : 'No reference image is attached. Use Mode C description-only character sheet generation from the available text.',
+    'Generate one professional character-sheet prompt according to AI_CHARACTER_SHEET_GPT55_SKILL.',
+    'The final prompt must be a single paste-ready image generation prompt. No commentary, no JSON, no placeholders.',
     '',
     'SOURCE MATERIAL:',
     formatSourceSummary(summary),
   ].join('\n');
 }
 
-export function buildStoryboardGridUserPrompt(summary: AiFilmmakingSourceSummary): string {
+export function buildStoryboardGridUserPrompt(
+  summary: AiFilmmakingSourceSummary,
+  storyboardSkill?: AiFilmStoryboardSkillPrompt,
+): string {
   return [
     'Generate Template 2 Cinematic Storyboard Grid prompt from the source material.',
     'Output one complete prompt for a 3x3 / 9-panel continuous storyboard sheet.',
     'Fill all details concretely; no placeholders. Use concise beats and legible annotation strip instructions.',
+    storyboardSkill?.name ? `Active storyboard Skill: ${storyboardSkill.name}.` : '',
     '',
     'SOURCE MATERIAL:',
     formatSourceSummary(summary),
-  ].join('\n');
+  ]
+    .filter((line) => line !== '')
+    .join('\n');
 }
 
 export function buildSeedanceVideoUserPrompt(

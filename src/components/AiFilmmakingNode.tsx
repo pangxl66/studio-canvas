@@ -1,5 +1,10 @@
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
-import { memo, useCallback } from 'react';
+import { memo, useCallback, useMemo, type ChangeEvent } from 'react';
+import {
+  DEFAULT_STORYBOARD_SKILL_ID,
+  getSkillById,
+  listSkillsInFolder,
+} from '@/services/skillLoader';
 import { FILM_INPUT_HANDLE_ID, FILM_OUTPUT_HANDLE_ID } from '@/store/slices/aiFilmmakingStore';
 import { useStudioStore } from '@/store/useStudioStore';
 import type { NodeKind, StudioNodeData } from '@/types/studio';
@@ -70,11 +75,24 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
   const runAiFilmmakingNode = useStudioStore((state) => state.runAiFilmmakingNode);
   const stopNodeTask = useStudioStore((state) => state.stopNodeTask);
   const pushMessage = useStudioStore((state) => state.pushMessage);
+  const patchNodeData = useStudioStore((state) => state.patchNodeData);
   const meta = isFilmKind(data.type) ? NODE_META[data.type] : NODE_META.film_video_prompt_node;
   const busy = data.status === 'IN_PROGRESS';
   const text = textFromData(data);
   const hasText = Boolean(text);
   const modeLabel = videoModeLabel(data);
+  const isStoryboardNode = data.type === 'film_storyboard_node';
+  const storyboardSkills = useMemo(
+    () => (isStoryboardNode ? listSkillsInFolder('storyboard') : []),
+    [isStoryboardNode],
+  );
+  const selectedStoryboardSkillId =
+    isStoryboardNode && typeof data.film_storyboard_skill_id === 'string' && data.film_storyboard_skill_id.trim()
+      ? data.film_storyboard_skill_id.trim()
+      : DEFAULT_STORYBOARD_SKILL_ID;
+  const effectiveStoryboardSkillId = storyboardSkills.some((skill) => skill.id === selectedStoryboardSkillId)
+    ? selectedStoryboardSkillId
+    : storyboardSkills[0]?.id ?? DEFAULT_STORYBOARD_SKILL_ID;
 
   const onRun = useCallback(() => {
     if (busy) {
@@ -93,6 +111,20 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
       pushMessage({ role: 'system', text: '复制失败：请检查浏览器剪贴板权限。', nodeId: id });
     }
   }, [id, pushMessage, text]);
+
+  const onSkillChange = useCallback(
+    (event: ChangeEvent<HTMLSelectElement>) => {
+      const nextId = event.target.value;
+      const skill = getSkillById(nextId);
+      patchNodeData(id, { film_storyboard_skill_id: nextId, generation_error: undefined }, false);
+      pushMessage({
+        role: 'system',
+        text: `影视分镜 Skill 已切换为：${skill?.name ?? nextId}。`,
+        nodeId: id,
+      });
+    },
+    [id, patchNodeData, pushMessage],
+  );
 
   return (
     <div
@@ -129,17 +161,36 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
       {data.generation_error?.trim() ? (
         <div className="ai-film-node__error">{data.generation_error.trim()}</div>
       ) : null}
-      <footer className="ai-film-node__footer nodrag nopan">
-        <button
-          type="button"
-          className={`ai-film-node__primary ${busy ? 'ai-film-node__primary--stop' : ''}`}
-          onClick={onRun}
-        >
-          {busy ? '停止' : meta.action}
-        </button>
-        <button type="button" className="ai-film-node__secondary" onClick={onCopy} disabled={!hasText || busy}>
-          复制
-        </button>
+      <footer className={`ai-film-node__footer nodrag nopan ${isStoryboardNode ? 'ai-film-node__footer--stacked' : ''}`}>
+        {isStoryboardNode ? (
+          <label className="ai-film-node__skill">
+            <span>分镜 Skill</span>
+            <select
+              className="ai-film-node__skill-select"
+              value={effectiveStoryboardSkillId}
+              onChange={onSkillChange}
+              disabled={busy}
+            >
+              {storyboardSkills.map((skill) => (
+                <option key={skill.id} value={skill.id}>
+                  {skill.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+        <div className="ai-film-node__actions">
+          <button
+            type="button"
+            className={`ai-film-node__primary ${busy ? 'ai-film-node__primary--stop' : ''}`}
+            onClick={onRun}
+          >
+            {busy ? '停止' : meta.action}
+          </button>
+          <button type="button" className="ai-film-node__secondary" onClick={onCopy} disabled={!hasText || busy}>
+            复制
+          </button>
+        </div>
       </footer>
       <Handle
         type="source"

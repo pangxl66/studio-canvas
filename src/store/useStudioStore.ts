@@ -31,7 +31,11 @@ import { executeEmployeePhase } from '@/services/agents/executeTask';
 import { runNodeAssistant } from '@/services/nodeAssistant';
 import { ingestWritingOutputToProjectContext } from '@/services/ProjectContext';
 import { mergeDownstreamSkillsFromChain } from '@/services/skillChain';
-import { getSkillById, normalizeMountedSkillIdsForKind } from '@/services/skillLoader';
+import {
+  DEFAULT_STORYBOARD_SKILL_ID,
+  getSkillById,
+  normalizeMountedSkillIdsForKind,
+} from '@/services/skillLoader';
 import {
   buildWorkflowAgentStageHint,
   buildWorkflowAgentStartMessage,
@@ -319,7 +323,10 @@ function makeNodeData(
     review_result: null,
     version: 0,
     label: positionLabel ?? `${deptLabel(department)} · ${id.slice(-4)}`,
-    mounted_skills: normalizeMountedSkillIdsForKind(kind, []),
+    mounted_skills: normalizeMountedSkillIdsForKind(
+      kind,
+      kind === 'storyboard' ? [DEFAULT_STORYBOARD_SKILL_ID] : [],
+    ),
     assistant_preferences: '',
     assistant_task_instruction: '',
   };
@@ -447,6 +454,7 @@ function makeAiFilmNodeData(id: string, kind: AiFilmNodeKind): StudioNodeData {
     label: `${aiFilmLabelForKind(kind)} · ${id.slice(-4)}`,
     assistant_preferences: '',
     assistant_task_instruction: '',
+    ...(kind === 'film_storyboard_node' ? { film_storyboard_skill_id: DEFAULT_STORYBOARD_SKILL_ID } : {}),
   };
 }
 
@@ -2972,9 +2980,13 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         syncDeptIn(id);
         const upstreamMounted = Array.isArray(from.data.mounted_skills) ? from.data.mounted_skills : [];
         const chained = mergeDownstreamSkillsFromChain(upstreamMounted, fk, tk);
-        if (chained.length > 0) {
-          get().patchNodeData(id, { mounted_skills: chained }, false);
-          const labels = chained.map((sid) => getSkillById(sid)?.name ?? sid);
+        const chainedWithDefault =
+          tk === 'storyboard' && chained.length > 0 && !chained.some((sid) => getSkillById(sid)?.folder === 'storyboard')
+            ? [DEFAULT_STORYBOARD_SKILL_ID, ...chained]
+            : chained;
+        if (chainedWithDefault.length > 0) {
+          get().patchNodeData(id, { mounted_skills: chainedWithDefault }, false);
+          const labels = chainedWithDefault.map((sid) => getSkillById(sid)?.name ?? sid);
           get().pushMessage({
             role: 'system',
             text: `Skill Chain 已同步挂载到当前节点：${labels.join('、')}`,

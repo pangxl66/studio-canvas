@@ -1,6 +1,9 @@
 import type { Edge } from '@xyflow/react';
 import { tryParseStoryboardOutput } from '@/agents/storyboardAgents';
-import { normalizeMountedSkillIdsForKind } from '@/services/skillLoader';
+import {
+  DEFAULT_STORYBOARD_SKILL_ID,
+  normalizeMountedSkillIdsForKind,
+} from '@/services/skillLoader';
 import type { StoryboardOutput, StudioNodeData } from '@/types/studio';
 import type { StudioRFNode } from '@/types/reactFlow';
 
@@ -113,7 +116,10 @@ export function normalizeRestoredStudioNode(node: StudioRFNode): StudioRFNode {
       ...safeNode,
       data: {
         ...safeNode.data,
-        mounted_skills: normalizeMountedSkillIdsForKind('storyboard', safeNode.data.mounted_skills ?? []),
+        mounted_skills: normalizeMountedSkillIdsForKind(
+          'storyboard',
+          safeNode.data.mounted_skills ?? [DEFAULT_STORYBOARD_SKILL_ID],
+        ),
         output: normalizeStoryboardOutputValue(safeNode.data.output) as StudioNodeData['output'],
       },
     };
