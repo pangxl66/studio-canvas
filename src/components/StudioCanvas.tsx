@@ -98,6 +98,13 @@ const StudioWelcomePanel = lazy(() =>
   import('@/components/StudioWelcomePanel').then((module) => ({ default: module.StudioWelcomePanel })),
 );
 
+type ConnectionCandidate = {
+  source?: string | null;
+  target?: string | null;
+  sourceHandle?: string | null;
+  targetHandle?: string | null;
+};
+
 type CreateNodeKind =
   | 'text_node'
   | 'image_node'
@@ -125,6 +132,7 @@ type NodeGalleryItem = {
 
 const HIDE_TEMPORARY_NODE_ENTRIES = true;
 const HIDDEN_PANE_GALLERY_KINDS = new Set<CreateNodeKind>(['writing', 'storyboard_file_node']);
+const CONNECTION_MAGNET_HOVER_PX = 56;
 
 const PANE_GALLERY_ITEMS_BASE: NodeGalleryItem[] = [
   {
@@ -241,6 +249,135 @@ const PANE_GALLERY_ITEMS: NodeGalleryItem[] = PANE_GALLERY_ITEMS_BASE.filter(
   (item) => !(HIDE_TEMPORARY_NODE_ENTRIES && item.kind != null && HIDDEN_PANE_GALLERY_KINDS.has(item.kind)),
 );
 
+function isStudioConnectionAllowed(edge: ConnectionCandidate, nodes: StudioRFNode[]): boolean {
+  const src = edge.source;
+  const tgt = edge.target;
+  if (!src || !tgt || src === tgt) return false;
+  const a = nodes.find((x) => x.id === src);
+  const b = nodes.find((x) => x.id === tgt);
+  if (!a || !b) return false;
+
+  if (a.type === 'department' && edge.sourceHandle === DEPT_INPUT_PULL_HANDLE_ID) return false;
+
+  if (a.type === 'textNode' && b.type === 'department') {
+    if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
+    if (edge.sourceHandle != null && edge.sourceHandle !== TEXT_NODE_OUTPUT_HANDLE_ID) return false;
+    return true;
+  }
+
+  if (a.type === 'textNode' && b.type === 'textNode') {
+    if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
+    if (edge.sourceHandle != null && edge.sourceHandle !== TEXT_NODE_OUTPUT_HANDLE_ID) return false;
+    return true;
+  }
+
+  if (
+    a.type === 'textNode' &&
+    (b.type === 'aiFilmCharacter' || b.type === 'aiFilmStoryboard' || b.type === 'aiFilmVideoPrompt')
+  ) {
+    if (edge.sourceHandle != null && edge.sourceHandle !== TEXT_NODE_OUTPUT_HANDLE_ID) return false;
+    if (edge.targetHandle != null && edge.targetHandle !== FILM_INPUT_HANDLE_ID) return false;
+    return true;
+  }
+
+  if (a.type === 'department' && b.type === 'textNode') {
+    if (edge.sourceHandle != null && edge.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) return false;
+    if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
+    return true;
+  }
+
+  if (a.type === 'department' && b.type === 'promptReview') {
+    if (a.data.type !== 'prompt') return false;
+    if (edge.sourceHandle != null && edge.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) return false;
+    if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
+    return true;
+  }
+
+  if (a.type === 'promptReview' && (b.type === 'textNode' || b.type === 'promptReview')) {
+    if (edge.sourceHandle != null && edge.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) return false;
+    if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
+    return true;
+  }
+
+  if (a.type === 'imageNode' && b.type === 'textNode') {
+    if (edge.sourceHandle != null && edge.sourceHandle !== IMAGE_NODE_OUTPUT_HANDLE_ID) return false;
+    if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
+    return true;
+  }
+
+  if (a.type === 'imageNode' && (b.type === 'aiFilmCharacter' || b.type === 'aiFilmVideoPrompt')) {
+    if (edge.sourceHandle != null && edge.sourceHandle !== IMAGE_NODE_OUTPUT_HANDLE_ID) return false;
+    if (edge.targetHandle != null && edge.targetHandle !== FILM_INPUT_HANDLE_ID) return false;
+    return true;
+  }
+
+  if (a.type === 'videoNode' && b.type === 'textNode') {
+    if (edge.sourceHandle != null && edge.sourceHandle !== VIDEO_NODE_OUTPUT_HANDLE_ID) return false;
+    if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
+    return true;
+  }
+
+  if ((a.type === 'aiFilmCharacter' || a.type === 'aiFilmStoryboard') && b.type === 'aiFilmVideoPrompt') {
+    if (edge.sourceHandle != null && edge.sourceHandle !== FILM_OUTPUT_HANDLE_ID) return false;
+    if (edge.targetHandle != null && edge.targetHandle !== FILM_INPUT_HANDLE_ID) return false;
+    return true;
+  }
+
+  if (
+    (a.type === 'aiFilmCharacter' || a.type === 'aiFilmStoryboard' || a.type === 'aiFilmVideoPrompt') &&
+    b.type === 'textNode'
+  ) {
+    if (edge.sourceHandle != null && edge.sourceHandle !== FILM_OUTPUT_HANDLE_ID) return false;
+    if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
+    return true;
+  }
+
+  if (a.type === 'department' && b.type === 'department') {
+    if (edge.sourceHandle != null && edge.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) return false;
+    if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
+    const ak = a.data.type;
+    const bk = b.data.type;
+    if (ak === 'writing' && bk === 'storyboard') return true;
+    if (ak === 'writing' && bk === 'prompt') return true;
+    return false;
+  }
+
+  if (a.type === 'shotList' && b.type === 'department') {
+    if (b.data.type !== 'prompt') return false;
+    if (
+      edge.sourceHandle != null &&
+      edge.sourceHandle !== DEPT_OUTPUT_HANDLE_ID &&
+      !isShotListItemOutputHandleId(edge.sourceHandle)
+    ) {
+      return false;
+    }
+    if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
+    if (a.data.type !== 'shot_list_node') return false;
+    return true;
+  }
+
+  if (a.type === 'department' && b.type === 'shotList') {
+    if (a.data.type !== 'storyboard') return false;
+    if (edge.sourceHandle !== SHOT_LIST_LINK_HANDLE_ID) return false;
+    if (edge.targetHandle != null && edge.targetHandle !== SHOT_LIST_PARENT_HANDLE_ID) return false;
+    return true;
+  }
+
+  return false;
+}
+
+function getConnectionPoint(event: PointerEvent | MouseEvent | TouchEvent) {
+  if ('clientX' in event) return { x: event.clientX, y: event.clientY };
+  const touch = event.touches[0] ?? event.changedTouches[0];
+  return touch ? { x: touch.clientX, y: touch.clientY } : null;
+}
+
+function distanceToRect(point: { x: number; y: number }, rect: DOMRect): number {
+  const dx = Math.max(rect.left - point.x, 0, point.x - rect.right);
+  const dy = Math.max(rect.top - point.y, 0, point.y - rect.bottom);
+  return Math.hypot(dx, dy);
+}
+
 /** 涓?Miro / Tapnow 涓€鑷达細骞崇Щ涓庢斁缃妭鐐瑰潎鏃犺竟鐣岄檺鍒?*/
 const INFINITE_EXTENT: CoordinateExtent = [
   [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY],
@@ -260,6 +397,7 @@ export function StudioCanvas() {
   const visibleGraph = useMemo(() => removeDeprecatedScriptNodes(nodes, edges), [edges, nodes]);
   const visibleNodes = visibleGraph.nodes;
   const visibleEdges = visibleGraph.edges;
+  const visibleNodesRef = useRef<StudioRFNode[]>(visibleNodes);
 
   useEffect(() => {
     const removedIds = nodes.filter(isDeprecatedScriptFlowNode).map((node) => node.id);
@@ -303,6 +441,8 @@ export function StudioCanvas() {
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
   const [selectedEdgeIds, setSelectedEdgeIds] = useState<string[]>([]);
   const [draggingCanvasFile, setDraggingCanvasFile] = useState(false);
+  const [connectionDragActive, setConnectionDragActive] = useState(false);
+  const [connectionHoverNodeId, setConnectionHoverNodeId] = useState<string | null>(null);
   const connectEndImplRef = useRef<OnConnectEnd>(() => {});
   const connectionDragRef = useRef<ConnectionDragStart | null>(null);
   const altDragStateRef = useRef<{
@@ -312,6 +452,19 @@ export function StudioCanvas() {
   } | null>(null);
   const lastPaneClickRef = useRef<{ ts: number; x: number; y: number } | null>(null);
   const screenToFlowRef = useRef<((pos: { x: number; y: number }) => { x: number; y: number }) | null>(null);
+
+  useEffect(() => {
+    visibleNodesRef.current = visibleNodes;
+  }, [visibleNodes]);
+
+  const flowNodes = useMemo(() => {
+    if (!connectionHoverNodeId) return visibleNodes;
+    return visibleNodes.map((node) => {
+      if (node.id !== connectionHoverNodeId) return node;
+      const className = [node.className, 'studio-connection-target'].filter(Boolean).join(' ');
+      return { ...node, className };
+    });
+  }, [connectionHoverNodeId, visibleNodes]);
 
   const shotListOutputPanePicker =
     Boolean(nodePicker) &&
@@ -331,11 +484,85 @@ export function StudioCanvas() {
       handleId: p.handleId,
       handleType: p.handleType,
     };
+    setConnectionDragActive(true);
+    setConnectionHoverNodeId(null);
   }, []);
 
   const onConnectEndOuter = useCallback<OnConnectEnd>((event, cs) => {
+    setConnectionDragActive(false);
+    setConnectionHoverNodeId(null);
     connectEndImplRef.current(event, cs);
   }, []);
+
+  const findConnectionHoverNode = useCallback((point: { x: number; y: number }) => {
+    const started = connectionDragRef.current;
+    if (!started?.nodeId) return null;
+
+    let bestId: string | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    const currentNodes = visibleNodesRef.current;
+    const elements = document.querySelectorAll<HTMLElement>('.react-flow__node[data-id]');
+
+    elements.forEach((element) => {
+      const nodeId = element.dataset.id ?? element.getAttribute('data-id');
+      if (!nodeId || nodeId === started.nodeId) return;
+
+      const connection: ConnectionCandidate =
+        started.handleType === 'target'
+          ? {
+              source: nodeId,
+              target: started.nodeId,
+              sourceHandle: null,
+              targetHandle: started.handleId,
+            }
+          : {
+              source: started.nodeId,
+              target: nodeId,
+              sourceHandle: started.handleId,
+              targetHandle: null,
+            };
+
+      if (!isStudioConnectionAllowed(connection, currentNodes)) return;
+
+      const distance = distanceToRect(point, element.getBoundingClientRect());
+      if (distance > CONNECTION_MAGNET_HOVER_PX) return;
+      if (distance < bestDistance) {
+        bestId = nodeId;
+        bestDistance = distance;
+      }
+    });
+
+    return bestId;
+  }, []);
+
+  useEffect(() => {
+    if (!connectionDragActive) return;
+
+    const onMove = (event: PointerEvent | MouseEvent | TouchEvent) => {
+      const point = getConnectionPoint(event);
+      if (!point) return;
+      const nextId = findConnectionHoverNode(point);
+      setConnectionHoverNodeId((current) => (current === nextId ? current : nextId));
+    };
+    const clearHover = () => {
+      setConnectionDragActive(false);
+      setConnectionHoverNodeId(null);
+    };
+
+    window.addEventListener('pointermove', onMove, { passive: true });
+    window.addEventListener('mousemove', onMove, { passive: true });
+    window.addEventListener('touchmove', onMove, { passive: true });
+    window.addEventListener('pointercancel', clearHover);
+    window.addEventListener('blur', clearHover);
+
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('touchmove', onMove);
+      window.removeEventListener('pointercancel', clearHover);
+      window.removeEventListener('blur', clearHover);
+    };
+  }, [connectionDragActive, findConnectionHoverNode]);
 
   const onNodeClick = useCallback(
     (_: ReactMouseEvent, n: StudioRFNode) => {
@@ -810,7 +1037,7 @@ export function StudioCanvas() {
       <StudioErrorBoundary>
       <ReactFlow
         colorMode="dark"
-        nodes={visibleNodes}
+        nodes={flowNodes}
         edges={visibleEdges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
@@ -820,140 +1047,7 @@ export function StudioCanvas() {
         onConnectEnd={onConnectEndOuter}
         connectionMode={ConnectionMode.Loose}
         connectionDragThreshold={0}
-        isValidConnection={(edge) => {
-          const src = edge.source;
-          const tgt = edge.target;
-          if (!src || !tgt || src === tgt) return false;
-          const state = useStudioStore.getState();
-          const a = state.nodes.find((x) => x.id === src);
-          const b = state.nodes.find((x) => x.id === tgt);
-          if (!a || !b) return false;
-
-          if (a.type === 'department' && edge.sourceHandle === DEPT_INPUT_PULL_HANDLE_ID) {
-            return false;
-          }
-
-          if (a.type === 'textNode' && b.type === 'department') {
-            if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
-            if (edge.sourceHandle != null && edge.sourceHandle !== TEXT_NODE_OUTPUT_HANDLE_ID) return false;
-            return true;
-          }
-
-          if (a.type === 'textNode' && b.type === 'textNode') {
-            if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
-            if (edge.sourceHandle != null && edge.sourceHandle !== TEXT_NODE_OUTPUT_HANDLE_ID) return false;
-            return true;
-          }
-
-          if (
-            a.type === 'textNode' &&
-            (b.type === 'aiFilmCharacter' ||
-              b.type === 'aiFilmStoryboard' ||
-              b.type === 'aiFilmVideoPrompt')
-          ) {
-            if (edge.sourceHandle != null && edge.sourceHandle !== TEXT_NODE_OUTPUT_HANDLE_ID) return false;
-            if (edge.targetHandle != null && edge.targetHandle !== FILM_INPUT_HANDLE_ID) return false;
-            return true;
-          }
-
-          if (a.type === 'department' && b.type === 'textNode') {
-            if (edge.sourceHandle != null && edge.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) return false;
-            if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
-            return true;
-          }
-
-          if (a.type === 'department' && b.type === 'promptReview') {
-            if (a.data.type !== 'prompt') return false;
-            if (edge.sourceHandle != null && edge.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) return false;
-            if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
-            return true;
-          }
-
-          if (a.type === 'promptReview' && b.type === 'textNode') {
-            if (edge.sourceHandle != null && edge.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) return false;
-            if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
-            return true;
-          }
-
-          if (a.type === 'promptReview' && b.type === 'promptReview') {
-            if (edge.sourceHandle != null && edge.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) return false;
-            if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
-            return true;
-          }
-
-          if (a.type === 'imageNode' && b.type === 'textNode') {
-            if (edge.sourceHandle != null && edge.sourceHandle !== IMAGE_NODE_OUTPUT_HANDLE_ID) return false;
-            if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
-            return true;
-          }
-
-          if (a.type === 'imageNode' && (b.type === 'aiFilmCharacter' || b.type === 'aiFilmVideoPrompt')) {
-            if (edge.sourceHandle != null && edge.sourceHandle !== IMAGE_NODE_OUTPUT_HANDLE_ID) return false;
-            if (edge.targetHandle != null && edge.targetHandle !== FILM_INPUT_HANDLE_ID) return false;
-            return true;
-          }
-
-          if (a.type === 'videoNode' && b.type === 'textNode') {
-            if (edge.sourceHandle != null && edge.sourceHandle !== VIDEO_NODE_OUTPUT_HANDLE_ID) return false;
-            if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
-            return true;
-          }
-
-          if (
-            (a.type === 'aiFilmCharacter' || a.type === 'aiFilmStoryboard') &&
-            b.type === 'aiFilmVideoPrompt'
-          ) {
-            if (edge.sourceHandle != null && edge.sourceHandle !== FILM_OUTPUT_HANDLE_ID) return false;
-            if (edge.targetHandle != null && edge.targetHandle !== FILM_INPUT_HANDLE_ID) return false;
-            return true;
-          }
-
-          if (
-            (a.type === 'aiFilmCharacter' ||
-              a.type === 'aiFilmStoryboard' ||
-              a.type === 'aiFilmVideoPrompt') &&
-            b.type === 'textNode'
-          ) {
-            if (edge.sourceHandle != null && edge.sourceHandle !== FILM_OUTPUT_HANDLE_ID) return false;
-            if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
-            return true;
-          }
-
-          if (a.type === 'department' && b.type === 'department') {
-            if (edge.sourceHandle != null && edge.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) return false;
-            if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
-            const ak = a.data.type;
-            const bk = b.data.type;
-            if (ak === 'writing' && bk === 'storyboard') return true;
-            if (ak === 'writing' && bk === 'prompt') return true;
-            return false;
-          }
-
-          if (a.type === 'shotList' && b.type === 'department') {
-            if (b.data.type !== 'prompt') return false;
-            if (
-              edge.sourceHandle != null &&
-              edge.sourceHandle !== DEPT_OUTPUT_HANDLE_ID &&
-              !isShotListItemOutputHandleId(edge.sourceHandle)
-            ) {
-              return false;
-            }
-            if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
-            if (a.data.type !== 'shot_list_node') return false;
-            return true;
-          }
-
-          if (a.type === 'department' && b.type === 'shotList') {
-            if (a.data.type !== 'storyboard') return false;
-            if (edge.sourceHandle !== SHOT_LIST_LINK_HANDLE_ID) return false;
-            if (edge.targetHandle != null && edge.targetHandle !== SHOT_LIST_PARENT_HANDLE_ID) {
-              return false;
-            }
-            return true;
-          }
-
-          return false;
-        }}
+        isValidConnection={(edge) => isStudioConnectionAllowed(edge, useStudioStore.getState().nodes)}
         nodeTypes={nodeTypes}
         onNodeClick={onNodeClick}
         onNodeContextMenu={onNodeContextMenu}
