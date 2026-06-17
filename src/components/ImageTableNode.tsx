@@ -48,7 +48,7 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
       setImageSize(null);
       pushMessage({
         role: 'system',
-        text: `已载入图片“${file.name}”。连接到文本卡片后，可作为文本润色的视觉参考。`,
+        text: `已载入图片“${file.name}”。连接到文本卡片可参与润色，连接到分镜节点可作为场景设定参考。`,
         nodeId: id,
       });
     },
@@ -85,7 +85,7 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
         ) : (
           <button type="button" className="image-table-node__empty" onClick={pickImage}>
             <span className="image-table-node__empty-title">添加图片参考</span>
-            <span className="image-table-node__empty-copy">上传或粘贴图片后，可连接到文本卡片参与 LLM 润色。</span>
+            <span className="image-table-node__empty-copy">上传或粘贴图片后，可连接到文本卡片或分镜节点。</span>
           </button>
         )}
       </div>
@@ -109,7 +109,7 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
         position={Position.Right}
         id={IMAGE_NODE_OUTPUT_HANDLE_ID}
         className="image-table-node__handle"
-        title="Output：连接到文本卡片后，润色会结合图片画面。"
+        title="Output：连接到文本卡片或分镜节点。"
       />
     </div>
   );

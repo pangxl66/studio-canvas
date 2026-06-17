@@ -18,6 +18,10 @@ export function departmentNodeHasInputWire(deptNodeId: string, edges: Edge[], no
     const src = nodes.find((n) => n.id === e.source);
     if (!src) return false;
     if (src.type === 'textNode') return true;
+    if (src.type === 'imageNode' && src.data.type === 'image_node') {
+      const target = nodes.find((n) => n.id === deptNodeId);
+      return target?.type === 'department' && target.data.type === 'storyboard';
+    }
     if (src.type === 'department' && (e.sourceHandle == null || e.sourceHandle === DEPT_OUTPUT_HANDLE_ID))
       return true;
     if (src.type === 'storyboardFile' && (e.sourceHandle == null || e.sourceHandle === DEPT_OUTPUT_HANDLE_ID))
@@ -25,9 +29,7 @@ export function departmentNodeHasInputWire(deptNodeId: string, edges: Edge[], no
     if (
       src.type === 'shotList' &&
       src.data.type === 'shot_list_node' &&
-      (e.sourceHandle == null ||
-        e.sourceHandle === DEPT_OUTPUT_HANDLE_ID ||
-        parseShotListItemOutputHandleId(e.sourceHandle) != null)
+      parseShotListItemOutputHandleId(e.sourceHandle) != null
     )
       return true;
     return false;

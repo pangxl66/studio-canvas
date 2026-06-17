@@ -12,7 +12,6 @@ import { downloadStoryboardShotlistExcelCsv } from '@/components/detailPanel/sto
 import { ShotListEmbeddedEditor } from '@/components/ShotListEmbeddedEditor';
 import { useStudioStore } from '@/store/useStudioStore';
 import type { StudioNodeData } from '@/types/studio';
-import { DEPT_OUTPUT_HANDLE_ID } from '@/utils/departmentInputWire';
 import { SHOT_LIST_PARENT_HANDLE_ID } from '@/utils/shotListWire';
 
 type ShotListRF = Node<StudioNodeData, 'shotList'>;
@@ -178,33 +177,10 @@ function ShotListNodeInner({ id, data, selected }: NodeProps<ShotListRF>) {
         onPointerDown={(event) => event.stopPropagation()}
         onMouseDown={(event) => event.stopPropagation()}
       >
-        {parentHint} · 整表 Output 或逐镜头 Output -&gt; Prompt
+        {parentHint} · 逐镜头 Output -&gt; Prompt
       </p>
 
-      <div
-        className="shot-list-node__legend nodrag nopan nowheel"
-        onPointerDown={(event) => event.stopPropagation()}
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <span className="shot-list-node__legend-item shot-list-node__legend-item--table">
-          <span className="shot-list-node__legend-dot" aria-hidden />
-          整表 Output
-        </span>
-        <span className="shot-list-node__legend-item shot-list-node__legend-item--shot">
-          <span className="shot-list-node__legend-dot" aria-hidden />
-          逐镜头 Output
-        </span>
-      </div>
-
       <ShotListEmbeddedEditor id={id} data={data} viewportHeight={height} />
-
-      <Handle
-        type="source"
-        position={Position.Right}
-        id={DEPT_OUTPUT_HANDLE_ID}
-        className="shot-list-node__handle shot-list-node__handle--out"
-        title="Output：画布与详情编辑后的最终镜头表 JSON"
-      />
 
       {parentStoryboardGenerating ? (
         <div

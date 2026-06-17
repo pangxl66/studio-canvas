@@ -27,7 +27,8 @@ function isPaneDropMenuHandle(
   if (!handleId || !handleType) return false;
   if (
     handleType === 'source' &&
-    (handleId === 'out' || (nodeType === 'shotList' && isShotListItemOutputHandleId(handleId)))
+    ((nodeType !== 'shotList' && handleId === 'out') ||
+      (nodeType === 'shotList' && isShotListItemOutputHandleId(handleId)))
   ) {
     return (
       nodeType === 'textNode' ||

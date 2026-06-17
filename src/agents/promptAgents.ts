@@ -50,7 +50,7 @@ const REQUIRED_NEGATIVE_GROUPS = [
   },
 ] as const;
 const MAX_PROMPT_CHARS = 2500;
-const MIN_SEEDANCE_CARD_CHARS = 2000;
+const MIN_SEEDANCE_CARD_CHARS = 1000;
 const MAX_SEEDANCE_CARD_CHARS = 3200;
 const MIN_SEEDANCE2_SEGMENTED_CARD_CHARS = 2000;
 const MAX_SEEDANCE2_SEGMENTED_CARD_CHARS = 3500;
@@ -1477,7 +1477,7 @@ function buildCompressionRepairUserMessageV3(
     '【本次修订目标】',
     PROMPT_COPY_CHAR_LIMIT_RULE,
     PROMPT_CARD_LENGTH_BUDGET_RULE,
-    '重要：这不是默认压缩轮。只有超过上限时才压缩；如果 seedanceCard 低于 2000 字，必须扩写到 2000 字以上，扩写内容应来自画面空间、前中后景、灯光逻辑、真实表演、声画同步、连续性约束和运镜执行，不要重复堆形容词。',
+    '重要：这不是默认压缩轮。只有超过上限时才压缩；如果 seedanceCard 低于 1000 字，必须扩写到 1000 字以上，扩写内容应来自画面空间、前中后景、灯光逻辑、真实表演、声画同步、连续性约束和运镜执行，不要重复堆形容词。',
     PROMPT_LOCAL_COMPRESSION_RULE,
     PROMPT_TIMING_SYSTEM_RULE,
     '禁止简单截断，禁止在结尾补 `...` 或 `…`，禁止删除固定标题，禁止把同一句原文重复灌入多个模块。',
@@ -1748,6 +1748,12 @@ void buildCompressionRepairUserMessage;
 void buildCompressionRepairUserMessageV2;
 void MAX_SEEDANCE_CARD_CHARS;
 void SEEDANCE_OPTIONAL_SECTION_INDICES;
+void inferPromptStyleMode;
+void withSeedance2StyleSystemOverride;
+void buildPromptUserMessageSeedance2;
+void buildStructureRepairUserMessageSeedance2;
+void buildCompressionRepairUserMessageSeedance2;
+void buildCoverageRepairUserMessageSeedance2;
 
 export async function runPromptEmployee(
   brief: string,
@@ -1756,14 +1762,10 @@ export async function runPromptEmployee(
   onDelta?: (delta: string, accumulated: string) => void,
   signal?: AbortSignal,
 ): Promise<PromptOutput> {
-  const styleMode = inferPromptStyleMode(executionSystemPrompt);
-  const useSeedance2Segmented = isSeedance2SegmentedStyle(styleMode);
-  const styleExecutionSystemPrompt = useSeedance2Segmented
-    ? withSeedance2StyleSystemOverride(executionSystemPrompt)
-    : executionSystemPrompt;
+  const styleMode: PromptStyleMode = 'studioCanvas';
 
   return runPromptGenerationPipeline(
-    { brief, approvedAssets, executionSystemPrompt: styleExecutionSystemPrompt, onDelta, signal },
+    { brief, approvedAssets, executionSystemPrompt, onDelta, signal },
     {
       defaultNegative: DEFAULT_NEG,
       departmentSystemPrompt: PROMPT_DEPT_AGENT_SYSTEM,
@@ -1771,18 +1773,10 @@ export async function runPromptEmployee(
       timingSystemRule: PROMPT_TIMING_SYSTEM_RULE,
       resolveAssetRefs: promptAssetRefsFromApproved,
       parseSourceStoryboard: tryParseStoryboardFromInputText,
-      buildGenerationUserMessage: useSeedance2Segmented
-        ? buildPromptUserMessageSeedance2
-        : buildPromptUserMessageV3,
-      buildStructureRepairUserMessage: useSeedance2Segmented
-        ? buildStructureRepairUserMessageSeedance2
-        : buildStructureRepairUserMessageV3,
-      buildCompressionRepairUserMessage: useSeedance2Segmented
-        ? buildCompressionRepairUserMessageSeedance2
-        : buildCompressionRepairUserMessageV3,
-      buildCoverageRepairUserMessage: useSeedance2Segmented
-        ? buildCoverageRepairUserMessageSeedance2
-        : buildCoverageRepairUserMessageV3,
+      buildGenerationUserMessage: buildPromptUserMessageV3,
+      buildStructureRepairUserMessage: buildStructureRepairUserMessageV3,
+      buildCompressionRepairUserMessage: buildCompressionRepairUserMessageV3,
+      buildCoverageRepairUserMessage: buildCoverageRepairUserMessageV3,
       invokeWithStructureRepair: invokePromptOutputWithStructureRepair,
       outputNeedsCompressionRepair: (output) => outputNeedsCompressionRepair(output, styleMode),
       normalizeOutput: (output, sourceStoryboard) =>

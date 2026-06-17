@@ -162,6 +162,40 @@ export function departmentAssetAsInputText(
   return null;
 }
 
+export function connectedImageNodesForDepartment(
+  deptId: string,
+  nodes: StudioRFNode[],
+  edges: Edge[],
+): StudioRFNode[] {
+  const incoming = edges.filter(
+    (e) =>
+      e.target === deptId &&
+      (e.targetHandle == null || e.targetHandle === 'in') &&
+      (e.sourceHandle == null || e.sourceHandle === DEPT_OUTPUT_HANDLE_ID),
+  );
+  return incoming
+    .map((edge) => nodes.find((node) => node.id === edge.source))
+    .filter((node): node is StudioRFNode => {
+      if (!node) return false;
+      return node.type === 'imageNode' && node.data.type === 'image_node';
+    });
+}
+
+function imageNodeAsStoryboardReferenceText(node: StudioRFNode, index: number): string | null {
+  if (node.type !== 'imageNode' || node.data.type !== 'image_node') return null;
+  const label = node.data.label?.trim() || `场景参考图 ${index + 1}`;
+  const fileName = node.data.imageFileName?.trim();
+  const summary = node.data.imageAnalysisSummary?.trim();
+  if (!summary && !node.data.imageDataUrl) return null;
+  return [
+    `【视觉场景参考图 ${index + 1}】${label}${fileName ? `（${fileName}）` : ''}`,
+    summary
+      ? `图片场景分析：${summary}`
+      : '图片场景分析：待视觉模型读取。执行分镜时必须先识别这张图，再把图中可见的时间地点、空间结构、光影色彩、场景质感、人物/道具/建筑关系作为硬约束。',
+    '分镜硬约束：后续镜头必须继承参考图的场景基调、空间方向、光影色彩、可见道具/建筑/环境元素与气氛；不得生成与参考图明显冲突的地点、时代、天气、色彩或美术风格。',
+  ].join('\n');
+}
+
 export function mergedTextInputForDepartment(
   deptId: string,
   nodes: StudioRFNode[],
@@ -182,9 +216,7 @@ export function mergedTextInputForDepartment(
       return (
         src?.type === 'shotList' &&
         src.data.type === 'shot_list_node' &&
-        (e.sourceHandle == null ||
-          e.sourceHandle === DEPT_OUTPUT_HANDLE_ID ||
-          parseShotListItemOutputHandleId(e.sourceHandle) != null)
+        parseShotListItemOutputHandleId(e.sourceHandle) != null
       );
     });
 
@@ -195,6 +227,13 @@ export function mergedTextInputForDepartment(
     if (!src) continue;
     if (src.type === 'textNode') {
       parts.push(src.data.raw_text ?? src.data.input ?? '');
+    } else if (src.type === 'imageNode') {
+      if (consumerKind !== 'storyboard') continue;
+      if (e.sourceHandle != null && e.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) continue;
+      const imageRefs = connectedImageNodesForDepartment(deptId, nodes, edges);
+      const index = Math.max(0, imageRefs.findIndex((item) => item.id === src.id));
+      const block = imageNodeAsStoryboardReferenceText(src, index);
+      if (block != null && block.length > 0) parts.push(block);
     } else if (src.type === 'storyboardFile') {
       if (e.sourceHandle != null && e.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) continue;
       const block = departmentAssetAsInputText(src.data, consumerKind);
@@ -206,11 +245,7 @@ export function mergedTextInputForDepartment(
         const bucket = promptShotSelections.get(src.id) ?? [];
         if (!bucket.includes(pickedWireId)) bucket.push(pickedWireId);
         promptShotSelections.set(src.id, bucket);
-        continue;
       }
-      if (e.sourceHandle != null && e.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) continue;
-      const block = departmentAssetAsInputText(src.data, consumerKind);
-      if (block != null && block.length > 0) parts.push(block);
     } else if (src.type === 'department') {
       if (e.sourceHandle != null && e.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) continue;
       if (hasPromptShotListSource && src.data.type === 'storyboard') continue;

@@ -152,11 +152,15 @@ const HIDDEN_SKILL_IDS = new Set<string>([
   'prompt/storyboard-to-sd20-prompt',
   'prompt/storyboard_prompt_translator_v1',
   'prompt/jimeng_prompt_generator_v1',
+  'prompt/seedance2_segmented_prompt_v1',
 ]);
 const SKILL_ID_ALIASES = new Map<string, string>([
   ['prompt/jimeng_prompt_generator_v1', DEFAULT_PROMPT_STYLE_SKILL_ID],
   ['prompt/storyboard-to-sd20-prompt', DEFAULT_PROMPT_STYLE_SKILL_ID],
   ['prompt/storyboard_prompt_translator_v1', DEFAULT_PROMPT_STYLE_SKILL_ID],
+  // Keep the new Seedance/9-grid experiment isolated from legacy Prompt nodes.
+  // Existing projects that saved this style are normalized back to the stable default spec.
+  ['prompt/seedance2_segmented_prompt_v1', DEFAULT_PROMPT_STYLE_SKILL_ID],
 ]);
 
 for (const [pathKey, mod] of Object.entries(rawModules)) {

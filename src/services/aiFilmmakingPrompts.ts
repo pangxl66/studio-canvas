@@ -14,6 +14,7 @@ export type AiFilmmakingSourceSummary = {
   textBlocks: string[];
   characterPrompts: string[];
   storyboardPrompts: string[];
+  storyboardTables: string[];
   imageLabels: string[];
   storyboardImageLabels: string[];
   characterImageLabels: string[];
@@ -151,6 +152,9 @@ function formatSourceSummary(summary: AiFilmmakingSourceSummary): string {
   if (summary.storyboardPrompts.length > 0) {
     parts.push(`STORYBOARD GRID PROMPTS:\n${summary.storyboardPrompts.join('\n\n---\n\n')}`);
   }
+  if (summary.storyboardTables.length > 0) {
+    parts.push(`STORYBOARD SHOT LISTS / TABLES:\n${summary.storyboardTables.join('\n\n---\n\n')}`);
+  }
   if (summary.imageLabels.length > 0) {
     parts.push(
       `CONNECTED IMAGE REFERENCES:\n${summary.imageLabels
@@ -182,6 +186,9 @@ export function buildStoryboardGridUserPrompt(
     'Generate Template 2 Cinematic Storyboard Grid prompt from the source material.',
     'Output one complete prompt for a 3x3 / 9-panel continuous storyboard sheet.',
     'Fill all details concretely; no placeholders. Use concise beats and legible annotation strip instructions.',
+    summary.storyboardTables.length > 0
+      ? 'A storyboard shot list/table is connected. Treat it as the primary source: preserve shot order, scene logic, camera/action/dialogue details, and condense or expand them into exactly 9 storyboard panels according to the active storyboard Skill.'
+      : '',
     storyboardSkill?.name ? `Active storyboard Skill: ${storyboardSkill.name}.` : '',
     '',
     'SOURCE MATERIAL:',

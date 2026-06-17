@@ -48,6 +48,7 @@ import {
   type WorkflowAgentSession,
 } from '@/services/workflowAgent';
 import {
+  connectedImageNodesForDepartment,
   DEPT_OUTPUT_HANDLE_ID,
   departmentAssetAsInputText,
   mergedTextInputForDepartment,
@@ -55,6 +56,7 @@ import {
   mergedUpstreamForTextNode,
   resolveDepartmentExecutionInput,
 } from '@/services/graphInput';
+import { analyzeImageReference } from '@/services/imageReferenceAnalysis';
 import {
   SHOT_LIST_LINK_HANDLE_ID,
   SHOT_LIST_PARENT_HANDLE_ID,
@@ -271,6 +273,68 @@ function canDeptChain(upstream: PipelineKind, downstream: PipelineKind): boolean
   if (upstream === 'writing' && downstream === 'storyboard') return true;
   if (upstream === 'writing' && downstream === 'prompt') return true;
   return false;
+}
+
+async function prepareStoryboardImageReferencesForExecution(args: {
+  deptId: string;
+  nodes: StudioRFNode[];
+  edges: Edge[];
+  signal: AbortSignal;
+  patchNodeData: (id: string, patch: Partial<StudioNodeData>, bumpVersion?: boolean) => void;
+  pushMessage: (m: Omit<ChatMessage, 'id' | 'ts'> & { id?: string }) => string;
+}): Promise<number> {
+  const imageNodes = connectedImageNodesForDepartment(args.deptId, args.nodes, args.edges);
+  let analyzedCount = 0;
+
+  for (let index = 0; index < imageNodes.length; index += 1) {
+    const imageNode = imageNodes[index];
+    const summary = imageNode.data.imageAnalysisSummary?.trim();
+    if (summary) continue;
+    const imageDataUrl = imageNode.data.imageDataUrl;
+    const label = imageNode.data.imageFileName?.trim() || imageNode.data.label?.trim() || `场景参考图 ${index + 1}`;
+    if (!imageDataUrl) {
+      args.pushMessage({
+        role: 'system',
+        text: `分镜节点已连接图片参考“${label}”，但该图片还没有载入文件，已跳过视觉分析。`,
+        nodeId: args.deptId,
+      });
+      continue;
+    }
+
+    args.patchNodeData(
+      args.deptId,
+      {
+        streaming_preview: `正在读取场景参考图“${label}”，分析场景、空间、光影与美术基调...`,
+        generation_phase: 'employee',
+      },
+      false,
+    );
+
+    try {
+      const analyzed = await analyzeImageReference({ imageDataUrl, signal: args.signal });
+      args.patchNodeData(
+        imageNode.id,
+        {
+          imageAnalysisSummary: analyzed,
+          output: { summary: analyzed },
+          generation_error: undefined,
+        },
+        true,
+      );
+      args.pushMessage({
+        role: 'system',
+        text: `已完成场景参考图分析：${label}。分镜生成会把该图作为场景硬约束。`,
+        nodeId: args.deptId,
+      });
+      analyzedCount += 1;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      args.patchNodeData(imageNode.id, { generation_error: message }, true);
+      throw new Error(`场景参考图“${label}”分析失败：${message}`);
+    }
+  }
+
+  return analyzedCount;
 }
 
 function makeTextNodeData(id: string, text = '', positionLabel?: string): StudioNodeData {
@@ -882,10 +946,15 @@ function refreshDownstreamAfterDepartmentOutputChange(
   options?: { ignoreManualInput?: boolean },
 ) {
   const { nodes, edges } = get();
+  const sourceNode = nodes.find((node) => node.id === departmentId);
   const outgoing = edges.filter(
-    (e) =>
-      e.source === departmentId &&
-      (e.sourceHandle === DEPT_OUTPUT_HANDLE_ID || e.sourceHandle == null),
+    (e) => {
+      if (e.source !== departmentId) return false;
+      if (sourceNode?.type === 'shotList') {
+        return parseShotListItemOutputHandleId(e.sourceHandle) != null;
+      }
+      return e.sourceHandle === DEPT_OUTPUT_HANDLE_ID || e.sourceHandle == null;
+    },
   );
   const seen = new Set<string>();
   for (const e of outgoing) {
@@ -929,12 +998,12 @@ function resolveShotListSourceHandlesForConnect(
   sourceHandle: string | null | undefined,
 ): string[] {
   const draggedWireId = parseShotListItemOutputHandleId(sourceHandle);
-  if (!draggedWireId) return [sourceHandle ?? DEPT_OUTPUT_HANDLE_ID];
+  if (!draggedWireId) return [];
   const selectedWireIds = selectionMap[nodeId] ?? [];
   if (selectedWireIds.length >= 2 && selectedWireIds.includes(draggedWireId)) {
     return selectedWireIds.map((wireId) => makeShotListItemOutputHandleId(wireId));
   }
-  return [sourceHandle ?? DEPT_OUTPUT_HANDLE_ID];
+  return [makeShotListItemOutputHandleId(draggedWireId)];
 }
 
 type UndoSnapshot = {
@@ -1267,14 +1336,16 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     flushShotListPendingEdits(c.source);
     pushUndoSnapshot(set);
     const sourceNodeId = c.source;
+    const sourceNode = sourceNodeId != null ? get().nodes.find((node) => node.id === sourceNodeId) : undefined;
     const sourceHandles =
-      sourceNodeId != null
+      sourceNode?.type === 'shotList'
         ? resolveShotListSourceHandlesForConnect(
             get().shotListSelectedWiresByNodeId,
             sourceNodeId,
             c.sourceHandle,
           )
         : [c.sourceHandle ?? DEPT_OUTPUT_HANDLE_ID];
+    if (sourceHandles.length === 0) return;
     set((s) => ({
       edges: addUniqueAnimatedEdges(
         s.edges,
@@ -2459,7 +2530,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
     const fromDownstreamOut =
       ht === 'source' &&
-      (hid === 'out' || (from.type === 'shotList' && isShotListItemOutputHandleId(hid)));
+      (from.type === 'shotList' ? isShotListItemOutputHandleId(hid) : hid === 'out');
 
     if (feedingAiFilm) {
       if (p.pick === 'text_node') {
@@ -2514,8 +2585,29 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
     if (feedingDept) {
       const dk = from.data.type as PipelineKind;
-      if (p.pick === 'image_node' || p.pick === 'video_node') {
-        return pushErr('图片/视频节点目前作为文本卡片的视觉参考使用，请连接到文本卡片。');
+      if (p.pick === 'image_node') {
+        if (dk !== 'storyboard') {
+          return pushErr('图片节点目前可作为文本卡片视觉参考，或作为分镜节点的场景设定参考。');
+        }
+        const id = get().addImageNode(upstreamPos);
+        set((s) => ({
+          edges: addEdge(
+            {
+              source: id,
+              target: from.id,
+              sourceHandle: 'out',
+              targetHandle: 'in',
+              animated: true,
+            },
+            s.edges,
+          ),
+        }));
+        syncDeptIn(from.id);
+        get().pushMessage({ role: 'system', text: '已创建图片节点，并接入当前分镜节点作为场景参考。', nodeId: id });
+        return id;
+      }
+      if (p.pick === 'video_node') {
+        return pushErr('视频节点目前作为文本卡片的视觉参考使用，请连接到文本卡片。');
       }
       if (isAiFilmPick(p.pick)) {
         return pushErr('AI Filmmaking 新模式节点请从文本、图片或新模式节点 Output 创建。');
@@ -2718,6 +2810,24 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
     if (fromDownstreamOut) {
       if (from.type === 'imageNode' || from.type === 'videoNode') {
+        if (from.type === 'imageNode' && p.pick === 'storyboard') {
+          const id = get().addDepartmentNode('storyboard', downstreamPos);
+          set((s) => ({
+            edges: addEdge(
+              {
+                source: from.id,
+                target: id,
+                sourceHandle: 'out',
+                targetHandle: 'in',
+                animated: true,
+              },
+              s.edges,
+            ),
+          }));
+          syncDeptIn(id);
+          get().pushMessage({ role: 'system', text: '已创建分镜节点，并接入当前图片作为场景参考。', nodeId: id });
+          return id;
+        }
         if (from.type === 'imageNode' && (p.pick === 'film_character_node' || p.pick === 'film_video_prompt_node')) {
           const id = addAiFilmNodeForPick(p.pick, downstreamPos);
           connectToAiFilmNode(from.id, id, 'out');
@@ -2731,7 +2841,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           );
         }
         if (p.pick !== 'text_node') {
-          return pushErr('图片/视频节点 Output 目前只支持连接到文本卡片。');
+          return pushErr('图片节点 Output 可连接到文本卡片、分镜节点、角色设定或影视分镜提示词；视频节点 Output 目前只支持连接到文本卡片。');
         }
         const id = uid('text');
         const data = makeTextNodeData(id, '');
@@ -2826,10 +2936,37 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       if (from.type === 'shotList') {
         if (from.data.type !== 'shot_list_node') return pushErr('当前镜头表节点类型不支持该操作。');
         if (isAiFilmPick(p.pick)) {
-          return pushErr('镜头表暂不直接接入 AI Filmmaking 新模式，请先转成文本卡片。');
+          if (p.pick !== 'film_storyboard_node') {
+            return pushErr('镜头表 Output 目前只支持直接接入九宫格影视分镜节点；视频提示词请先由九宫格节点生成后再连接。');
+          }
+          const id = addAiFilmNodeForPick(p.pick, downstreamPos);
+          const sourceHandles = resolveShotListSourceHandlesForConnect(
+            get().shotListSelectedWiresByNodeId,
+            from.id,
+            hid,
+          );
+          if (sourceHandles.length === 0) return pushErr('请从镜头表里的逐镜头 Output 端口拖出连接。');
+          set((s) => ({
+            edges: addUniqueAnimatedEdges(
+              s.edges,
+              sourceHandles.map((sourceHandle) => ({
+                source: from.id,
+                target: id,
+                sourceHandle,
+                targetHandle: 'in',
+                animated: true,
+              })),
+            ),
+          }));
+          get().pushMessage({
+            role: 'broadcast',
+            text: '已创建九宫格影视分镜节点，并按当前选中的镜头输出自动连线。',
+            nodeId: id,
+          });
+          return id;
         }
         if (p.pick !== 'prompt') {
-          return pushErr('镜头表节点的整表 Output 或逐镜头 Output 只能连接到 Prompt 节点。');
+          return pushErr('镜头表节点的逐镜头 Output 只能连接到 Prompt 节点或九宫格影视分镜节点。');
         }
         const id = get().addDepartmentNode('prompt', downstreamPos);
         const sourceHandles = resolveShotListSourceHandlesForConnect(
@@ -2837,6 +2974,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           from.id,
           hid,
         );
+        if (sourceHandles.length === 0) return pushErr('请从镜头表里的逐镜头 Output 端口拖出连接。');
         set((s) => ({
           edges: addUniqueAnimatedEdges(
             s.edges,
@@ -2851,10 +2989,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         syncDeptIn(id);
         get().pushMessage({
           role: 'broadcast',
-          text:
-            hid && hid !== DEPT_OUTPUT_HANDLE_ID
-              ? '已创建 Prompt 节点，并按当前选中的镜头输出自动连线。'
-              : '已创建 Prompt 节点，并按整表输出自动连线。',
+          text: '已创建 Prompt 节点，并按当前选中的镜头输出自动连线。',
           nodeId: id,
         });
         return id;
@@ -2862,10 +2997,31 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
       if (from.type === 'storyboardFile') {
         if (isAiFilmPick(p.pick)) {
-          return pushErr('分镜表文件暂不直接接入 AI Filmmaking 新模式，请先转成文本卡片。');
+          if (p.pick !== 'film_storyboard_node') {
+            return pushErr('分镜表文件 Output 目前只支持直接接入九宫格影视分镜节点。');
+          }
+          const id = addAiFilmNodeForPick(p.pick, downstreamPos);
+          set((s) => ({
+            edges: addEdge(
+              {
+                source: from.id,
+                target: id,
+                sourceHandle: DEPT_OUTPUT_HANDLE_ID,
+                targetHandle: 'in',
+                animated: true,
+              },
+              s.edges,
+            ),
+          }));
+          get().pushMessage({
+            role: 'broadcast',
+            text: '已创建九宫格影视分镜节点，并接入当前分镜文件输出。',
+            nodeId: id,
+          });
+          return id;
         }
         if (p.pick !== 'prompt') {
-          return pushErr('分镜表文件节点的 Output 只能连接到 Prompt 节点。');
+          return pushErr('分镜表文件节点的 Output 只能连接到 Prompt 节点或九宫格影视分镜节点。');
         }
         const id = get().addDepartmentNode('prompt', downstreamPos);
         set((s) => ({
@@ -3196,6 +3352,33 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     };
 
     try {
+      if (kind === 'storyboard') {
+        const analyzedImages = await prepareStoryboardImageReferencesForExecution({
+          deptId: nodeId,
+          nodes: get().nodes,
+          edges: get().edges,
+          signal: controller.signal,
+          patchNodeData: get().patchNodeData,
+          pushMessage: get().pushMessage,
+        });
+        ensureNotStopped();
+        if (analyzedImages > 0) {
+          const mergedWithImageAnalysis = mergedTextInputForDepartment(nodeId, get().nodes, get().edges);
+          if (mergedWithImageAnalysis !== null && mergedWithImageAnalysis.trim() !== '') {
+            get().patchNodeData(
+              nodeId,
+              {
+                input: mergedWithImageAnalysis.trim(),
+                inputSource: 'graph',
+                streaming_preview: '场景参考图已读取，正在根据图片场景与文本内容生成分镜表...',
+                generation_phase: 'employee',
+              },
+              false,
+            );
+          }
+        }
+      }
+
       const src = get().nodes.find((n) => n.id === nodeId);
       const reviewOptimization =
         fromReviewed && src

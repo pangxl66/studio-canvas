@@ -167,12 +167,7 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
         .filter((wireId): wireId is string => Boolean(wireId));
       if (shotItemHandles.length >= 2) return '多镜头组合';
       if (shotItemHandles.length === 1) return '单镜头';
-      const hasShotListWhole = incoming.some(
-        (edge) =>
-          edge.sourceHandle === DEPT_OUTPUT_HANDLE_ID &&
-          s.nodes.find((n) => n.id === edge.source)?.type === 'shotList',
-      );
-      return hasShotListWhole ? '整表提示词' : null;
+      return null;
     }, [data.type, id]),
   );
 

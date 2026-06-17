@@ -208,18 +208,18 @@ body,
 
 .studio-canvas .react-flow__node.studio-connection-target {
   z-index: 35 !important;
-  filter: drop-shadow(0 0 18px rgba(94, 234, 212, 0.34));
+  filter: drop-shadow(0 0 14px rgba(147, 197, 253, 0.22));
 }
 
 .studio-canvas .react-flow__node.studio-connection-target::after {
   content: "";
   position: absolute;
   inset: -8px;
-  border: 1px solid rgba(94, 234, 212, 0.82);
+  border: 1px solid rgba(147, 197, 253, 0.48);
   border-radius: 16px;
   box-shadow:
-    0 0 0 1px rgba(94, 234, 212, 0.16),
-    0 0 28px rgba(94, 234, 212, 0.28);
+    0 0 0 1px rgba(147, 197, 253, 0.1),
+    0 0 22px rgba(147, 197, 253, 0.16);
   pointer-events: none;
 }
 

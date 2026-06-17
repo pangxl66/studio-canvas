@@ -196,6 +196,7 @@ function buildStoryboardUserPromptFromWriting(script: WritingOutput): string {
 3. note 优先写镜头意图、主机制、转势点、环境发动方式、英雄画面属性。
 4. 武侠 / 奇幻 / 围猎 / 追逐 / 突围场面优先加强纵深、高低差、遮挡揭示、突然现身与第二波压迫。
 5. 若同场连续镜头确实适合 15 秒内组合，可用 mergedMembers；否则优先细分镜头。
+6. 若输入包含“视觉场景参考图 / 图片场景分析”，必须把图片当作场景设定硬约束：所有镜头的地点、时代、空间方向、光影色彩、美术质感、可见道具/建筑/环境元素和氛围都必须与图片一致，并在 sceneRef、description 或 note 中落地，不得生成与参考图冲突的场景设定。
 
 只输出形如 { "shots": [ ... ], "narrativeBeats": [ ... ] } 的 JSON。
 
@@ -212,6 +213,7 @@ function buildStoryboardUserPromptFromRawText(t: string): string {
 4. 对话戏也要处理显藏关系、空间压迫与力量变化。
 5. 若信息不足，可以合理推定空间层次、危险源、可借力物，但应体现在 note 或 narrativeBeats 中。
 6. 只有在同场连续镜头明确适合 15 秒内合并时，才使用 mergedMembers。
+7. 若输入包含“视觉场景参考图 / 图片场景分析”，必须把图片当作场景设定硬约束：所有镜头的地点、时代、空间方向、光影色彩、美术质感、可见道具/建筑/环境元素和氛围都必须与图片一致，并在 sceneRef、description 或 note 中落地，不得生成与参考图冲突的场景设定。
 
 只输出形如 { "shots": [ ... ], "narrativeBeats": [ ... ] } 的 JSON。
 

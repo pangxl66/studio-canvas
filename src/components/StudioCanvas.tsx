@@ -9,6 +9,7 @@
   SelectionMode,
   useReactFlow,
   type CoordinateExtent,
+  type Connection,
   type Edge,
   type NodeTypes,
   type OnConnectEnd,
@@ -48,7 +49,7 @@ import {
 import { PromptReviewNode } from '@/components/PromptReviewNode';
 import { StoryboardFileNode } from '@/components/StoryboardFileNode';
 import { ShotListNode } from '@/components/ShotListNode';
-import { TextNode, TEXT_NODE_OUTPUT_HANDLE_ID } from '@/components/TextNode';
+import { TextNode, TEXT_NODE_INPUT_HANDLE_ID, TEXT_NODE_OUTPUT_HANDLE_ID } from '@/components/TextNode';
 import type { ContextMenuState } from '@/components/NodeContextMenu';
 import { ScissorCutLayer } from '@/components/ScissorCutLayer';
 import { StudioErrorBoundary } from '@/components/StudioErrorBoundary';
@@ -305,6 +306,12 @@ function isStudioConnectionAllowed(edge: ConnectionCandidate, nodes: StudioRFNod
     return true;
   }
 
+  if (a.type === 'imageNode' && b.type === 'department' && b.data.type === 'storyboard') {
+    if (edge.sourceHandle != null && edge.sourceHandle !== IMAGE_NODE_OUTPUT_HANDLE_ID) return false;
+    if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
+    return true;
+  }
+
   if (a.type === 'imageNode' && (b.type === 'aiFilmCharacter' || b.type === 'aiFilmVideoPrompt')) {
     if (edge.sourceHandle != null && edge.sourceHandle !== IMAGE_NODE_OUTPUT_HANDLE_ID) return false;
     if (edge.targetHandle != null && edge.targetHandle !== FILM_INPUT_HANDLE_ID) return false;
@@ -319,6 +326,18 @@ function isStudioConnectionAllowed(edge: ConnectionCandidate, nodes: StudioRFNod
 
   if ((a.type === 'aiFilmCharacter' || a.type === 'aiFilmStoryboard') && b.type === 'aiFilmVideoPrompt') {
     if (edge.sourceHandle != null && edge.sourceHandle !== FILM_OUTPUT_HANDLE_ID) return false;
+    if (edge.targetHandle != null && edge.targetHandle !== FILM_INPUT_HANDLE_ID) return false;
+    return true;
+  }
+
+  if (a.type === 'department' && a.data.type === 'storyboard' && b.type === 'aiFilmStoryboard') {
+    if (edge.sourceHandle != null && edge.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) return false;
+    if (edge.targetHandle != null && edge.targetHandle !== FILM_INPUT_HANDLE_ID) return false;
+    return true;
+  }
+
+  if (a.type === 'storyboardFile' && b.type === 'aiFilmStoryboard') {
+    if (edge.sourceHandle != null && edge.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) return false;
     if (edge.targetHandle != null && edge.targetHandle !== FILM_INPUT_HANDLE_ID) return false;
     return true;
   }
@@ -344,14 +363,15 @@ function isStudioConnectionAllowed(edge: ConnectionCandidate, nodes: StudioRFNod
 
   if (a.type === 'shotList' && b.type === 'department') {
     if (b.data.type !== 'prompt') return false;
-    if (
-      edge.sourceHandle != null &&
-      edge.sourceHandle !== DEPT_OUTPUT_HANDLE_ID &&
-      !isShotListItemOutputHandleId(edge.sourceHandle)
-    ) {
-      return false;
-    }
+    if (!isShotListItemOutputHandleId(edge.sourceHandle)) return false;
     if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
+    if (a.data.type !== 'shot_list_node') return false;
+    return true;
+  }
+
+  if (a.type === 'shotList' && b.type === 'aiFilmStoryboard') {
+    if (!isShotListItemOutputHandleId(edge.sourceHandle)) return false;
+    if (edge.targetHandle != null && edge.targetHandle !== FILM_INPUT_HANDLE_ID) return false;
     if (a.data.type !== 'shot_list_node') return false;
     return true;
   }
@@ -378,6 +398,72 @@ function distanceToRect(point: { x: number; y: number }, rect: DOMRect): number 
   return Math.hypot(dx, dy);
 }
 
+function preferredSourceHandleForNode(node: StudioRFNode): string | null {
+  if (node.type === 'textNode') return TEXT_NODE_OUTPUT_HANDLE_ID;
+  if (node.type === 'department') return DEPT_OUTPUT_HANDLE_ID;
+  if (node.type === 'promptReview') return DEPT_OUTPUT_HANDLE_ID;
+  if (node.type === 'storyboardFile') return DEPT_OUTPUT_HANDLE_ID;
+  if (node.type === 'imageNode') return IMAGE_NODE_OUTPUT_HANDLE_ID;
+  if (node.type === 'videoNode') return VIDEO_NODE_OUTPUT_HANDLE_ID;
+  if (node.type === 'aiFilmCharacter' || node.type === 'aiFilmStoryboard' || node.type === 'aiFilmVideoPrompt') {
+    return FILM_OUTPUT_HANDLE_ID;
+  }
+  return null;
+}
+
+function preferredTargetHandleForNode(node: StudioRFNode): string | null {
+  if (node.type === 'textNode') return TEXT_NODE_INPUT_HANDLE_ID;
+  if (node.type === 'department') return DEPT_INPUT_HANDLE_ID;
+  if (node.type === 'promptReview') return DEPT_INPUT_HANDLE_ID;
+  if (node.type === 'shotList') return SHOT_LIST_PARENT_HANDLE_ID;
+  if (node.type === 'aiFilmCharacter' || node.type === 'aiFilmStoryboard' || node.type === 'aiFilmVideoPrompt') {
+    return FILM_INPUT_HANDLE_ID;
+  }
+  return null;
+}
+
+function buildMagnetConnection(
+  started: ConnectionDragStart | null,
+  hoverNodeId: string | null,
+  nodes: StudioRFNode[],
+): Connection | null {
+  if (!started?.nodeId || !hoverNodeId || started.nodeId === hoverNodeId) return null;
+  const startedNode = nodes.find((node) => node.id === started.nodeId);
+  const hoverNode = nodes.find((node) => node.id === hoverNodeId);
+  if (!startedNode || !hoverNode) return null;
+
+  if (started.handleType === 'target') {
+    const sourceHandle = preferredSourceHandleForNode(hoverNode);
+    const targetHandle = started.handleId ?? preferredTargetHandleForNode(startedNode);
+    if (!sourceHandle || !targetHandle) return null;
+    return {
+      source: hoverNode.id,
+      target: startedNode.id,
+      sourceHandle,
+      targetHandle,
+    };
+  }
+
+  const sourceHandle = started.handleId ?? preferredSourceHandleForNode(startedNode);
+  const targetHandle = preferredTargetHandleForNode(hoverNode);
+  if (!sourceHandle || !targetHandle) return null;
+  return {
+    source: startedNode.id,
+    target: hoverNode.id,
+    sourceHandle,
+    targetHandle,
+  };
+}
+
+function isDisabledShotListTableOutputEdge(edge: Edge, nodes: StudioRFNode[]): boolean {
+  const source = nodes.find((node) => node.id === edge.source);
+  return (
+    source?.type === 'shotList' &&
+    source.data.type === 'shot_list_node' &&
+    (edge.sourceHandle == null || edge.sourceHandle === DEPT_OUTPUT_HANDLE_ID)
+  );
+}
+
 /** 涓?Miro / Tapnow 涓€鑷达細骞崇Щ涓庢斁缃妭鐐瑰潎鏃犺竟鐣岄檺鍒?*/
 const INFINITE_EXTENT: CoordinateExtent = [
   [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY],
@@ -396,7 +482,10 @@ export function StudioCanvas() {
   const edges = useStudioStore((s) => s.edges);
   const visibleGraph = useMemo(() => removeDeprecatedScriptNodes(nodes, edges), [edges, nodes]);
   const visibleNodes = visibleGraph.nodes;
-  const visibleEdges = visibleGraph.edges;
+  const visibleEdges = useMemo(
+    () => visibleGraph.edges.filter((edge) => !isDisabledShotListTableOutputEdge(edge, visibleGraph.nodes)),
+    [visibleGraph.edges, visibleGraph.nodes],
+  );
   const visibleNodesRef = useRef<StudioRFNode[]>(visibleNodes);
 
   useEffect(() => {
@@ -469,8 +558,7 @@ export function StudioCanvas() {
   const shotListOutputPanePicker =
     Boolean(nodePicker) &&
     nodes.find((n) => n.id === nodePicker!.fromNodeId)?.type === 'shotList' &&
-    (nodePicker!.fromHandleId === DEPT_OUTPUT_HANDLE_ID ||
-      isShotListItemOutputHandleId(nodePicker!.fromHandleId)) &&
+    isShotListItemOutputHandleId(nodePicker!.fromHandleId) &&
     nodePicker!.fromHandleType === 'source';
   const promptOutputPanePicker =
     Boolean(nodePicker) &&
@@ -486,12 +574,6 @@ export function StudioCanvas() {
     };
     setConnectionDragActive(true);
     setConnectionHoverNodeId(null);
-  }, []);
-
-  const onConnectEndOuter = useCallback<OnConnectEnd>((event, cs) => {
-    setConnectionDragActive(false);
-    setConnectionHoverNodeId(null);
-    connectEndImplRef.current(event, cs);
   }, []);
 
   const findConnectionHoverNode = useCallback((point: { x: number; y: number }) => {
@@ -534,6 +616,31 @@ export function StudioCanvas() {
 
     return bestId;
   }, []);
+
+  const onConnectEndOuter = useCallback<OnConnectEnd>(
+    (event, cs) => {
+      const started = connectionDragRef.current;
+      const point = getConnectionPoint(event);
+      const hoverNodeId = (point ? findConnectionHoverNode(point) : null) ?? connectionHoverNodeId;
+
+      if (cs.isValid !== true && hoverNodeId != null) {
+        const currentNodes = useStudioStore.getState().nodes;
+        const magnetConnection = buildMagnetConnection(started, hoverNodeId, currentNodes);
+        if (magnetConnection && isStudioConnectionAllowed(magnetConnection, currentNodes)) {
+          connectionDragRef.current = null;
+          setConnectionDragActive(false);
+          setConnectionHoverNodeId(null);
+          onConnect(magnetConnection);
+          return;
+        }
+      }
+
+      setConnectionDragActive(false);
+      setConnectionHoverNodeId(null);
+      connectEndImplRef.current(event, cs);
+    },
+    [connectionHoverNodeId, findConnectionHoverNode, onConnect],
+  );
 
   useEffect(() => {
     if (!connectionDragActive) return;
