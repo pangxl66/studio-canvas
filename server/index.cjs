@@ -2820,7 +2820,11 @@ function serveStatic(req, res) {
   }
   res.statusCode = 200;
   res.setHeader('content-type', contentTypeFor(filePath));
-  if (filePath !== path.join(distDir, 'index.html')) {
+  if (filePath === path.join(distDir, 'index.html')) {
+    res.setHeader('cache-control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('pragma', 'no-cache');
+    res.setHeader('expires', '0');
+  } else {
     res.setHeader('cache-control', 'public, max-age=31536000, immutable');
   }
   const stat = fs.statSync(filePath);
