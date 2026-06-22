@@ -47,13 +47,13 @@ ${XUKE_STORYBOARD_METHOD_SUMMARY.map((line, idx) => `${idx + 1}. ${line}`).join(
 - id: number，镜头号，从 1 递增
 - type: string，景别（大全景、全景、中景、近景、特写等）
 - movement: string，运镜（固定、推、拉、摇、移、跟、升降、手持突进等）
+- durationSec: number，建议时长，单位为秒；必须根据动作复杂度、对白长度、情绪停顿、景别变化和信息密度合理分配
 - description: string，可直接执行的画面描述，必须写清空间、主体、动作、遮挡、光线或危险关系
 - content: string，该镜头下的对白原文；无对白必须输出空字符串 ""
 
 可选键：
 - sceneRef: string，回溯场次
 - action: string，画内调度
-- durationSec: number，建议时长
 - note: string，写明镜头意图、势能节点、英雄画面属性、环境参与方式或执行备注
 - mergedMembers: StoryboardShot[]，仅在确实需要输出同场连续镜头组合时使用
 

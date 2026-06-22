@@ -10,10 +10,25 @@ export function blankShot(sceneRef?: string): StoryboardShot {
     wireId: createStoryboardShotWireId('blank'),
     type: '中景',
     movement: '固定',
+    durationSec: 3,
     description: '',
     content: '',
     sceneRef,
   };
+}
+
+function formatShotDuration(value: StoryboardShot['durationSec']): string {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return '—';
+  const rounded = Math.round(value * 10) / 10;
+  return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1).replace(/\.0$/, '')}秒`;
+}
+
+function parseShotDuration(value: string): number | undefined {
+  const normalized = value.replace(/秒|s/gi, '').trim();
+  if (!normalized) return undefined;
+  const parsed = Number.parseFloat(normalized);
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+  return Math.min(60, Math.round(parsed * 10) / 10);
 }
 
 /** 将一段连续下标的镜头合并为一行：描述/台词/动作拼接，景别与运镜去重后用「 / 」连接 */
@@ -40,7 +55,7 @@ export function selectionCanMergeConsecutive(indices: Set<number>): {
   return { ok: true, lo: sorted[0], hi: sorted[sorted.length - 1] };
 }
 
-type EditableShotField = 'description' | 'content' | 'type' | 'movement';
+type EditableShotField = 'description' | 'content' | 'type' | 'movement' | 'durationSec';
 
 type PatchFn = (id: string, patch: Partial<StudioNodeData>, bumpVersion?: boolean) => void;
 
@@ -193,7 +208,9 @@ export function StoryboardShotListTable({
             ? s.content
             : field === 'type'
               ? s.type
-              : s.movement;
+              : field === 'movement'
+                ? s.movement
+                : formatShotDuration(s.durationSec).replace(/^—$/, '');
       setEditing({ index, field });
     },
     [canEdit, shots],
@@ -212,7 +229,8 @@ export function StoryboardShotListTable({
       if (field === 'description') return { ...s, description: v };
       if (field === 'content') return { ...s, content: v };
       if (field === 'type') return { ...s, type: v };
-      return { ...s, movement: v };
+      if (field === 'movement') return { ...s, movement: v };
+      return { ...s, durationSec: parseShotDuration(v) };
     });
     setEditing(null);
     commitShots(next);
@@ -223,12 +241,12 @@ export function StoryboardShotListTable({
   const showInsertRows = !workbench;
   const colCount =
     canEdit && workbench
-      ? 7
+      ? 8
       : canEdit
-        ? 9
+        ? 10
         : workbench
-          ? 5
-          : 7;
+          ? 6
+          : 8;
 
   const scrollBox = (
     <div
@@ -252,6 +270,9 @@ export function StoryboardShotListTable({
             <th scope="col">{workbench ? '镜头号' : '镜头'}</th>
             <th scope="col">景别</th>
             <th scope="col">运镜</th>
+            <th scope="col" className="detail-panel__shot-table__th--duration">
+              时间
+            </th>
             <th scope="col">{workbench ? '描述' : '画面'}</th>
             {showActionCol ? <th scope="col">动作</th> : null}
             <th scope="col">{workbench ? '台词' : '对白'}</th>
@@ -291,6 +312,7 @@ export function StoryboardShotListTable({
             const isEditingContent = editing?.index === rowIdx && editing.field === 'content';
             const isEditingType = editing?.index === rowIdx && editing.field === 'type';
             const isEditingMovement = editing?.index === rowIdx && editing.field === 'movement';
+            const isEditingDuration = editing?.index === rowIdx && editing.field === 'durationSec';
 
             const cellEditable = canEdit ? 'detail-panel__shot-table__cell--editable' : undefined;
 
@@ -374,6 +396,36 @@ export function StoryboardShotListTable({
                       sh.movement
                     ) : (
                       '—'
+                    )}
+                  </td>
+                  <td
+                    className={`detail-panel__shot-table__td--duration${cellEditable ? ` ${cellEditable}` : ''}`}
+                    onClick={() => {
+                      if (!canEdit || isEditingDuration) return;
+                      startEdit(rowIdx, 'durationSec');
+                    }}
+                  >
+                    {isEditingDuration ? (
+                      <input
+                        className="detail-panel__shot-table__cell-input"
+                        defaultValue={formatShotDuration(sh.durationSec).replace(/^—$/, '')}
+                        aria-label="编辑时间"
+                        autoFocus
+                        onClick={(e) => e.stopPropagation()}
+                        onInput={(e) => {
+                          editDraftRef.current = (e.target as HTMLInputElement).value;
+                        }}
+                        onBlur={commitEdit}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Escape') {
+                            e.preventDefault();
+                            skipBlurCommitRef.current = true;
+                            setEditing(null);
+                          }
+                        }}
+                      />
+                    ) : (
+                      formatShotDuration(sh.durationSec)
                     )}
                   </td>
                   <td

@@ -4141,6 +4141,11 @@ body,
   min-width: 92px;
 }
 
+.shot-list-canvas__th--duration {
+  width: 72px;
+  min-width: 72px;
+}
+
 .shot-list-canvas__th--sound {
   min-width: 120px;
 }
@@ -4174,6 +4179,11 @@ body,
 
 .shot-list-canvas__td--scene {
   min-width: 92px;
+}
+
+.shot-list-canvas__td--duration {
+  min-width: 72px;
+  white-space: nowrap;
 }
 
 .shot-list-canvas__td--sound {
@@ -7319,6 +7329,13 @@ body,
 .detail-panel__shot-table__th--narrow {
   width: 44px;
   text-align: center;
+}
+
+.detail-panel__shot-table__th--duration,
+.detail-panel__shot-table__td--duration {
+  width: 72px;
+  min-width: 72px;
+  white-space: nowrap;
 }
 
 .detail-panel__shot-table__td--check {

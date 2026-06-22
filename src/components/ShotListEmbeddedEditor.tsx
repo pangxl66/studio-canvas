@@ -25,7 +25,15 @@ import {
 } from '@/utils/shotListPendingEdits';
 import { makeShotListItemOutputHandleId, parseShotListItemOutputHandleId } from '@/utils/shotListWire';
 
-type EditableField = 'sceneRef' | 'type' | 'movement' | 'description' | 'content' | 'sound' | 'note';
+type EditableField =
+  | 'sceneRef'
+  | 'type'
+  | 'movement'
+  | 'durationSec'
+  | 'description'
+  | 'content'
+  | 'sound'
+  | 'note';
 type ShotListContextMenuState = {
   x: number;
   y: number;
@@ -40,6 +48,20 @@ const TRASH_ICON = (
     />
   </svg>
 );
+
+function formatShotDuration(value: StoryboardShot['durationSec']): string {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return '';
+  const rounded = Math.round(value * 10) / 10;
+  return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1).replace(/\.0$/, '')}秒`;
+}
+
+function parseShotDuration(value: string): number | undefined {
+  const normalized = value.replace(/秒|s/gi, '').trim();
+  if (!normalized) return undefined;
+  const parsed = Number.parseFloat(normalized);
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+  return Math.min(60, Math.round(parsed * 10) / 10);
+}
 
 function ShotCanvasRow({
   sh,
@@ -77,6 +99,7 @@ function ShotCanvasRow({
   const [sceneRef, setSceneRef] = useState(sh.sceneRef ?? '');
   const [type, setType] = useState(sh.type);
   const [movement, setMovement] = useState(sh.movement);
+  const [durationSec, setDurationSec] = useState(formatShotDuration(sh.durationSec));
   const [description, setDescription] = useState(sh.description);
   const [content, setContent] = useState(sh.content);
   const [sound, setSound] = useState(sh.sound ?? '');
@@ -91,6 +114,9 @@ function ShotCanvasRow({
   useEffect(() => {
     if (editingField !== 'movement') setMovement(sh.movement);
   }, [sh.movement, editingField]);
+  useEffect(() => {
+    if (editingField !== 'durationSec') setDurationSec(formatShotDuration(sh.durationSec));
+  }, [sh.durationSec, editingField]);
   useEffect(() => {
     if (editingField !== 'description') setDescription(sh.description);
   }, [sh.description, editingField]);
@@ -108,6 +134,7 @@ function ShotCanvasRow({
     setSceneRef(sh.sceneRef ?? '');
     setType(sh.type);
     setMovement(sh.movement);
+    setDurationSec(formatShotDuration(sh.durationSec));
     setDescription(sh.description);
     setContent(sh.content);
     setSound(sh.sound ?? '');
@@ -283,6 +310,38 @@ function ShotCanvasRow({
             }}
           >
             {cellDisplay(sh.movement, '点击编辑')}
+          </button>
+        )}
+      </td>
+      <td className="shot-list-canvas__td shot-list-canvas__td--duration">
+        {editingField === 'durationSec' ? (
+          <input
+            type="text"
+            className="shot-list-canvas__input nodrag nopan nowheel"
+            value={durationSec}
+            autoFocus
+            onChange={(e) => {
+              const v = e.target.value;
+              setDurationSec(v);
+              onLiveField('durationSec', v);
+            }}
+            onPointerDown={stopCanvas}
+            onMouseDown={stopCanvas}
+            onBlur={endEdit}
+            aria-label="时间"
+          />
+        ) : (
+          <button
+            type="button"
+            className="shot-list-canvas__cell-display nodrag nopan nowheel"
+            onPointerDown={stopCanvas}
+            onMouseDown={stopCanvas}
+            onClick={(e) => {
+              stopCanvas(e);
+              setEditingField('durationSec');
+            }}
+          >
+            {formatShotDuration(sh.durationSec) || '点击填时间'}
           </button>
         )}
       </td>
@@ -570,6 +629,7 @@ export function ShotListEmbeddedEditor({
       if (p.field === 'sceneRef') return { ...s, sceneRef: p.value.trim() || undefined };
       if (p.field === 'type') return { ...s, type: p.value };
       if (p.field === 'movement') return { ...s, movement: p.value };
+      if (p.field === 'durationSec') return { ...s, durationSec: parseShotDuration(p.value) };
       if (p.field === 'description') return { ...s, description: p.value };
       if (p.field === 'content') return { ...s, content: p.value };
       if (p.field === 'sound') return { ...s, sound: p.value.trim() || undefined };
@@ -1052,6 +1112,9 @@ export function ShotListEmbeddedEditor({
               </th>
               <th className="shot-list-canvas__th" scope="col">
                 运镜
+              </th>
+              <th className="shot-list-canvas__th shot-list-canvas__th--duration" scope="col">
+                时间
               </th>
               <th className="shot-list-canvas__th shot-list-canvas__th--wide" scope="col">
                 画面描述

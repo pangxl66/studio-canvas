@@ -15,6 +15,7 @@ type HeaderField =
   | 'sound'
   | 'movement'
   | 'shotType'
+  | 'durationSec'
   | 'scene'
   | 'role'
   | 'prop'
@@ -43,6 +44,7 @@ const HEADER_ALIASES: Record<HeaderField, string[]> = {
   sound: ['音效bgm', '音效', 'bgm', '音乐', '声音'],
   movement: ['镜头运动', '运镜', '摄影机运动', '机位运动'],
   shotType: ['景别', '景型'],
+  durationSec: ['时间', '时长', '秒数', '镜头时长', '建议时长', 'duration', 'durationsec', 'seconds'],
   scene: ['场景', '场次', '场号', '场别'],
   role: ['角色', '人物', '出场人物', '角色人物'],
   prop: ['道具', '关键道具', '道具服化'],
@@ -80,6 +82,7 @@ function buildHeaderMap(headerRow: string[]): HeaderMap {
     sound: findColumnIndex(headerRow, HEADER_ALIASES.sound),
     movement: findColumnIndex(headerRow, HEADER_ALIASES.movement),
     shotType: findColumnIndex(headerRow, HEADER_ALIASES.shotType),
+    durationSec: findColumnIndex(headerRow, HEADER_ALIASES.durationSec),
     scene: findColumnIndex(headerRow, HEADER_ALIASES.scene),
     role: findColumnIndex(headerRow, HEADER_ALIASES.role),
     prop: findColumnIndex(headerRow, HEADER_ALIASES.prop),
@@ -117,6 +120,14 @@ function normalizeShotId(sequenceText: string, shotNo: string, fallbackId: numbe
   return fallbackId;
 }
 
+function parseDurationSec(value: string): number | undefined {
+  const normalized = asText(value).replace(/秒|s/gi, '').trim();
+  if (!normalized) return undefined;
+  const parsed = Number.parseFloat(normalized);
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+  return Math.min(60, Math.round(parsed * 10) / 10);
+}
+
 function isSceneMarkerRow(row: string[]): boolean {
   const joined = row.map(asText).filter(Boolean).join(' ');
   return /第[一二三四五六七八九十\d]+场/.test(joined) || /场次[:：]/.test(joined);
@@ -143,6 +154,7 @@ function normalizeShot(
   const sound = cell(row, headerMap.sound);
   const movement = cell(row, headerMap.movement);
   const shotType = cell(row, headerMap.shotType);
+  const durationSec = parseDurationSec(cell(row, headerMap.durationSec));
   const scene = cell(row, headerMap.scene) || currentSceneRef || '';
   const role = cell(row, headerMap.role);
   const prop = cell(row, headerMap.prop);
@@ -171,6 +183,7 @@ function normalizeShot(
     sceneRef: scene || undefined,
     action: description || undefined,
     sound: sound || undefined,
+    durationSec,
     note: noteParts.length > 0 ? noteParts.join('\n') : undefined,
   };
 }

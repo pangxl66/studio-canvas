@@ -122,12 +122,12 @@ function normalizeStoryboardApiShot(row: unknown, idx: number): StoryboardShot {
   const action = actionRaw || undefined;
   const soundRaw = String(r.sound ?? '').trim();
   const sound = soundRaw || undefined;
-  const durationRaw = r.durationSec ?? r.duration_sec ?? r.duration ?? r.seconds;
+  const durationRaw = r.durationSec ?? r.duration_sec ?? r.duration ?? r.seconds ?? r.时间 ?? r.时长 ?? r.秒数;
   const durationSec =
     typeof durationRaw === 'number' && Number.isFinite(durationRaw)
-      ? Math.max(1, Math.round(durationRaw))
-      : typeof durationRaw === 'string' && /^\d+$/.test(durationRaw.trim())
-        ? Math.max(1, Number.parseInt(durationRaw.trim(), 10))
+      ? Math.max(0.5, Math.round(durationRaw * 10) / 10)
+      : typeof durationRaw === 'string' && /^\d+(?:\.\d+)?(?:\s*(?:秒|s))?$/i.test(durationRaw.trim())
+        ? Math.max(0.5, Math.round(Number.parseFloat(durationRaw.trim().replace(/秒|s/gi, '')) * 10) / 10)
         : undefined;
   const noteRaw = String(r.note ?? r.备注 ?? '').trim();
   const note = noteRaw || undefined;
@@ -197,6 +197,7 @@ function buildStoryboardUserPromptFromWriting(script: WritingOutput): string {
 4. 武侠 / 奇幻 / 围猎 / 追逐 / 突围场面优先加强纵深、高低差、遮挡揭示、突然现身与第二波压迫。
 5. 若同场连续镜头确实适合 15 秒内组合，可用 mergedMembers；否则优先细分镜头。
 6. 若输入包含“视觉场景参考图 / 图片场景分析”，必须把图片当作场景设定硬约束：所有镜头的地点、时代、空间方向、光影色彩、美术质感、可见道具/建筑/环境元素和氛围都必须与图片一致，并在 sceneRef、description 或 note 中落地，不得生成与参考图冲突的场景设定。
+7. shots 中每条镜头都必须输出 durationSec，单位为秒；请根据动作复杂度、对白长度、情绪停顿、景别变化和信息密度合理分配镜头时间，不要平均分配，也不要为了凑时长硬拉长。
 
 只输出形如 { "shots": [ ... ], "narrativeBeats": [ ... ] } 的 JSON。
 
@@ -214,6 +215,7 @@ function buildStoryboardUserPromptFromRawText(t: string): string {
 5. 若信息不足，可以合理推定空间层次、危险源、可借力物，但应体现在 note 或 narrativeBeats 中。
 6. 只有在同场连续镜头明确适合 15 秒内合并时，才使用 mergedMembers。
 7. 若输入包含“视觉场景参考图 / 图片场景分析”，必须把图片当作场景设定硬约束：所有镜头的地点、时代、空间方向、光影色彩、美术质感、可见道具/建筑/环境元素和氛围都必须与图片一致，并在 sceneRef、description 或 note 中落地，不得生成与参考图冲突的场景设定。
+8. shots 中每条镜头都必须输出 durationSec，单位为秒；请根据动作复杂度、对白长度、情绪停顿、景别变化和信息密度合理分配镜头时间，不要平均分配，也不要为了凑时长硬拉长。
 
 只输出形如 { "shots": [ ... ], "narrativeBeats": [ ... ] } 的 JSON。
 

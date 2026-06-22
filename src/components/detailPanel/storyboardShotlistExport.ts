@@ -12,9 +12,15 @@ function csvCell(s: string): string {
   return t;
 }
 
+function formatDurationSec(value: StoryboardShot['durationSec']): string {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return '';
+  const rounded = Math.round(value * 10) / 10;
+  return Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1).replace(/\.0$/, '');
+}
+
 /** 英文表头：便于脚本 / 工具链解析（与协议字段一致） */
 export function buildStoryboardShotlistCsvIntl(output: StoryboardOutput): string {
-  const headers = ['id', 'type', 'movement', 'action', 'description', 'content', 'sceneRef'];
+  const headers = ['id', 'type', 'movement', 'durationSec', 'action', 'description', 'content', 'sceneRef'];
   const lines = [headers.join(',')];
   for (const s of output.shots) {
     const sh = s as StoryboardShot;
@@ -22,6 +28,7 @@ export function buildStoryboardShotlistCsvIntl(output: StoryboardOutput): string
       sh.id,
       sh.type,
       sh.movement,
+      formatDurationSec(sh.durationSec),
       typeof sh.action === 'string' ? sh.action : '',
       sh.description,
       typeof sh.content === 'string' ? sh.content : '',
@@ -33,10 +40,10 @@ export function buildStoryboardShotlistCsvIntl(output: StoryboardOutput): string
 }
 
 /**
- * 中文表头分镜清单：场次、镜头号、景别、运镜、画面、动作、台词，UTF-8 BOM 便于 Excel 直接打开。
+ * 中文表头分镜清单：场次、镜头号、景别、运镜、时间、画面、动作、台词，UTF-8 BOM 便于 Excel 直接打开。
  */
 export function buildStoryboardShotlistCsvZh(output: StoryboardOutput): string {
-  const headers = ['场次', '镜头号', '景别', '运镜', '画面描述', '动作', '台词'];
+  const headers = ['场次', '镜头号', '景别', '运镜', '时间(秒)', '画面描述', '动作', '台词'];
   const lines = [headers.join(',')];
   for (const s of output.shots) {
     const sh = s as StoryboardShot;
@@ -45,6 +52,7 @@ export function buildStoryboardShotlistCsvZh(output: StoryboardOutput): string {
       sh.id,
       sh.type,
       sh.movement,
+      formatDurationSec(sh.durationSec),
       sh.description,
       typeof sh.action === 'string' ? sh.action : '',
       typeof sh.content === 'string' ? sh.content : '',
@@ -84,7 +92,13 @@ export function buildStoryboardShootingListPlainText(output: StoryboardOutput): 
   const rows = output.shots.map((s) => {
     const lines: string[] = [];
     if (s.sceneRef?.trim()) lines.push(`场次：${s.sceneRef.trim()}`);
-    lines.push(`镜头号：${s.id}`, `景别：${s.type}`, `运镜：${s.movement}`, `画面：${s.description}`);
+    lines.push(
+      `镜头号：${s.id}`,
+      `景别：${s.type}`,
+      `运镜：${s.movement}`,
+      `时间：${formatDurationSec(s.durationSec) || '未定'}秒`,
+      `画面：${s.description}`,
+    );
     if (typeof s.action === 'string' && s.action.trim()) lines.push(`动作：${s.action.trim()}`);
     lines.push(
       `台词：${typeof s.content === 'string' && s.content !== '' ? s.content : '（无）'}`,
@@ -122,7 +136,7 @@ function buildShotlistPdfRoot(output: StoryboardOutput, title: string): HTMLDivE
   table.style.cssText = `width:100%;border-collapse:collapse;font-size:${S.bodyFontPt}pt;`;
   const thead = document.createElement('thead');
   const hr = document.createElement('tr');
-  for (const col of ['#', '景别', '运镜', '动作', '画面', '台词', '场次']) {
+  for (const col of ['#', '景别', '运镜', '时间(秒)', '动作', '画面', '台词', '场次']) {
     const th = document.createElement('th');
     th.textContent = col;
     th.style.cssText = [
@@ -144,6 +158,7 @@ function buildShotlistPdfRoot(output: StoryboardOutput, title: string): HTMLDivE
       String(sh.id),
       sh.type,
       sh.movement,
+      formatDurationSec(sh.durationSec),
       typeof sh.action === 'string' ? sh.action : '',
       sh.description,
       typeof sh.content === 'string' ? sh.content : '',
