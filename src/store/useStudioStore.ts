@@ -518,7 +518,9 @@ function makeAiFilmNodeData(id: string, kind: AiFilmNodeKind): StudioNodeData {
     label: `${aiFilmLabelForKind(kind)} · ${id.slice(-4)}`,
     assistant_preferences: '',
     assistant_task_instruction: '',
-    ...(kind === 'film_storyboard_node' ? { film_storyboard_skill_id: DEFAULT_STORYBOARD_SKILL_ID } : {}),
+    ...(kind === 'film_storyboard_node'
+      ? { film_storyboard_skill_id: DEFAULT_STORYBOARD_SKILL_ID, film_storyboard_aspect_ratio: '16:9' }
+      : {}),
   };
 }
 

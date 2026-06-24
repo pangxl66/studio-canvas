@@ -229,6 +229,8 @@ export type StudioNodeData = {
   text_polish_mode?: 'simple' | 'deep';
   /** AI Filmmaking 影视分镜节点：当前选用的分镜 Skill id */
   film_storyboard_skill_id?: string;
+  /** AI Filmmaking storyboard grid canvas ratio. */
+  film_storyboard_aspect_ratio?: '16:9' | '9:16';
   /** 分镜节点：生成时依据的剧本场次数，供分镜 Leader 与场次对齐校验 */
   sourceSceneCount?: number;
   /** 分镜：员工 AI 首次写入 `output` 时的深拷贝，供「重置为 AI 原始生成」 */

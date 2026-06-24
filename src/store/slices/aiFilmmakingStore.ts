@@ -5,10 +5,12 @@ import {
   buildCharacterSheetUserPrompt,
   buildSeedanceVideoUserPrompt,
   buildStoryboardGridUserPrompt,
+  normalizeStoryboardAspectRatio,
   stripAiFilmmakingPromptWrapper,
   type AiFilmStoryboardSkillPrompt,
   type AiFilmmakingPromptNodeKind,
   type AiFilmmakingSourceSummary,
+  type AiFilmmakingStoryboardAspectRatio,
   type AiFilmmakingVideoMode,
 } from '@/services/aiFilmmakingPrompts';
 import { DEFAULT_STORYBOARD_SKILL_ID, getSkillById } from '@/services/skillLoader';
@@ -329,6 +331,10 @@ function resolveFilmStoryboardSkill(data: StudioNodeData): ResolvedFilmStoryboar
   };
 }
 
+function resolveFilmStoryboardAspectRatio(data: StudioNodeData): AiFilmmakingStoryboardAspectRatio {
+  return normalizeStoryboardAspectRatio(data.film_storyboard_aspect_ratio);
+}
+
 function statusText(
   kind: AiFilmmakingPromptNodeKind,
   mode?: AiFilmmakingVideoMode,
@@ -412,6 +418,11 @@ export function createAiFilmmakingStoreSlice(
       const kind = node.data.type as AiFilmmakingPromptNodeKind;
       const source = collectFilmPromptSource(nodeId, kind, get().nodes, get().edges);
       const storyboardSkill = kind === 'film_storyboard_node' ? resolveFilmStoryboardSkill(node.data) : undefined;
+      const storyboardAspectRatio =
+        kind === 'film_storyboard_node' ? resolveFilmStoryboardAspectRatio(node.data) : undefined;
+      if (storyboardAspectRatio) {
+        source.summary.storyboardAspectRatio = storyboardAspectRatio;
+      }
 
       if (!hasUsableSource(kind, source)) {
         const message = sourceMissingMessage(kind);
@@ -464,6 +475,7 @@ export function createAiFilmmakingStoreSlice(
           kind,
           storyboardSkill,
           source.summary.storyboardPanelCount,
+          storyboardAspectRatio,
         );
         const userPrompt = buildUserPrompt(kind, source, storyboardSkill);
         const result =
@@ -536,6 +548,7 @@ export function createAiFilmmakingStoreSlice(
               storyboardSkillId: kind === 'film_storyboard_node' ? storyboardSkill?.id : undefined,
               storyboardPanelCount:
                 kind === 'film_storyboard_node' ? source.summary.storyboardPanelCount : undefined,
+              storyboardAspectRatio: kind === 'film_storyboard_node' ? storyboardAspectRatio : undefined,
               sourceImageCount: source.images.length,
             },
             streaming_preview: undefined,

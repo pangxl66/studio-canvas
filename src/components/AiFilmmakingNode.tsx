@@ -5,6 +5,7 @@ import {
   getSkillById,
   listSkillsInFolder,
 } from '@/services/skillLoader';
+import { normalizeStoryboardAspectRatio } from '@/services/aiFilmmakingPrompts';
 import { FILM_INPUT_HANDLE_ID, FILM_OUTPUT_HANDLE_ID } from '@/store/slices/aiFilmmakingStore';
 import { useStudioStore } from '@/store/useStudioStore';
 import type { NodeKind, StudioNodeData } from '@/types/studio';
@@ -93,6 +94,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
   const effectiveStoryboardSkillId = storyboardSkills.some((skill) => skill.id === selectedStoryboardSkillId)
     ? selectedStoryboardSkillId
     : storyboardSkills[0]?.id ?? DEFAULT_STORYBOARD_SKILL_ID;
+  const selectedStoryboardAspectRatio = normalizeStoryboardAspectRatio(data.film_storyboard_aspect_ratio);
 
   const onRun = useCallback(() => {
     if (busy) {
@@ -120,6 +122,19 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
       pushMessage({
         role: 'system',
         text: `影视分镜 Skill 已切换为：${skill?.name ?? nextId}。`,
+        nodeId: id,
+      });
+    },
+    [id, patchNodeData, pushMessage],
+  );
+
+  const onStoryboardAspectRatioChange = useCallback(
+    (event: ChangeEvent<HTMLSelectElement>) => {
+      const nextRatio = normalizeStoryboardAspectRatio(event.target.value);
+      patchNodeData(id, { film_storyboard_aspect_ratio: nextRatio, generation_error: undefined }, false);
+      pushMessage({
+        role: 'system',
+        text: `分镜宫格画幅已切换为：${nextRatio === '9:16' ? '9:16 竖屏' : '16:9 横屏'}。`,
         nodeId: id,
       });
     },
@@ -163,21 +178,35 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
       ) : null}
       <footer className={`ai-film-node__footer nodrag nopan ${isStoryboardNode ? 'ai-film-node__footer--stacked' : ''}`}>
         {isStoryboardNode ? (
-          <label className="ai-film-node__skill">
-            <span>分镜 Skill</span>
-            <select
-              className="ai-film-node__skill-select"
-              value={effectiveStoryboardSkillId}
-              onChange={onSkillChange}
-              disabled={busy}
-            >
-              {storyboardSkills.map((skill) => (
-                <option key={skill.id} value={skill.id}>
-                  {skill.name}
-                </option>
-              ))}
-            </select>
-          </label>
+          <>
+            <label className="ai-film-node__skill">
+              <span>画幅</span>
+              <select
+                className="ai-film-node__skill-select"
+                value={selectedStoryboardAspectRatio}
+                onChange={onStoryboardAspectRatioChange}
+                disabled={busy}
+              >
+                <option value="16:9">16:9 横屏</option>
+                <option value="9:16">9:16 竖屏</option>
+              </select>
+            </label>
+            <label className="ai-film-node__skill">
+              <span>分镜 Skill</span>
+              <select
+                className="ai-film-node__skill-select"
+                value={effectiveStoryboardSkillId}
+                onChange={onSkillChange}
+                disabled={busy}
+              >
+                {storyboardSkills.map((skill) => (
+                  <option key={skill.id} value={skill.id}>
+                    {skill.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </>
         ) : null}
         <div className="ai-film-node__actions">
           <button

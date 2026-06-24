@@ -4,6 +4,7 @@ export type AiFilmmakingPromptNodeKind =
   | 'film_video_prompt_node';
 
 export type AiFilmmakingVideoMode = 'A' | 'B' | 'C';
+export type AiFilmmakingStoryboardAspectRatio = '16:9' | '9:16';
 
 export type AiFilmStoryboardSkillPrompt = {
   name: string;
@@ -16,10 +17,17 @@ export type AiFilmmakingSourceSummary = {
   storyboardPrompts: string[];
   storyboardTables: string[];
   storyboardPanelCount?: number;
+  storyboardAspectRatio?: AiFilmmakingStoryboardAspectRatio;
   imageLabels: string[];
   storyboardImageLabels: string[];
   characterImageLabels: string[];
 };
+
+export const DEFAULT_STORYBOARD_ASPECT_RATIO: AiFilmmakingStoryboardAspectRatio = '16:9';
+
+export function normalizeStoryboardAspectRatio(value?: unknown): AiFilmmakingStoryboardAspectRatio {
+  return value === '9:16' ? '9:16' : DEFAULT_STORYBOARD_ASPECT_RATIO;
+}
 
 function normalizedStoryboardPanelCount(panelCount?: number): number {
   return typeof panelCount === 'number' && Number.isFinite(panelCount) && panelCount > 0
@@ -27,8 +35,31 @@ function normalizedStoryboardPanelCount(panelCount?: number): number {
     : 9;
 }
 
-function storyboardGridLayoutHint(panelCount?: number): string {
+function storyboardAspectRatioHint(aspectRatio?: AiFilmmakingStoryboardAspectRatio): string {
+  const normalized = normalizeStoryboardAspectRatio(aspectRatio);
+  return normalized === '9:16'
+    ? '9:16 vertical portrait storyboard sheet, optimized for mobile/video vertical review'
+    : '16:9 horizontal landscape storyboard sheet, optimized for cinematic wide-screen review';
+}
+
+function storyboardGridLayoutHint(
+  panelCount?: number,
+  aspectRatio?: AiFilmmakingStoryboardAspectRatio,
+): string {
   const count = normalizedStoryboardPanelCount(panelCount);
+  const normalizedAspectRatio = normalizeStoryboardAspectRatio(aspectRatio);
+  if (normalizedAspectRatio === '9:16') {
+    if (count === 1) return 'single large vertical storyboard panel';
+    if (count === 2) return 'two-panel vertical stack';
+    if (count === 3) return 'three-panel vertical stack';
+    if (count === 4) return '2x2 four-panel portrait storyboard grid';
+    if (count === 5) return 'five-panel portrait storyboard sheet, two panels on the first row, two on the second row, one wider panel on the bottom row';
+    if (count === 6) return '2x3 six-panel portrait storyboard grid';
+    if (count === 7) return 'seven-panel portrait storyboard sheet, two-column flow with the final panel allowed to span the bottom width';
+    if (count === 8) return '2x4 eight-panel portrait storyboard grid';
+    if (count === 9) return '3x3 nine-panel portrait storyboard grid inside a 9:16 sheet';
+    return `${count}-panel portrait storyboard sheet with balanced vertical multi-row layout, no blank filler panels`;
+  }
   if (count === 1) return 'single large storyboard panel';
   if (count === 2) return 'two-panel split sheet';
   if (count === 3) return 'three-panel horizontal storyboard strip';
@@ -112,6 +143,7 @@ export function buildAiFilmmakingSystemPrompt(
   kind: AiFilmmakingPromptNodeKind,
   storyboardSkill?: AiFilmStoryboardSkillPrompt,
   storyboardPanelCount?: number,
+  storyboardAspectRatio?: AiFilmmakingStoryboardAspectRatio,
 ): string {
   if (kind === 'film_character_node') return buildCharacterSheetSystemPrompt();
 
@@ -126,7 +158,9 @@ export function buildAiFilmmakingSystemPrompt(
 
   if (kind === 'film_storyboard_node') {
     const panelCount = normalizedStoryboardPanelCount(storyboardPanelCount);
-    const layoutHint = storyboardGridLayoutHint(panelCount);
+    const aspectRatio = normalizeStoryboardAspectRatio(storyboardAspectRatio);
+    const aspectRatioHint = storyboardAspectRatioHint(aspectRatio);
+    const layoutHint = storyboardGridLayoutHint(panelCount, aspectRatio);
     const skillBlock =
       storyboardSkill?.instruction.trim()
         ? [
@@ -141,11 +175,12 @@ export function buildAiFilmmakingSystemPrompt(
       '',
       'Template 2: Cinematic Storyboard Grid.',
       `Generate one prompt for a single storyboard sheet image containing exactly ${panelCount} sequential storyboard panels for one continuous scene.`,
+      `Required canvas aspect ratio: ${aspectRatioHint}.`,
       `Required layout: ${layoutHint}. Do not add extra panels, do not leave empty panels, and do not force the result into 3x3 unless the required panel count is 9.`,
       'Use short director-style beats, not prose. Each panel must advance action and vary framing.',
       'Each panel needs a thin annotation strip under it with three short uppercase lines: CAM, MOVE, and MOOD. Use VOICE instead of MOOD for vlog/dialogue-driven scenes, or STYLE instead of MOOD for action/martial-arts scenes.',
       'Character descriptions must be one tight sentence each. If input lacks specifics, infer conservative defaults from the scene.',
-      'Default visual style: cinematic live-action, photorealistic, lifelike, 35mm film grain, 16:9 page layout, unless the input clearly asks otherwise.',
+      'Default visual style: cinematic live-action, photorealistic, lifelike, 35mm film grain. Do not override the required canvas aspect ratio unless the user explicitly changes the node setting.',
       ...skillBlock,
     ].join('\n');
   }
@@ -208,10 +243,13 @@ export function buildStoryboardGridUserPrompt(
   storyboardSkill?: AiFilmStoryboardSkillPrompt,
 ): string {
   const panelCount = normalizedStoryboardPanelCount(summary.storyboardPanelCount);
-  const layoutHint = storyboardGridLayoutHint(panelCount);
+  const aspectRatio = normalizeStoryboardAspectRatio(summary.storyboardAspectRatio);
+  const aspectRatioHint = storyboardAspectRatioHint(aspectRatio);
+  const layoutHint = storyboardGridLayoutHint(panelCount, aspectRatio);
   return [
     'Generate Template 2 Cinematic Storyboard Grid prompt from the source material.',
     `Output one complete prompt for a ${panelCount}-panel continuous storyboard sheet.`,
+    `Canvas aspect ratio: ${aspectRatioHint}.`,
     `Layout requirement: ${layoutHint}.`,
     'Fill all details concretely; no placeholders. Use concise beats and legible annotation strip instructions.',
     summary.storyboardTables.length > 0
