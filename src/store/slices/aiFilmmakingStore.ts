@@ -57,6 +57,11 @@ type ResolvedFilmStoryboardSkill = AiFilmStoryboardSkillPrompt & {
   id: string;
 };
 
+type StoryboardGridTableBlock = {
+  text: string;
+  shotCount: number;
+};
+
 function featureSafeId(id: string): string {
   return id.replace(/[^a-z0-9_-]+/gi, '_');
 }
@@ -193,7 +198,7 @@ function formatStoryboardTableForGrid(
   node: StudioRFNode,
   output: StoryboardOutput,
   sourceHandle?: string | null,
-): string | null {
+): StoryboardGridTableBlock | null {
   const picked = pickStoryboardOutputByHandle(output, sourceHandle);
   if (!picked?.shots?.length) return null;
   const label = node.data.label?.trim() || node.id;
@@ -201,7 +206,7 @@ function formatStoryboardTableForGrid(
   const beats = !singleShotScope && picked.narrativeBeats?.length
     ? `Narrative beats:\n${picked.narrativeBeats.map((beat, index) => `${index + 1}. ${beat}`).join('\n')}`
     : '';
-  return [
+  const text = [
     `Source storyboard table: ${label}`,
     singleShotScope
       ? 'Scope: one selected storyboard shot output.'
@@ -211,6 +216,7 @@ function formatStoryboardTableForGrid(
   ]
     .filter(Boolean)
     .join('\n\n');
+  return { text, shotCount: picked.shots.length };
 }
 
 function collectFilmPromptSource(
@@ -224,6 +230,7 @@ function collectFilmPromptSource(
   const characterPrompts: string[] = [];
   const storyboardPrompts: string[] = [];
   const storyboardTables: string[] = [];
+  let storyboardPanelCount = 0;
   const images: ImageReference[] = [];
 
   for (const source of sources) {
@@ -236,9 +243,10 @@ function collectFilmPromptSource(
     const storyboardOutput = storyboardOutputFromNode(source.node);
     if (storyboardOutput) {
       const scopedStoryboardHandle = parseShotListItemOutputHandleId(source.sourceHandle) != null;
-      const tableText = formatStoryboardTableForGrid(source.node, storyboardOutput, source.sourceHandle);
-      if (tableText) {
-        storyboardTables.push(tableText);
+      const tableBlock = formatStoryboardTableForGrid(source.node, storyboardOutput, source.sourceHandle);
+      if (tableBlock) {
+        storyboardTables.push(tableBlock.text);
+        storyboardPanelCount += tableBlock.shotCount;
         continue;
       }
       if (scopedStoryboardHandle) continue;
@@ -298,6 +306,7 @@ function collectFilmPromptSource(
     characterPrompts,
     storyboardPrompts,
     storyboardTables,
+    storyboardPanelCount: storyboardPanelCount > 0 ? storyboardPanelCount : undefined,
     imageLabels: images.map((image) => image.label),
     storyboardImageLabels: storyboardImages.map((image) => image.label),
     characterImageLabels: characterImages.map((image) => image.label),
@@ -324,10 +333,12 @@ function statusText(
   kind: AiFilmmakingPromptNodeKind,
   mode?: AiFilmmakingVideoMode,
   storyboardSkillName?: string,
+  storyboardPanelCount?: number,
 ): string {
   if (kind === 'film_character_node') return 'LLM 正在按角色参考表规范生成角色设定提示词...';
   if (kind === 'film_storyboard_node') {
-    return `LLM 正在按${storyboardSkillName ? `「${storyboardSkillName}」` : ''}分镜 Skill 生成九宫格提示词...`;
+    const panelLabel = storyboardPanelCount ? `${storyboardPanelCount}宫格` : '分镜宫格';
+    return `LLM 正在按${storyboardSkillName ? `「${storyboardSkillName}」` : ''}分镜 Skill 生成${panelLabel}提示词...`;
   }
   return `LLM 正在按 Seedance 2.0 ${mode ?? 'A'} 模式生成视频提示词...`;
 }
@@ -369,7 +380,7 @@ function sourceMissingMessage(kind: AiFilmmakingPromptNodeKind): string {
     return '请先连接图片节点或文本节点，再生成角色设定。';
   }
   if (kind === 'film_storyboard_node') {
-    return '请先连接文本节点，再生成九宫格分镜提示词。';
+    return '请先连接文本节点或分镜表镜头输出，再生成分镜宫格提示词。';
   }
   return '请先连接文本、角色设定、影视分镜或图片参考，再生成视频提示词。';
 }
@@ -426,7 +437,12 @@ export function createAiFilmmakingStoreSlice(
         {
           status: 'IN_PROGRESS',
           generation_error: undefined,
-          streaming_preview: statusText(kind, source.videoMode, storyboardSkill?.name),
+          streaming_preview: statusText(
+            kind,
+            source.videoMode,
+            storyboardSkill?.name,
+            source.summary.storyboardPanelCount,
+          ),
         },
         true,
       );
@@ -444,7 +460,11 @@ export function createAiFilmmakingStoreSlice(
       try {
         const hasImage = Boolean(source.primaryImage?.dataUrl);
         const requestConfig = hasImage ? getResolvedVisionLlmGatewayConfig() ?? config : config;
-        const systemPrompt = buildAiFilmmakingSystemPrompt(kind, storyboardSkill);
+        const systemPrompt = buildAiFilmmakingSystemPrompt(
+          kind,
+          storyboardSkill,
+          source.summary.storyboardPanelCount,
+        );
         const userPrompt = buildUserPrompt(kind, source, storyboardSkill);
         const result =
           hasImage && source.primaryImage?.dataUrl
@@ -514,6 +534,8 @@ export function createAiFilmmakingStoreSlice(
               aiFilmmakingKind: kind,
               videoMode: kind === 'film_video_prompt_node' ? source.videoMode : undefined,
               storyboardSkillId: kind === 'film_storyboard_node' ? storyboardSkill?.id : undefined,
+              storyboardPanelCount:
+                kind === 'film_storyboard_node' ? source.summary.storyboardPanelCount : undefined,
               sourceImageCount: source.images.length,
             },
             streaming_preview: undefined,

@@ -33,8 +33,8 @@ const NODE_META: Record<
   film_storyboard_node: {
     eyebrow: 'STORYBOARD',
     title: '影视分镜',
-    action: '生成九宫格提示词',
-    empty: '连接文本节点后，生成 3x3 九宫格影视分镜图提示词。',
+    action: '生成宫格提示词',
+    empty: '连接文本节点或分镜表镜头输出后，按镜头数量生成分镜宫格提示词。',
     accent: 'storyboard',
   },
   film_video_prompt_node: {

@@ -15,10 +15,31 @@ export type AiFilmmakingSourceSummary = {
   characterPrompts: string[];
   storyboardPrompts: string[];
   storyboardTables: string[];
+  storyboardPanelCount?: number;
   imageLabels: string[];
   storyboardImageLabels: string[];
   characterImageLabels: string[];
 };
+
+function normalizedStoryboardPanelCount(panelCount?: number): number {
+  return typeof panelCount === 'number' && Number.isFinite(panelCount) && panelCount > 0
+    ? Math.max(1, Math.round(panelCount))
+    : 9;
+}
+
+function storyboardGridLayoutHint(panelCount?: number): string {
+  const count = normalizedStoryboardPanelCount(panelCount);
+  if (count === 1) return 'single large storyboard panel';
+  if (count === 2) return 'two-panel split sheet';
+  if (count === 3) return 'three-panel horizontal storyboard strip';
+  if (count === 4) return '2x2 four-panel storyboard grid';
+  if (count === 5) return 'five-panel storyboard sheet, 3 panels on the top row and 2 wider panels on the bottom row';
+  if (count === 6) return '3x2 six-panel storyboard grid';
+  if (count === 7) return 'seven-panel storyboard sheet, 4 panels on the top row and 3 panels on the bottom row';
+  if (count === 8) return '4x2 eight-panel storyboard grid';
+  if (count === 9) return '3x3 nine-panel storyboard grid';
+  return `${count}-panel storyboard sheet with balanced multi-row layout, no blank filler panels`;
+}
 
 export function stripAiFilmmakingPromptWrapper(raw: string): string {
   let text = raw.replace(/^\uFEFF/, '').trim();
@@ -90,6 +111,7 @@ function buildCharacterSheetSystemPrompt(): string {
 export function buildAiFilmmakingSystemPrompt(
   kind: AiFilmmakingPromptNodeKind,
   storyboardSkill?: AiFilmStoryboardSkillPrompt,
+  storyboardPanelCount?: number,
 ): string {
   if (kind === 'film_character_node') return buildCharacterSheetSystemPrompt();
 
@@ -103,12 +125,14 @@ export function buildAiFilmmakingSystemPrompt(
   ];
 
   if (kind === 'film_storyboard_node') {
+    const panelCount = normalizedStoryboardPanelCount(storyboardPanelCount);
+    const layoutHint = storyboardGridLayoutHint(panelCount);
     const skillBlock =
       storyboardSkill?.instruction.trim()
         ? [
             '',
             `Selected storyboard Skill: ${storyboardSkill.name}.`,
-            'Apply this Skill as the director-style and shot-design focus for the 3x3 storyboard prompt. It must not change the output contract: still return one paste-ready prompt for a single 3x3 storyboard grid image, not JSON, not a shot table, and not an explanation.',
+            `Apply this Skill as the director-style and shot-design focus for the ${panelCount}-panel storyboard prompt. It must not change the output contract: still return one paste-ready prompt for a single storyboard grid/sheet image with exactly ${panelCount} panels, not JSON, not a shot table, and not an explanation.`,
             storyboardSkill.instruction.trim(),
           ]
         : [];
@@ -116,7 +140,8 @@ export function buildAiFilmmakingSystemPrompt(
       ...base,
       '',
       'Template 2: Cinematic Storyboard Grid.',
-      'Generate one prompt for a single 3x3 grid image containing 9 sequential storyboard panels for one continuous scene.',
+      `Generate one prompt for a single storyboard sheet image containing exactly ${panelCount} sequential storyboard panels for one continuous scene.`,
+      `Required layout: ${layoutHint}. Do not add extra panels, do not leave empty panels, and do not force the result into 3x3 unless the required panel count is 9.`,
       'Use short director-style beats, not prose. Each panel must advance action and vary framing.',
       'Each panel needs a thin annotation strip under it with three short uppercase lines: CAM, MOVE, and MOOD. Use VOICE instead of MOOD for vlog/dialogue-driven scenes, or STYLE instead of MOOD for action/martial-arts scenes.',
       'Character descriptions must be one tight sentence each. If input lacks specifics, infer conservative defaults from the scene.',
@@ -137,7 +162,7 @@ export function buildAiFilmmakingSystemPrompt(
     'Default audio is NO MUSIC unless the user explicitly asks for music. Ambient sound and Foley are allowed.',
     'Use @image numbering correctly: every reference gets a unique number. Character sheet references come first, storyboard grid comes after character sheets.',
     'If using Variant B or C, say the storyboard grid should be read as sequential shots, not as one image.',
-    'When the app-provided mode is uncertain, inspect the attached image and source text: use B for a visible 9-panel storyboard/grid, C for character reference plus storyboard grid, otherwise A.',
+    'When the app-provided mode is uncertain, inspect the attached image and source text: use B for a visible storyboard panel grid/sheet, C for character reference plus storyboard grid, otherwise A.',
   ].join('\n');
 }
 
@@ -182,12 +207,15 @@ export function buildStoryboardGridUserPrompt(
   summary: AiFilmmakingSourceSummary,
   storyboardSkill?: AiFilmStoryboardSkillPrompt,
 ): string {
+  const panelCount = normalizedStoryboardPanelCount(summary.storyboardPanelCount);
+  const layoutHint = storyboardGridLayoutHint(panelCount);
   return [
     'Generate Template 2 Cinematic Storyboard Grid prompt from the source material.',
-    'Output one complete prompt for a 3x3 / 9-panel continuous storyboard sheet.',
+    `Output one complete prompt for a ${panelCount}-panel continuous storyboard sheet.`,
+    `Layout requirement: ${layoutHint}.`,
     'Fill all details concretely; no placeholders. Use concise beats and legible annotation strip instructions.',
     summary.storyboardTables.length > 0
-      ? 'A storyboard shot list/table is connected. Treat it as the primary source: preserve shot order, scene logic, camera/action/dialogue details, and condense or expand them into exactly 9 storyboard panels according to the active storyboard Skill.'
+      ? `A storyboard shot list/table is connected. Treat it as the primary source: preserve shot order, scene logic, camera/action/dialogue details, and map the connected shots one-to-one into exactly ${panelCount} storyboard panels according to the active storyboard Skill. Do not condense, expand, or invent extra filler panels.`
       : '',
     storyboardSkill?.name ? `Active storyboard Skill: ${storyboardSkill.name}.` : '',
     '',

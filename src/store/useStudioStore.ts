@@ -2563,7 +2563,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       }
       if (p.pick === 'image_node') {
         if (from.type === 'aiFilmStoryboard') {
-          return pushErr('影视分镜节点主要读取文本；如要读取九宫格图，请连接到影视分镜提示词节点。');
+          return pushErr('影视分镜节点主要读取文本或分镜表镜头；如要读取宫格分镜图，请连接到影视分镜提示词节点。');
         }
         const id = get().addImageNode(upstreamPos);
         connectToAiFilmNode(id, from.id, 'out');
@@ -2937,7 +2937,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         if (from.data.type !== 'shot_list_node') return pushErr('当前镜头表节点类型不支持该操作。');
         if (isAiFilmPick(p.pick)) {
           if (p.pick !== 'film_storyboard_node') {
-            return pushErr('镜头表 Output 目前只支持直接接入九宫格影视分镜节点；视频提示词请先由九宫格节点生成后再连接。');
+            return pushErr('镜头表 Output 目前只支持直接接入分镜宫格节点；视频提示词请先由分镜宫格节点生成后再连接。');
           }
           const id = addAiFilmNodeForPick(p.pick, downstreamPos);
           const sourceHandles = resolveShotListSourceHandlesForConnect(
@@ -2960,13 +2960,13 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           }));
           get().pushMessage({
             role: 'broadcast',
-            text: '已创建九宫格影视分镜节点，并按当前选中的镜头输出自动连线。',
+            text: '已创建分镜宫格节点，并按当前选中的镜头输出自动连线。',
             nodeId: id,
           });
           return id;
         }
         if (p.pick !== 'prompt') {
-          return pushErr('镜头表节点的逐镜头 Output 只能连接到 Prompt 节点或九宫格影视分镜节点。');
+          return pushErr('镜头表节点的逐镜头 Output 只能连接到 Prompt 节点或分镜宫格节点。');
         }
         const id = get().addDepartmentNode('prompt', downstreamPos);
         const sourceHandles = resolveShotListSourceHandlesForConnect(
@@ -2998,7 +2998,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       if (from.type === 'storyboardFile') {
         if (isAiFilmPick(p.pick)) {
           if (p.pick !== 'film_storyboard_node') {
-            return pushErr('分镜表文件 Output 目前只支持直接接入九宫格影视分镜节点。');
+            return pushErr('分镜表文件 Output 目前只支持直接接入分镜宫格节点。');
           }
           const id = addAiFilmNodeForPick(p.pick, downstreamPos);
           set((s) => ({
@@ -3015,13 +3015,13 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           }));
           get().pushMessage({
             role: 'broadcast',
-            text: '已创建九宫格影视分镜节点，并接入当前分镜文件输出。',
+            text: '已创建分镜宫格节点，并接入当前分镜文件输出。',
             nodeId: id,
           });
           return id;
         }
         if (p.pick !== 'prompt') {
-          return pushErr('分镜表文件节点的 Output 只能连接到 Prompt 节点或九宫格影视分镜节点。');
+          return pushErr('分镜表文件节点的 Output 只能连接到 Prompt 节点或分镜宫格节点。');
         }
         const id = get().addDepartmentNode('prompt', downstreamPos);
         set((s) => ({
@@ -3976,7 +3976,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     }));
     get().pushMessage({
       role: 'system',
-      text: '已创建影视分镜节点。连接文本节点后，可生成九宫格分镜提示词。',
+      text: '已创建影视分镜节点。连接文本节点或分镜表镜头输出后，可生成分镜宫格提示词。',
       nodeId: id,
     });
     return id;

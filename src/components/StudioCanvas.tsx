@@ -131,8 +131,6 @@ type NodeGalleryItem = {
   disabled?: boolean;
 };
 
-const HIDE_TEMPORARY_NODE_ENTRIES = true;
-const HIDDEN_PANE_GALLERY_KINDS = new Set<CreateNodeKind>(['writing', 'storyboard_file_node']);
 const CONNECTION_MAGNET_HOVER_PX = 56;
 
 const PANE_GALLERY_ITEMS_BASE: NodeGalleryItem[] = [
@@ -157,7 +155,7 @@ const PANE_GALLERY_ITEMS_BASE: NodeGalleryItem[] = [
   {
     id: 'storyboard',
     kind: 'storyboard',
-    title: '分镜部',
+    title: '分镜节点',
     subtitle: '把剧本拆成镜头，并自动生成镜头表。',
     badge: '镜头设计',
     accentClass: 'node-picker__card--storyboard',
@@ -166,7 +164,7 @@ const PANE_GALLERY_ITEMS_BASE: NodeGalleryItem[] = [
   {
     id: 'prompt',
     kind: 'prompt',
-    title: '提示词部',
+    title: '提示词节点',
     subtitle: '把分镜或文本转成视频生成提示词包。',
     badge: '生成提示',
     accentClass: 'node-picker__card--prompt',
@@ -211,8 +209,8 @@ const PANE_GALLERY_ITEMS_BASE: NodeGalleryItem[] = [
   {
     id: 'film_storyboard_node',
     kind: 'film_storyboard_node',
-    title: '影视分镜',
-    subtitle: '读取文本内容，生成九宫格分镜图提示词。',
+    title: '分镜宫格',
+    subtitle: '读取文本或分镜表镜头，按镜头数量生成宫格分镜提示词。',
     badge: '新模式',
     accentClass: 'node-picker__card--film',
     icon: '九',
@@ -229,7 +227,7 @@ const PANE_GALLERY_ITEMS_BASE: NodeGalleryItem[] = [
   {
     id: 'storyboard_file_node',
     kind: 'storyboard_file_node',
-    title: '分镜表文件',
+    title: '文件节点',
     subtitle: '导入 Excel 分镜表，直接作为 Prompt 的上游输入。',
     badge: '文件导入',
     accentClass: 'node-picker__card--storyboard',
@@ -246,9 +244,139 @@ const PANE_GALLERY_ITEMS_BASE: NodeGalleryItem[] = [
   },
 ];
 
-const PANE_GALLERY_ITEMS: NodeGalleryItem[] = PANE_GALLERY_ITEMS_BASE.filter(
-  (item) => !(HIDE_TEMPORARY_NODE_ENTRIES && item.kind != null && HIDDEN_PANE_GALLERY_KINDS.has(item.kind)),
-);
+const PANE_CREATE_MENU_KINDS: CreateNodeKind[] = [
+  'text_node',
+  'storyboard_file_node',
+  'prompt',
+  'storyboard',
+  'film_storyboard_node',
+  'film_character_node',
+];
+
+const PANE_GALLERY_ITEMS: NodeGalleryItem[] = PANE_CREATE_MENU_KINDS.flatMap((kind) => {
+  const item = PANE_GALLERY_ITEMS_BASE.find((candidate) => candidate.kind === kind);
+  return item ? [item] : [];
+});
+
+type ConnectionMenuPick = Exclude<CreateNodeKind, 'shot_list_node'>;
+
+const CONNECTION_MENU_LABELS: Record<ConnectionMenuPick, string> = {
+  text_node: '创建文本卡片',
+  image_node: '创建图片节点',
+  video_node: '创建视频节点',
+  film_character_node: '创建角色设定',
+  film_storyboard_node: '创建分镜宫格',
+  film_video_prompt_node: '创建分镜提示词',
+  storyboard_file_node: '创建分镜表文件',
+  prompt_review_node: '创建提示词审核',
+  writing: '创建编剧部',
+  storyboard: '创建分镜部',
+  prompt: '创建提示词部',
+};
+
+function focusDetailForConnectionPick(kind: ConnectionMenuPick): boolean {
+  return kind === 'text_node' || kind === 'writing' || kind === 'storyboard' || kind === 'prompt';
+}
+
+function uniqueConnectionMenuPicks(kinds: ConnectionMenuPick[]): ConnectionMenuPick[] {
+  return Array.from(new Set(kinds));
+}
+
+function upstreamConnectionPicksForNode(node: StudioRFNode): ConnectionMenuPick[] {
+  if (node.type === 'textNode') {
+    return ['image_node', 'video_node', 'text_node'];
+  }
+
+  if (node.type === 'department') {
+    const kind = node.data.type;
+    if (kind === 'writing') return ['text_node'];
+    if (kind === 'storyboard') return ['text_node', 'image_node'];
+    if (kind === 'prompt') return ['text_node', 'storyboard_file_node'];
+  }
+
+  if (node.type === 'aiFilmCharacter') {
+    return ['image_node', 'text_node'];
+  }
+
+  if (node.type === 'aiFilmStoryboard') {
+    return ['text_node'];
+  }
+
+  if (node.type === 'aiFilmVideoPrompt') {
+    return ['film_character_node', 'film_storyboard_node', 'image_node', 'text_node'];
+  }
+
+  return [];
+}
+
+function downstreamConnectionPicksForNode(node: StudioRFNode): ConnectionMenuPick[] {
+  if (node.type === 'textNode') {
+    return ['storyboard', 'prompt'];
+  }
+
+  if (node.type === 'imageNode') {
+    return ['text_node', 'storyboard', 'film_character_node', 'film_video_prompt_node'];
+  }
+
+  if (node.type === 'videoNode') {
+    return ['text_node'];
+  }
+
+  if (node.type === 'shotList') {
+    return ['prompt', 'film_storyboard_node'];
+  }
+
+  if (node.type === 'storyboardFile') {
+    return ['prompt', 'film_storyboard_node'];
+  }
+
+  if (node.type === 'department') {
+    const kind = node.data.type;
+    if (kind === 'writing') return ['storyboard', 'prompt'];
+    if (kind === 'storyboard') return ['film_storyboard_node'];
+    if (kind === 'prompt') return ['prompt_review_node'];
+  }
+
+  if (node.type === 'promptReview') {
+    return ['text_node', 'prompt_review_node', 'film_video_prompt_node'];
+  }
+
+  if (node.type === 'aiFilmCharacter' || node.type === 'aiFilmStoryboard') {
+    return ['film_video_prompt_node', 'text_node'];
+  }
+
+  if (node.type === 'aiFilmVideoPrompt') {
+    return ['text_node'];
+  }
+
+  return [];
+}
+
+function connectionMenuPicksForPicker(
+  picker: NodePickerState | null,
+  nodes: StudioRFNode[],
+): ConnectionMenuPick[] {
+  if (!picker) return [];
+  const node = nodes.find((item) => item.id === picker.fromNodeId);
+  if (!node) return [];
+
+  const handleId = picker.fromHandleId ?? '';
+  const handleType = picker.fromHandleType;
+
+  if (handleType === 'source' && handleId === DEPT_INPUT_PULL_HANDLE_ID) {
+    return uniqueConnectionMenuPicks(upstreamConnectionPicksForNode(node));
+  }
+
+  if (handleType === 'target') {
+    return uniqueConnectionMenuPicks(upstreamConnectionPicksForNode(node));
+  }
+
+  if (handleType === 'source') {
+    return uniqueConnectionMenuPicks(downstreamConnectionPicksForNode(node));
+  }
+
+  return [];
+}
 
 function isStudioConnectionAllowed(edge: ConnectionCandidate, nodes: StudioRFNode[]): boolean {
   const src = edge.source;
@@ -566,6 +694,10 @@ export function StudioCanvas() {
     nodes.find((n) => n.id === nodePicker!.fromNodeId)?.data.type === 'prompt' &&
     nodePicker!.fromHandleId === DEPT_OUTPUT_HANDLE_ID &&
     nodePicker!.fromHandleType === 'source';
+  const connectionMenuPicks = useMemo(
+    () => connectionMenuPicksForPicker(nodePicker, nodes),
+    [nodePicker, nodes],
+  );
   const onConnectStart = useCallback<OnConnectStart>((_e, p) => {
     connectionDragRef.current = {
       nodeId: p.nodeId,
@@ -1237,14 +1369,15 @@ export function StudioCanvas() {
         >
           <div className="node-picker__title">
             {shotListOutputPanePicker
-              ? '镜头表 Output · 创建下游 Prompt 并连线'
+              ? '镜头表 Output · 创建下游节点并连线'
               : promptOutputPanePicker
                 ? 'Prompt Output · 创建下游审核节点'
               : '拉线至空白 · 创建节点并连线'}
           </div>
-          {!shotListOutputPanePicker ? (
-            <>
+          {connectionMenuPicks.length > 0 ? (
+            connectionMenuPicks.map((kind) => (
               <button
+                key={kind}
                 type="button"
                 className="node-picker__btn"
                 onClick={() => {
@@ -1253,223 +1386,21 @@ export function StudioCanvas() {
                     fromNodeId: p.fromNodeId,
                     fromHandleId: p.fromHandleId,
                     fromHandleType: p.fromHandleType,
-                    pick: 'text_node',
+                    pick: kind,
                     flowPosition: { x: p.flowX, y: p.flowY },
                   });
                   if (nid) {
                     setNodePicker(null);
-                    focusNode(nid, { openDetail: true });
+                    focusNode(nid, { openDetail: focusDetailForConnectionPick(kind) });
                   }
                 }}
               >
-                创建文本卡片
+                {CONNECTION_MENU_LABELS[kind]}
               </button>
-              <button
-                type="button"
-                className="node-picker__btn"
-                onClick={() => {
-                  const p = nodePicker;
-                  const nid = completeConnectionMenuPick({
-                    fromNodeId: p.fromNodeId,
-                    fromHandleId: p.fromHandleId,
-                    fromHandleType: p.fromHandleType,
-                    pick: 'image_node',
-                    flowPosition: { x: p.flowX, y: p.flowY },
-                  });
-                  if (nid) {
-                    setNodePicker(null);
-                    focusNode(nid, { openDetail: false });
-                  }
-                }}
-              >
-                创建图片节点
-              </button>
-              <button
-                type="button"
-                className="node-picker__btn"
-                onClick={() => {
-                  const p = nodePicker;
-                  const nid = completeConnectionMenuPick({
-                    fromNodeId: p.fromNodeId,
-                    fromHandleId: p.fromHandleId,
-                    fromHandleType: p.fromHandleType,
-                    pick: 'video_node',
-                    flowPosition: { x: p.flowX, y: p.flowY },
-                  });
-                  if (nid) {
-                    setNodePicker(null);
-                    focusNode(nid, { openDetail: false });
-                  }
-                }}
-              >
-                创建视频节点
-              </button>
-              <button
-                type="button"
-                className="node-picker__btn"
-                onClick={() => {
-                  const p = nodePicker;
-                  const nid = completeConnectionMenuPick({
-                    fromNodeId: p.fromNodeId,
-                    fromHandleId: p.fromHandleId,
-                    fromHandleType: p.fromHandleType,
-                    pick: 'film_character_node',
-                    flowPosition: { x: p.flowX, y: p.flowY },
-                  });
-                  if (nid) {
-                    setNodePicker(null);
-                    focusNode(nid, { openDetail: false });
-                  }
-                }}
-              >
-                创建角色设定
-              </button>
-              <button
-                type="button"
-                className="node-picker__btn"
-                onClick={() => {
-                  const p = nodePicker;
-                  const nid = completeConnectionMenuPick({
-                    fromNodeId: p.fromNodeId,
-                    fromHandleId: p.fromHandleId,
-                    fromHandleType: p.fromHandleType,
-                    pick: 'film_storyboard_node',
-                    flowPosition: { x: p.flowX, y: p.flowY },
-                  });
-                  if (nid) {
-                    setNodePicker(null);
-                    focusNode(nid, { openDetail: false });
-                  }
-                }}
-              >
-                创建影视分镜
-              </button>
-              <button
-                type="button"
-                className="node-picker__btn"
-                onClick={() => {
-                  const p = nodePicker;
-                  const nid = completeConnectionMenuPick({
-                    fromNodeId: p.fromNodeId,
-                    fromHandleId: p.fromHandleId,
-                    fromHandleType: p.fromHandleType,
-                    pick: 'film_video_prompt_node',
-                    flowPosition: { x: p.flowX, y: p.flowY },
-                  });
-                  if (nid) {
-                    setNodePicker(null);
-                    focusNode(nid, { openDetail: false });
-                  }
-                }}
-              >
-                创建分镜提示词
-              </button>
-              {!HIDE_TEMPORARY_NODE_ENTRIES ? (
-                <button
-                  type="button"
-                  className="node-picker__btn"
-                  onClick={() => {
-                    const p = nodePicker;
-                    const nid = completeConnectionMenuPick({
-                      fromNodeId: p.fromNodeId,
-                      fromHandleId: p.fromHandleId,
-                      fromHandleType: p.fromHandleType,
-                      pick: 'writing',
-                      flowPosition: { x: p.flowX, y: p.flowY },
-                    });
-                    if (nid) {
-                      setNodePicker(null);
-                      focusNode(nid, { openDetail: true });
-                    }
-                  }}
-                >
-                  创建编剧部
-                </button>
-              ) : null}
-              <button
-                type="button"
-                className="node-picker__btn"
-                onClick={() => {
-                  const p = nodePicker;
-                  const nid = completeConnectionMenuPick({
-                    fromNodeId: p.fromNodeId,
-                    fromHandleId: p.fromHandleId,
-                    fromHandleType: p.fromHandleType,
-                    pick: 'storyboard',
-                    flowPosition: { x: p.flowX, y: p.flowY },
-                  });
-                  if (nid) {
-                    setNodePicker(null);
-                    focusNode(nid, { openDetail: true });
-                  }
-                }}
-              >
-                创建分镜部
-              </button>
-              <button
-                type="button"
-                className="node-picker__btn"
-                onClick={() => {
-                  const p = nodePicker;
-                  const nid = completeConnectionMenuPick({
-                    fromNodeId: p.fromNodeId,
-                    fromHandleId: p.fromHandleId,
-                    fromHandleType: p.fromHandleType,
-                    pick: 'storyboard_file_node',
-                    flowPosition: { x: p.flowX, y: p.flowY },
-                  });
-                  if (nid) {
-                    setNodePicker(null);
-                    focusNode(nid, { openDetail: false });
-                  }
-                }}
-              >
-                创建分镜表文件
-              </button>
-            </>
-          ) : null}
-          <button
-            type="button"
-            className="node-picker__btn"
-            onClick={() => {
-              const p = nodePicker;
-              const nid = completeConnectionMenuPick({
-                fromNodeId: p.fromNodeId,
-                fromHandleId: p.fromHandleId,
-                fromHandleType: p.fromHandleType,
-                pick: 'prompt',
-                flowPosition: { x: p.flowX, y: p.flowY },
-              });
-              if (nid) {
-                setNodePicker(null);
-                focusNode(nid, { openDetail: true });
-              }
-            }}
-          >
-            创建 Prompt 部门
-          </button>
-          {promptOutputPanePicker ? (
-            <button
-              type="button"
-              className="node-picker__btn"
-              onClick={() => {
-                const p = nodePicker;
-                const nid = completeConnectionMenuPick({
-                  fromNodeId: p.fromNodeId,
-                  fromHandleId: p.fromHandleId,
-                  fromHandleType: p.fromHandleType,
-                  pick: 'prompt_review_node',
-                  flowPosition: { x: p.flowX, y: p.flowY },
-                });
-                if (nid) {
-                  setNodePicker(null);
-                  focusNode(nid, { openDetail: false });
-                }
-              }}
-            >
-              创建提示词审核
-            </button>
-          ) : null}
+            ))
+          ) : (
+            <div className="node-picker__empty">当前端口没有可直接创建的匹配节点</div>
+          )}
           <button type="button" className="node-picker__dismiss" onClick={() => setNodePicker(null)}>
             取消
           </button>
