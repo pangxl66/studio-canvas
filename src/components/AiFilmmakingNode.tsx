@@ -4,6 +4,7 @@ import {
   DEFAULT_STORYBOARD_SKILL_ID,
   getSkillById,
   listSkillsInFolder,
+  normalizeFilmStoryboardSkillId,
 } from '@/services/skillLoader';
 import { normalizeStoryboardAspectRatio } from '@/services/aiFilmmakingPrompts';
 import { FILM_INPUT_HANDLE_ID, FILM_OUTPUT_HANDLE_ID } from '@/store/slices/aiFilmmakingStore';
@@ -87,13 +88,12 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
     () => (isStoryboardNode ? listSkillsInFolder('storyboard') : []),
     [isStoryboardNode],
   );
-  const selectedStoryboardSkillId =
-    isStoryboardNode && typeof data.film_storyboard_skill_id === 'string' && data.film_storyboard_skill_id.trim()
-      ? data.film_storyboard_skill_id.trim()
-      : DEFAULT_STORYBOARD_SKILL_ID;
+  const selectedStoryboardSkillId = isStoryboardNode
+    ? normalizeFilmStoryboardSkillId(data.film_storyboard_skill_id)
+    : DEFAULT_STORYBOARD_SKILL_ID;
   const effectiveStoryboardSkillId = storyboardSkills.some((skill) => skill.id === selectedStoryboardSkillId)
     ? selectedStoryboardSkillId
-    : storyboardSkills[0]?.id ?? DEFAULT_STORYBOARD_SKILL_ID;
+    : normalizeFilmStoryboardSkillId(storyboardSkills[0]?.id);
   const selectedStoryboardAspectRatio = normalizeStoryboardAspectRatio(data.film_storyboard_aspect_ratio);
 
   const onRun = useCallback(() => {
@@ -116,7 +116,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
 
   const onSkillChange = useCallback(
     (event: ChangeEvent<HTMLSelectElement>) => {
-      const nextId = event.target.value;
+      const nextId = normalizeFilmStoryboardSkillId(event.target.value);
       const skill = getSkillById(nextId);
       patchNodeData(id, { film_storyboard_skill_id: nextId, generation_error: undefined }, false);
       pushMessage({

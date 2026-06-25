@@ -1,5 +1,4 @@
 import { getResolvedLlmGatewayConfig } from '@/config/llmSettings';
-import { requestLLM, requestLLMStream } from '@/services/ModelGateway';
 import { safeJsonParse } from '@/services/safeJsonParse';
 
 function buildJsonRepairUserPrompt(originalUserPrompt: string, rawResponse: string): string {
@@ -55,6 +54,7 @@ export async function invokeLlmJsonObject(params: {
   }
   const config = params.preferProxy ? preferSameOriginProxy(resolvedConfig) : resolvedConfig;
 
+  const { requestLLM } = await import('@/services/ModelGateway');
   const result = await requestLLM(config, {
     systemPrompt: params.systemPrompt,
     userPrompt: params.userPrompt,
@@ -107,6 +107,7 @@ export async function invokeLlmJsonObjectStream(params: {
     throw new Error(MISSING_CFG);
   }
 
+  const { requestLLM, requestLLMStream } = await import('@/services/ModelGateway');
   const streamResult = await requestLLMStream(config, {
     systemPrompt: params.systemPrompt,
     userPrompt: params.userPrompt,
@@ -215,6 +216,7 @@ export async function invokeLlmLeaderReview(params: {
 
   const systemPrompt = `${params.systemPrompt.trim()}\n\n${LEADER_OUTPUT_INSTRUCTION}`;
 
+  const { requestLLM } = await import('@/services/ModelGateway');
   const result = await requestLLM(config, {
     systemPrompt,
     userPrompt: params.userPrompt,

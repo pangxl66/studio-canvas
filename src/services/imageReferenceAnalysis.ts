@@ -1,5 +1,4 @@
 import { getResolvedVisionLlmGatewayConfig } from '@/config/llmSettings';
-import { requestLLMWithImage } from '@/services/ModelGateway';
 
 function stripWrapper(raw: string): string {
   let text = raw.replace(/^\uFEFF/, '').trim();
@@ -38,6 +37,7 @@ export async function analyzeImageReference(params: {
   }
 
   const model = gateway.model?.trim();
+  const { requestLLMWithImage } = await import('@/services/ModelGateway');
   const result = await requestLLMWithImage(gateway, {
     model,
     imageDataUrl: params.imageDataUrl,

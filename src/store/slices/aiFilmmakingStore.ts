@@ -13,8 +13,7 @@ import {
   type AiFilmmakingStoryboardAspectRatio,
   type AiFilmmakingVideoMode,
 } from '@/services/aiFilmmakingPrompts';
-import { DEFAULT_STORYBOARD_SKILL_ID, getSkillById } from '@/services/skillLoader';
-import { requestLLM, requestLLMWithImage } from '@/services/ModelGateway';
+import { DEFAULT_STORYBOARD_SKILL_ID, getSkillById, normalizeFilmStoryboardSkillId } from '@/services/skillLoader';
 import type { StudioRFNode } from '@/types/reactFlow';
 import type { StoryboardOutput, StoryboardShot, StudioNodeData } from '@/types/studio';
 import { parseShotListItemOutputHandleId } from '@/utils/shotListWire';
@@ -318,10 +317,7 @@ function collectFilmPromptSource(
 }
 
 function resolveFilmStoryboardSkill(data: StudioNodeData): ResolvedFilmStoryboardSkill | undefined {
-  const rawId =
-    typeof data.film_storyboard_skill_id === 'string' && data.film_storyboard_skill_id.trim()
-      ? data.film_storyboard_skill_id.trim()
-      : DEFAULT_STORYBOARD_SKILL_ID;
+  const rawId = normalizeFilmStoryboardSkillId(data.film_storyboard_skill_id);
   const skill = getSkillById(rawId) ?? getSkillById(DEFAULT_STORYBOARD_SKILL_ID);
   if (!skill || skill.folder !== 'storyboard') return undefined;
   return {
@@ -469,6 +465,7 @@ export function createAiFilmmakingStoreSlice(
       });
 
       try {
+        const { requestLLM, requestLLMWithImage } = await import('@/services/ModelGateway');
         const hasImage = Boolean(source.primaryImage?.dataUrl);
         const requestConfig = hasImage ? getResolvedVisionLlmGatewayConfig() ?? config : config;
         const systemPrompt = buildAiFilmmakingSystemPrompt(

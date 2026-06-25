@@ -1,5 +1,4 @@
 import { getLlmSettingsFormDefaults, getResolvedLlmGatewayConfig, getResolvedVisionLlmGatewayConfig } from '@/config/llmSettings';
-import { requestLLM, requestLLMWithImage } from '@/services/ModelGateway';
 import type { StudioRFNode } from '@/types/reactFlow';
 import type { StudioState } from '../useStudioStore';
 
@@ -308,6 +307,7 @@ export function createTextStoreSlice(
       });
 
       try {
+        const { requestLLM, requestLLMWithImage } = await import('@/services/ModelGateway');
         const settings = getLlmSettingsFormDefaults();
         const hasVisionPayload = Boolean(primaryVideo?.frameDataUrl || primaryImage?.imageDataUrl);
         const imageConfig = hasVisionPayload ? getResolvedVisionLlmGatewayConfig() ?? config : config;

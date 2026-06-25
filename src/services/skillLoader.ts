@@ -208,6 +208,30 @@ export function getSkillById(id: string): SkillFileRecord | undefined {
   return registry.get(resolveSkillAlias(id));
 }
 
+export function isSkillAllowedForPipelineKind(kind: PipelineKindForSkills, id: string | null | undefined): boolean {
+  const rawId = typeof id === 'string' ? id.trim() : '';
+  if (!rawId) return false;
+  const resolvedId = resolveSkillAlias(rawId);
+  return listSkillsForPipelineKind(kind).some((skill) => skill.id === resolvedId);
+}
+
+export function normalizeSkillIdForPipelineKind(
+  kind: PipelineKindForSkills,
+  id: string | null | undefined,
+): string | undefined {
+  const rawId = typeof id === 'string' ? id.trim() : '';
+  if (!rawId) return undefined;
+  const resolvedId = resolveSkillAlias(rawId);
+  return isSkillAllowedForPipelineKind(kind, resolvedId) ? resolvedId : undefined;
+}
+
+export function normalizeFilmStoryboardSkillId(id: string | null | undefined): string {
+  const fallback =
+    normalizeSkillIdForPipelineKind('storyboard', DEFAULT_STORYBOARD_SKILL_ID) ??
+    listSkillsForPipelineKind('storyboard')[0]?.id;
+  return normalizeSkillIdForPipelineKind('storyboard', id) ?? fallback ?? DEFAULT_STORYBOARD_SKILL_ID;
+}
+
 function isPromptStyleSkillRecord(skill: SkillFileRecord | undefined): boolean {
   return skill?.folder === 'prompt' && skill.slot === 'style';
 }

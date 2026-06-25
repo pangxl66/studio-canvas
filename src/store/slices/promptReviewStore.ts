@@ -14,7 +14,6 @@ import {
   PROMPT_TIMING_SYSTEM_RULE,
 } from '@/agents/promptDeptSpec';
 import { mergedUpstreamForPromptReviewNode } from '@/services/graphInput';
-import { requestLLM, requestLLMStream } from '@/services/ModelGateway';
 import type { PromptReviewHistoryEntry, StudioNodeData } from '@/types/studio';
 import type { StudioState } from '../useStudioStore';
 
@@ -334,6 +333,7 @@ export function createPromptReviewStoreSlice(
       );
       get().pushMessage({ role: 'broadcast', text: '提示词审核节点正在调用 LLM 调整内容。', nodeId });
       try {
+        const { requestLLM, requestLLMStream } = await import('@/services/ModelGateway');
         const systemPrompt = buildPromptReviewSystemPrompt();
         const userPrompt = buildPromptReviewUserPrompt(task, sourceText);
         const requestParams = {

@@ -2,6 +2,7 @@ import type { Edge } from '@xyflow/react';
 import { tryParseStoryboardOutput } from '@/agents/storyboardAgents';
 import {
   DEFAULT_STORYBOARD_SKILL_ID,
+  normalizeFilmStoryboardSkillId,
   normalizeMountedSkillIdsForKind,
 } from '@/services/skillLoader';
 import type { StoryboardOutput, StudioNodeData } from '@/types/studio';
@@ -110,6 +111,15 @@ export function normalizeRestoredStudioNode(node: StudioRFNode): StudioRFNode {
   }
   if (safeNode.type === 'videoNode' && safeNode.data.type === 'video_node') {
     return safeNode;
+  }
+  if (safeNode.type === 'aiFilmStoryboard' && safeNode.data.type === 'film_storyboard_node') {
+    return {
+      ...safeNode,
+      data: {
+        ...safeNode.data,
+        film_storyboard_skill_id: normalizeFilmStoryboardSkillId(safeNode.data.film_storyboard_skill_id),
+      },
+    };
   }
   if (safeNode.type === 'department' && safeNode.data.type === 'storyboard') {
     return {

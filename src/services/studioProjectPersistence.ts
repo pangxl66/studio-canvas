@@ -55,6 +55,12 @@ export type StudioRecentProjectRef = {
   source: 'workspace' | 'file' | 'autosave';
 };
 
+export function studioProjectPayloadHasCanvasContent(
+  payload: Pick<StudioProjectFilePayload, 'nodes' | 'edges'> | null | undefined,
+): boolean {
+  return Boolean(payload && (payload.nodes.length > 0 || payload.edges.length > 0));
+}
+
 const STUDIO_PROJECT_NODE_TYPES = new Set<StudioRFNode['type']>([
   'department',
   'textNode',

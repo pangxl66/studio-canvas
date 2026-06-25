@@ -1,6 +1,7 @@
 import { Panel } from '@xyflow/react';
 import { saveAs } from 'file-saver';
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
+import { useStudioProjectPersistence } from '@/hooks/useStudioProjectPersistence';
 import { isSaasAuthEnabled } from '@/services/authClient';
 import {
   getCloudProject,
@@ -10,27 +11,21 @@ import {
 } from '@/services/cloudProjectService';
 import {
   createStudioProjectId,
-  getActiveStudioProjectRef,
   getStudioAutosave,
   getStudioProjectRecord,
   listStudioProjectSummaries,
   listStudioRecentProjects,
   parseStudioProjectJsonFile,
-  putStudioAutosave,
   putStudioProjectRecord,
   pushStudioRecentProject,
   setActiveStudioProjectRef,
   stringifyStudioProjectPayloadWithMeta,
+  studioProjectPayloadHasCanvasContent,
   STUDIO_IDB_AUTOSAVE_KEY,
-  STUDIO_PROJECT_JSON_VERSION,
-  type StudioProjectFilePayload,
   type StudioRecentProjectRef,
 } from '@/services/studioProjectPersistence';
 import { useStudioStore } from '@/store/useStudioStore';
-import { toPersistableNodesAndEdges } from '@/utils/studioNodePersistence';
 
-const AUTOSAVE_INTERVAL_MS = 5 * 60 * 1000;
-const AUTOSAVE_DEBOUNCE_MS = 1200;
 const MAX_RECENT_PROJECTS = 10;
 const UUID_LIKE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -42,12 +37,6 @@ function formatTime(ts: number): string {
   return new Date(ts).toLocaleString();
 }
 
-function payloadHasCanvasContent(
-  payload: Pick<StudioProjectFilePayload, 'nodes' | 'edges'> | null | undefined,
-): boolean {
-  return Boolean(payload && (payload.nodes.length > 0 || payload.edges.length > 0));
-}
-
 function sourceLabel(source: StudioRecentProjectRef['source']): string {
   if (source === 'file') return '文件导入';
   if (source === 'autosave') return '自动存档';
@@ -57,14 +46,11 @@ function sourceLabel(source: StudioRecentProjectRef['source']): string {
 export function StudioProjectMenu() {
   const fileRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const autosaveTimerRef = useRef<number | null>(null);
-  const persistenceReadyRef = useRef(false);
 
   const hydrateProject = useStudioStore((state) => state.hydrateProject);
   const pushMessage = useStudioStore((state) => state.pushMessage);
   const createNewProject = useStudioStore((state) => state.createNewProject);
   const setCurrentProjectMeta = useStudioStore((state) => state.setCurrentProjectMeta);
-  const currentProjectId = useStudioStore((state) => state.currentProjectId);
   const currentProjectName = useStudioStore((state) => state.currentProjectName);
   const nodes = useStudioStore((state) => state.nodes);
   const edges = useStudioStore((state) => state.edges);
@@ -89,7 +75,7 @@ export function StudioProjectMenu() {
       for (const item of recents) {
         merged.set(item.projectId, item);
       }
-      if (autosave && payloadHasCanvasContent(autosave)) {
+      if (autosave && studioProjectPayloadHasCanvasContent(autosave)) {
         const autosaveProjectId = autosave.projectId ?? STUDIO_IDB_AUTOSAVE_KEY;
         const autosaveName = autosave.projectName?.trim() || '未命名自动存档';
         const current = merged.get(autosaveProjectId);
@@ -139,39 +125,7 @@ export function StudioProjectMenu() {
     [refreshProjectData],
   );
 
-  const persistCurrentProjectSnapshot = useCallback(async () => {
-    const {
-      nodes: liveNodes,
-      edges: liveEdges,
-      currentProjectId: liveProjectId,
-      currentProjectName: liveProjectName,
-    } = useStudioStore.getState();
-    const { nodes: persistableNodes, edges: persistableEdges } = toPersistableNodesAndEdges(
-      liveNodes,
-      liveEdges,
-    );
-
-    if (persistableNodes.length === 0 && persistableEdges.length === 0 && !liveProjectId) {
-      return;
-    }
-
-    const payload: StudioProjectFilePayload = {
-      version: STUDIO_PROJECT_JSON_VERSION,
-      savedAt: Date.now(),
-      nodes: persistableNodes,
-      edges: persistableEdges,
-      projectId: liveProjectId ?? undefined,
-      projectName: liveProjectName,
-    };
-    await putStudioAutosave(payload);
-    if (liveProjectId) {
-      await putStudioProjectRecord(liveProjectId, liveProjectName, liveNodes, liveEdges);
-      await setActiveStudioProjectRef({
-        projectId: liveProjectId,
-        projectName: liveProjectName,
-      });
-    }
-  }, []);
+  useStudioProjectPersistence({ rememberRecent });
 
   const closeMenus = useCallback(() => {
     setMenuOpen(false);
@@ -432,142 +386,6 @@ export function StudioProjectMenu() {
     if (!menuOpen) return;
     void refreshProjectData();
   }, [menuOpen, refreshProjectData]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const restoreLatestProject = async () => {
-      try {
-        const current = useStudioStore.getState();
-        if (current.nodes.length > 0 || current.edges.length > 0) {
-          persistenceReadyRef.current = true;
-          return;
-        }
-
-        const [activeRef, autosave] = await Promise.all([
-          getActiveStudioProjectRef(),
-          getStudioAutosave(),
-        ]);
-        const activeRecord = activeRef ? await getStudioProjectRecord(activeRef.projectId) : null;
-
-        let restorePayload: StudioProjectFilePayload | null = null;
-        let restoreSource: StudioRecentProjectRef['source'] = 'autosave';
-
-        if (activeRecord && payloadHasCanvasContent(activeRecord)) {
-          restorePayload = activeRecord;
-          restoreSource = 'workspace';
-        }
-
-        if (
-          autosave &&
-          payloadHasCanvasContent(autosave) &&
-          activeRecord?.projectId &&
-          autosave.projectId === activeRecord.projectId &&
-          autosave.savedAt >= activeRecord.updatedAt
-        ) {
-          restorePayload = autosave;
-          restoreSource = 'autosave';
-        } else if (!restorePayload && autosave && payloadHasCanvasContent(autosave)) {
-          restorePayload = autosave;
-          restoreSource = 'autosave';
-        }
-
-        if (!restorePayload || cancelled) return;
-
-        const restoredProjectName =
-          restorePayload.projectName ??
-          activeRef?.projectName ??
-          useStudioStore.getState().currentProjectName;
-        const restoreBroadcastText =
-          restoreSource === 'autosave'
-            ? `已恢复上次自动存档「${restoredProjectName}」。`
-            : `已恢复上次工程「${restoredProjectName}」。`;
-
-        hydrateProject(restorePayload.nodes, restorePayload.edges, {
-          projectId: restorePayload.projectId ?? null,
-          projectName: restoredProjectName,
-          broadcastText: restoreBroadcastText,
-        });
-
-        if (restorePayload.projectId) {
-          await setActiveStudioProjectRef({
-            projectId: restorePayload.projectId,
-            projectName: restoredProjectName,
-          });
-          await rememberRecent(
-            restorePayload.projectId,
-            restoredProjectName,
-            restoreSource === 'workspace' ? 'workspace' : 'autosave',
-          );
-        }
-      } catch (error) {
-        console.warn('Studio project restore failed', error);
-      } finally {
-        persistenceReadyRef.current = true;
-      }
-    };
-
-    void restoreLatestProject();
-    return () => {
-      cancelled = true;
-    };
-  }, [hydrateProject, rememberRecent]);
-
-  useEffect(() => {
-    if (!persistenceReadyRef.current) return;
-    if (autosaveTimerRef.current != null) {
-      window.clearTimeout(autosaveTimerRef.current);
-    }
-    autosaveTimerRef.current = window.setTimeout(() => {
-      void persistCurrentProjectSnapshot().catch((error) => {
-        console.warn('IndexedDB autosave failed', error);
-      });
-      autosaveTimerRef.current = null;
-    }, AUTOSAVE_DEBOUNCE_MS);
-
-    return () => {
-      if (autosaveTimerRef.current != null) {
-        window.clearTimeout(autosaveTimerRef.current);
-        autosaveTimerRef.current = null;
-      }
-    };
-  }, [currentProjectId, currentProjectName, edges, nodes, persistCurrentProjectSnapshot]);
-
-  useEffect(() => {
-    const tick = () => {
-      if (!persistenceReadyRef.current) return;
-      void persistCurrentProjectSnapshot().catch((error) => {
-        console.warn('IndexedDB autosave failed', error);
-      });
-    };
-
-    const id = window.setInterval(tick, AUTOSAVE_INTERVAL_MS);
-    return () => window.clearInterval(id);
-  }, [persistCurrentProjectSnapshot]);
-
-  useEffect(() => {
-    const flushSnapshot = () => {
-      if (!persistenceReadyRef.current) return;
-      void persistCurrentProjectSnapshot().catch((error) => {
-        console.warn('IndexedDB autosave failed', error);
-      });
-    };
-
-    const onVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') {
-        flushSnapshot();
-      }
-    };
-
-    window.addEventListener('pagehide', flushSnapshot);
-    window.addEventListener('beforeunload', flushSnapshot);
-    document.addEventListener('visibilitychange', onVisibilityChange);
-    return () => {
-      window.removeEventListener('pagehide', flushSnapshot);
-      window.removeEventListener('beforeunload', flushSnapshot);
-      document.removeEventListener('visibilitychange', onVisibilityChange);
-    };
-  }, [persistCurrentProjectSnapshot]);
 
   useEffect(() => {
     if (!menuOpen) return;

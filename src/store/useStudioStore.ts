@@ -27,13 +27,11 @@ import {
   cloneStoryboardOutput,
   tryParseStoryboardOutput,
 } from '@/agents/storyboardAgents';
-import { executeEmployeePhase } from '@/services/agents/executeTask';
-import { runNodeAssistant } from '@/services/nodeAssistant';
-import { ingestWritingOutputToProjectContext } from '@/services/ProjectContext';
 import { mergeDownstreamSkillsFromChain } from '@/services/skillChain';
 import {
   DEFAULT_STORYBOARD_SKILL_ID,
   getSkillById,
+  normalizeFilmStoryboardSkillId,
   normalizeMountedSkillIdsForKind,
 } from '@/services/skillLoader';
 import {
@@ -56,7 +54,6 @@ import {
   mergedUpstreamForTextNode,
   resolveDepartmentExecutionInput,
 } from '@/services/graphInput';
-import { analyzeImageReference } from '@/services/imageReferenceAnalysis';
 import {
   SHOT_LIST_LINK_HANDLE_ID,
   SHOT_LIST_PARENT_HANDLE_ID,
@@ -285,6 +282,9 @@ async function prepareStoryboardImageReferencesForExecution(args: {
 }): Promise<number> {
   const imageNodes = connectedImageNodesForDepartment(args.deptId, args.nodes, args.edges);
   let analyzedCount = 0;
+  let analyzeImageReferenceFn:
+    | ((params: { imageDataUrl: string; signal?: AbortSignal }) => Promise<string>)
+    | null = null;
 
   for (let index = 0; index < imageNodes.length; index += 1) {
     const imageNode = imageNodes[index];
@@ -311,7 +311,8 @@ async function prepareStoryboardImageReferencesForExecution(args: {
     );
 
     try {
-      const analyzed = await analyzeImageReference({ imageDataUrl, signal: args.signal });
+      analyzeImageReferenceFn ??= (await import('@/services/imageReferenceAnalysis')).analyzeImageReference;
+      const analyzed = await analyzeImageReferenceFn({ imageDataUrl, signal: args.signal });
       args.patchNodeData(
         imageNode.id,
         {
@@ -1687,6 +1688,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     });
 
     try {
+      const { runNodeAssistant } = await import('@/services/nodeAssistant');
       const result = await runNodeAssistant({
         data: contextData,
         history: getNodeAssistantHistory(get().messages, selectedId),
@@ -1959,6 +1961,12 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       patchEff = {
         ...patchEff,
         mounted_skills: normalizeMountedSkillIdsForKind(targetPre.data.type, patchEff.mounted_skills),
+      };
+    }
+    if (targetPre?.data.type === 'film_storyboard_node' && patchEff.film_storyboard_skill_id !== undefined) {
+      patchEff = {
+        ...patchEff,
+        film_storyboard_skill_id: normalizeFilmStoryboardSkillId(patchEff.film_storyboard_skill_id),
       };
     }
 
@@ -3427,6 +3435,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         false,
       );
 
+      const { executeEmployeePhase } = await import('@/services/agents/executeTask');
       const emp = await executeEmployeePhase(taskParams);
       ensureNotStopped();
 
@@ -3480,6 +3489,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       }
 
       if (kind === 'writing') {
+        const { ingestWritingOutputToProjectContext } = await import('@/services/ProjectContext');
         ingestWritingOutputToProjectContext(nodeId, emp.output as WritingOutput);
         get().pushMessage({
           role: 'system',

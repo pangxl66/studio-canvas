@@ -10,6 +10,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "api:check": "tsc --noEmit --skipLibCheck --moduleResolution bundler --module ESNext --target ES2022 --types node api/health.ts api/llm/chat.ts api/credits/status.ts api/admin/credits.ts api/projects/index.ts api/projects/[id].ts",
+    "stability:check": "node --experimental-strip-types tools/stability-checks.mjs",
     "saas:check": "node tools/check-saas-env.cjs",
     "saas:check:prod": "node tools/check-saas-env.cjs --prod",
     "saas:dev": "npx vercel dev --listen 127.0.0.1:3000",
