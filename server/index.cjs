@@ -41,6 +41,8 @@ let testInviteUsageEvents = [];
 let testInviteActivationsLoaded = false;
 let testInviteUsageLoaded = false;
 const modelFailureState = new Map();
+const staticGzipCache = new Map();
+const STATIC_GZIP_CACHE_MAX_ITEMS = 80;
 
 loadLocalEnvFile(path.join(rootDir, '.env.local'));
 
@@ -464,6 +466,19 @@ function recordPrimaryModelFailure(provider, primaryModel) {
 
 function clearPrimaryModelFailures(provider, primaryModel) {
   modelFailureState.delete(modelFailureKey(provider, primaryModel));
+}
+
+function modelFailureHealthSummary(provider, primaryModel) {
+  const now = Date.now();
+  const state = modelFailureState.get(modelFailureKey(provider, primaryModel));
+  const recentFailures = (state?.hits || []).filter((time) => now - time <= PRIMARY_MODEL_FAILURE_WINDOW_MS).length;
+  const cooldownUntil = Number(state?.cooldownUntil || 0);
+  const coolingDown = cooldownUntil > now;
+  return {
+    coolingDown,
+    cooldownRemainingSec: coolingDown ? Math.ceil((cooldownUntil - now) / 1000) : 0,
+    recentFailures,
+  };
 }
 
 function modelAttemptPlan(provider, primaryModel) {
@@ -1544,9 +1559,48 @@ async function handleHealth(req, res) {
     supabaseUrl: Boolean(env('SUPABASE_URL')),
   };
   const ok = Object.values(checks).every(Boolean);
+  const providers = ['', 'gpt', 'deepseek'].map((provider) => {
+    const key = provider || 'default';
+    const primaryModel = normalizeModel('', 'health-check', provider);
+    return {
+      provider: key,
+      apiKey: hasProviderLlmApiKey(provider),
+      upstream: hasProviderLlmUpstream(provider),
+      explicitApiKey: hasExplicitProviderLlmApiKey(provider),
+      explicitUpstream: hasExplicitProviderLlmUpstream(provider),
+      primaryModel,
+      fallbackModels: fallbackModelsForProvider(provider, primaryModel),
+      failureState: modelFailureHealthSummary(provider, primaryModel),
+    };
+  });
   sendJson(res, ok ? 200 : 503, {
     ok,
     checks,
+    diagnostics: {
+      llm: {
+        defaultTimeoutMs: DEFAULT_TIMEOUT_MS,
+        failureWindowMs: PRIMARY_MODEL_FAILURE_WINDOW_MS,
+        failureThreshold: PRIMARY_MODEL_FAILURE_THRESHOLD,
+        cooldownMs: PRIMARY_MODEL_COOLDOWN_MS,
+        providers,
+      },
+      quota: {
+        defaultMonthlyQuota: DEFAULT_MONTHLY_QUOTA,
+        legacyDefaultMonthlyQuota: LEGACY_DEFAULT_MONTHLY_QUOTA,
+        testInviteMonthlyQuota: getTestInviteMonthlyQuota(),
+      },
+      staticAssets: {
+        distExists: fs.existsSync(distDir),
+        indexExists: fs.existsSync(path.join(distDir, 'index.html')),
+        indexCache: 'no-cache, must-revalidate',
+        assetCache: 'public, max-age=31536000, immutable',
+      },
+      server: {
+        node: process.version,
+        platform: process.platform,
+        uptimeSec: Math.floor(process.uptime()),
+      },
+    },
     runtime: 'node-http',
     service: 'studio-canvas-saas',
     timestamp: new Date().toISOString(),
@@ -2796,6 +2850,50 @@ function contentTypeFor(filePath) {
   return 'application/octet-stream';
 }
 
+function staticEtag(stat) {
+  return `W/"${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}"`;
+}
+
+function normalizeStaticEtagToken(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^W\//i, '')
+    .replace(/^"|"$/g, '');
+}
+
+function requestHasFreshStaticCache(req, etag, stat) {
+  const ifNoneMatch = String(req.headers['if-none-match'] || '');
+  if (ifNoneMatch) {
+    const normalizedEtag = normalizeStaticEtagToken(etag);
+    const matches = ifNoneMatch
+      .split(',')
+      .map((item) => item.trim())
+      .some((item) => item === '*' || item === etag || normalizeStaticEtagToken(item) === normalizedEtag);
+    if (matches) return true;
+  }
+
+  const ifModifiedSince = String(req.headers['if-modified-since'] || '');
+  if (!ifModifiedSince) return false;
+  const since = Date.parse(ifModifiedSince);
+  if (!Number.isFinite(since)) return false;
+  return Math.floor(stat.mtimeMs / 1000) <= Math.floor(since / 1000);
+}
+
+function getCachedGzipStaticFile(filePath, stat) {
+  const cacheKey = `${filePath}:${stat.size}:${Math.floor(stat.mtimeMs)}`;
+  const cached = staticGzipCache.get(cacheKey);
+  if (cached) return cached;
+
+  const gzipped = zlib.gzipSync(fs.readFileSync(filePath));
+  staticGzipCache.set(cacheKey, gzipped);
+  while (staticGzipCache.size > STATIC_GZIP_CACHE_MAX_ITEMS) {
+    const oldestKey = staticGzipCache.keys().next().value;
+    if (!oldestKey) break;
+    staticGzipCache.delete(oldestKey);
+  }
+  return gzipped;
+}
+
 function safeStaticPath(urlPath) {
   const decodedPath = decodeURIComponent(urlPath.split('?')[0] || '/');
   const normalized = decodedPath === '/' ? '/index.html' : decodedPath;
@@ -2821,18 +2919,27 @@ function serveStatic(req, res) {
   res.statusCode = 200;
   res.setHeader('content-type', contentTypeFor(filePath));
   if (filePath === path.join(distDir, 'index.html')) {
-    res.setHeader('cache-control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('cache-control', 'no-cache, must-revalidate');
     res.setHeader('pragma', 'no-cache');
     res.setHeader('expires', '0');
   } else {
     res.setHeader('cache-control', 'public, max-age=31536000, immutable');
   }
   const stat = fs.statSync(filePath);
+  const etag = staticEtag(stat);
+  res.setHeader('etag', etag);
+  res.setHeader('last-modified', stat.mtime.toUTCString());
+  res.setHeader('accept-ranges', 'bytes');
+  if ((req.method === 'GET' || req.method === 'HEAD') && requestHasFreshStaticCache(req, etag, stat)) {
+    res.statusCode = 304;
+    res.end();
+    return;
+  }
   const acceptsGzip = /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''));
   const shouldGzip = acceptsGzip && /\.(?:html|js|css|json|svg)$/i.test(filePath);
   if (req.method === 'HEAD') {
     if (shouldGzip) {
-      const gzipped = zlib.gzipSync(fs.readFileSync(filePath));
+      const gzipped = getCachedGzipStaticFile(filePath, stat);
       res.setHeader('content-encoding', 'gzip');
       res.setHeader('vary', 'Accept-Encoding');
       res.setHeader('content-length', gzipped.length);
@@ -2843,7 +2950,7 @@ function serveStatic(req, res) {
     return;
   }
   if (shouldGzip) {
-    const gzipped = zlib.gzipSync(fs.readFileSync(filePath));
+    const gzipped = getCachedGzipStaticFile(filePath, stat);
     res.setHeader('content-encoding', 'gzip');
     res.setHeader('vary', 'Accept-Encoding');
     res.setHeader('content-length', gzipped.length);
