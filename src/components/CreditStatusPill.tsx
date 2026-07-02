@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { AdminCreditPanel } from '@/components/AdminCreditPanel';
 import {
   fetchCreditStatus,
@@ -28,6 +29,11 @@ export function CreditStatusPill() {
   const [isRechargePanelOpen, setIsRechargePanelOpen] = useState(false);
   const [copyMessage, setCopyMessage] = useState('');
   const adminToolsEnabled = isAdminToolsEnabled() || Boolean(status?.isAdmin);
+
+  const closeRechargePanel = useCallback(() => {
+    setIsRechargePanelOpen(false);
+    setCopyMessage('');
+  }, []);
 
   const refresh = useCallback(async () => {
     setIsLoading(true);
@@ -64,6 +70,19 @@ export function CreditStatusPill() {
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, [refresh]);
+
+  useEffect(() => {
+    if (!isRechargePanelOpen) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      closeRechargePanel();
+    };
+
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [closeRechargePanel, isRechargePanelOpen]);
 
   const copyRechargeWechatId = useCallback(async () => {
     try {
@@ -107,31 +126,44 @@ export function CreditStatusPill() {
       {isAdminPanelOpen ? (
         <AdminCreditPanel onChanged={() => void refresh()} onClose={() => setIsAdminPanelOpen(false)} />
       ) : null}
-      {isRechargePanelOpen ? (
-        <div className="recharge-panel nodrag nopan" role="dialog" aria-modal="true" aria-label="充值额度">
-          <div className="recharge-panel__backdrop" onClick={() => setIsRechargePanelOpen(false)} />
-          <section className="recharge-panel__card">
-            <header className="recharge-panel__header">
-              <div>
-                <p>RECHARGE</p>
-                <h2>充值额度</h2>
-              </div>
-              <button type="button" onClick={() => setIsRechargePanelOpen(false)}>
-                关闭
-              </button>
-            </header>
-            <div className="recharge-panel__contact">
-              <span>线上充值添加 VX</span>
-              <strong>{RECHARGE_WECHAT_ID}</strong>
-              <button type="button" onClick={() => void copyRechargeWechatId()}>
-                复制
-              </button>
-            </div>
-            <p className="recharge-panel__note">添加时请备注登录邮箱，方便核对额度。</p>
-            {copyMessage ? <p className="recharge-panel__message">{copyMessage}</p> : null}
-          </section>
-        </div>
-      ) : null}
+      {isRechargePanelOpen
+        ? createPortal(
+            <div className="recharge-panel nodrag nopan" role="dialog" aria-modal="true" aria-label="充值额度">
+              <div className="recharge-panel__backdrop" role="presentation" onClick={closeRechargePanel} />
+              <section
+                className="recharge-panel__card"
+                onClick={(event) => event.stopPropagation()}
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                <header className="recharge-panel__header">
+                  <div>
+                    <p>RECHARGE</p>
+                    <h2>充值额度</h2>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      closeRechargePanel();
+                    }}
+                  >
+                    关闭
+                  </button>
+                </header>
+                <div className="recharge-panel__contact">
+                  <span>线上充值添加 VX</span>
+                  <strong>{RECHARGE_WECHAT_ID}</strong>
+                  <button type="button" onClick={() => void copyRechargeWechatId()}>
+                    复制
+                  </button>
+                </div>
+                <p className="recharge-panel__note">添加时请备注登录邮箱，方便核对额度。</p>
+                {copyMessage ? <p className="recharge-panel__message">{copyMessage}</p> : null}
+              </section>
+            </div>,
+            document.body,
+          )
+        : null}
     </>
   );
 }

@@ -8981,10 +8981,11 @@ body,
 .recharge-panel {
   position: fixed;
   inset: 0;
-  z-index: 121;
+  z-index: 10020;
   display: grid;
   place-items: center;
   padding: 24px;
+  pointer-events: auto;
 }
 
 .recharge-panel__backdrop {
@@ -8992,6 +8993,7 @@ body,
   inset: 0;
   background: rgba(2, 6, 23, 0.7);
   backdrop-filter: blur(8px);
+  cursor: pointer;
 }
 
 .recharge-panel__card {
