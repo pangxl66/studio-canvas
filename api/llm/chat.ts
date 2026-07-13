@@ -55,7 +55,7 @@ type QuotaReservation =
 
 const MAX_INPUT_CHARS = 80_000;
 const DEFAULT_TIMEOUT_MS = 180_000;
-const DEFAULT_MODEL = 'gpt-5.5';
+const DEFAULT_MODEL = 'gpt-5.6-terra';
 const DEFAULT_MONTHLY_QUOTA = 20;
 const CHAT_COMPLETIONS_PATH = '/chat/completions';
 const PRIMARY_MODEL_FAILURE_WINDOW_MS = 5 * 60 * 1000;
@@ -94,7 +94,12 @@ function parseModelList(value: string): string[] {
 
 function fallbackModelsForPrimary(primaryModel: string): string[] {
   const configured = parseModelList(providerEnv('gpt', 'LLM_FALLBACK_MODELS') || env('LLM_FALLBACK_MODELS'));
-  const inferred = primaryModel.trim().toLowerCase().includes('gpt-5.5') ? ['gpt-5.4'] : [];
+  const normalizedPrimaryModel = primaryModel.trim().toLowerCase();
+  const inferred = normalizedPrimaryModel.includes('gpt-5.6-terra')
+    ? ['gpt-5.5']
+    : normalizedPrimaryModel.includes('gpt-5.5')
+      ? ['gpt-5.4']
+      : [];
   const primaryKey = primaryModel.trim().toLowerCase();
   return parseModelList([...configured, ...inferred].join(',')).filter((model) => model.toLowerCase() !== primaryKey);
 }

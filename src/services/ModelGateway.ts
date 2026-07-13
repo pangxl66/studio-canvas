@@ -314,7 +314,9 @@ function normalizeModelList(models: Array<string | undefined>): string[] {
 
 function inferredFallbackModels(primaryModel: string, provider?: ModelGatewayConfig['provider']): string[] {
   if (provider === 'deepseek') return [];
-  return primaryModel.trim().toLowerCase().includes('gpt-5.5') ? ['gpt-5.4'] : [];
+  const normalizedPrimaryModel = primaryModel.trim().toLowerCase();
+  if (normalizedPrimaryModel.includes('gpt-5.6-terra')) return ['gpt-5.5'];
+  return normalizedPrimaryModel.includes('gpt-5.5') ? ['gpt-5.4'] : [];
 }
 
 function fallbackModelsForConfig(config: ModelGatewayConfig, primaryModel: string): string[] {

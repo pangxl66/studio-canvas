@@ -15,7 +15,7 @@ export type LlmMode = 'deep';
 export type PipelineExecutionMode = 'rule' | 'model';
 
 export const DEFAULT_LLM_PROVIDER: LlmProvider = 'gpt';
-export const DEFAULT_DEEP_LLM_MODEL = 'gpt-5.5';
+export const DEFAULT_DEEP_LLM_MODEL = 'gpt-5.6-terra';
 export const DEFAULT_LLM_MODEL = DEFAULT_DEEP_LLM_MODEL;
 export const DEFAULT_LLM_MODE: LlmMode = 'deep';
 export const DEFAULT_LLM_TIMEOUT_MS = 420_000;
@@ -123,8 +123,13 @@ function fallbackModelsForProvider(provider: LlmProvider, primaryModel: string):
   const configured = parseModelList(
     providerEnvValue(provider, 'FALLBACK_MODELS') || (providerUsesDefaultEnv(provider) ? envValue('VITE_LLM_FALLBACK_MODELS') : ''),
   );
+  const normalizedPrimaryModel = primaryModel.trim().toLowerCase();
   const inferred =
-    provider !== 'deepseek' && primaryModel.trim().toLowerCase().includes('gpt-5.5') ? ['gpt-5.4'] : [];
+    provider !== 'deepseek' && normalizedPrimaryModel.includes('gpt-5.6-terra')
+      ? ['gpt-5.5']
+      : provider !== 'deepseek' && normalizedPrimaryModel.includes('gpt-5.5')
+        ? ['gpt-5.4']
+        : [];
   const primaryKey = primaryModel.trim().toLowerCase();
   return parseModelList([...configured, ...inferred].join(',')).filter((model) => model.toLowerCase() !== primaryKey);
 }

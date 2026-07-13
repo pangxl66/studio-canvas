@@ -18,7 +18,7 @@ function json(res: ServerResponse, status: number, payload: unknown): void {
 }
 
 const DEFAULT_TIMEOUT_MS = parseEnvMs(env('LLM_TIMEOUT_MS') || env('VITE_LLM_TIMEOUT_MS'), 420_000, 420_000, 900_000);
-const DEFAULT_MODEL = 'gpt-5.5';
+const DEFAULT_MODEL = 'gpt-5.6-terra';
 const PRIMARY_MODEL_FAILURE_WINDOW_MS = 5 * 60 * 1000;
 const PRIMARY_MODEL_COOLDOWN_MS = 10 * 60 * 1000;
 const PRIMARY_MODEL_FAILURE_THRESHOLD = 2;
@@ -94,10 +94,13 @@ function parseModelList(value: string): string[] {
 function fallbackModelsForProvider(provider: string, primaryModel: string): string[] {
   const normalizedProvider = normalizeProvider(provider);
   const configured = parseModelList(envForProvider(normalizedProvider, 'LLM_FALLBACK_MODELS'));
+  const normalizedPrimaryModel = String(primaryModel || '').trim().toLowerCase();
   const inferred =
-    normalizedProvider !== 'deepseek' && String(primaryModel || '').trim().toLowerCase().includes('gpt-5.5')
-      ? ['gpt-5.4']
-      : [];
+    normalizedProvider !== 'deepseek' && normalizedPrimaryModel.includes('gpt-5.6-terra')
+      ? ['gpt-5.5']
+      : normalizedProvider !== 'deepseek' && normalizedPrimaryModel.includes('gpt-5.5')
+        ? ['gpt-5.4']
+        : [];
   const primaryKey = String(primaryModel || '').trim().toLowerCase();
   return parseModelList([...configured, ...inferred].join(',')).filter((model) => model.toLowerCase() !== primaryKey);
 }
