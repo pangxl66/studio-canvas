@@ -1,0 +1,5 @@
+{
+  "defaultModel": "gpt-5.6-terra",
+  "defaultMonthlyQuota": 10,
+  "legacyDefaultMonthlyQuota": 20
+}

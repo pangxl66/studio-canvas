@@ -3595,6 +3595,14 @@ body,
   overflow: hidden;
 }
 
+.image-table-node--grid .image-table-node__media {
+  aspect-ratio: 1;
+}
+
+.image-table-node--grid .image-table-node__preview {
+  object-fit: contain;
+}
+
 .image-table-node--selected .image-table-node__media {
   border-color: rgba(147, 197, 253, 0.72);
   box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.2);
@@ -3605,6 +3613,65 @@ body,
   flex-direction: column;
   gap: 8px;
   padding-top: 10px;
+}
+
+.image-table-node__source {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: rgba(191, 219, 254, 0.82);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.image-table-node__instruction {
+  width: 100%;
+  min-height: 54px;
+  resize: vertical;
+  padding: 9px 11px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 8px;
+  outline: none;
+  background: rgba(15, 23, 42, 0.78);
+  color: #e2e8f0;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.image-table-node__instruction:focus {
+  border-color: rgba(96, 165, 250, 0.66);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.14);
+}
+
+.image-table-node__actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.image-table-node__actions button {
+  min-height: 36px;
+  padding: 8px 14px;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  border-radius: 8px;
+  background: linear-gradient(135deg, rgba(37, 99, 235, 0.92), rgba(79, 70, 229, 0.92));
+  color: #eff6ff;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.image-table-node__actions button:disabled {
+  opacity: 0.46;
+  cursor: not-allowed;
+}
+
+.image-table-node__actions .image-table-node__upload {
+  border-color: rgba(148, 163, 184, 0.22);
+  background: rgba(30, 41, 59, 0.86);
+  color: #cbd5e1;
 }
 
 .image-table-node__preview {
@@ -3678,6 +3745,12 @@ body,
   border: none !important;
   background: rgba(124, 108, 246, 0.85) !important;
   box-shadow: none !important;
+}
+
+.image-table-node__handle--input {
+  left: -4px !important;
+  right: auto !important;
+  background: rgba(56, 189, 248, 0.92) !important;
 }
 
 .video-node {

@@ -7,6 +7,13 @@ type WorkbookImportResult = {
   rowCount: number;
 };
 
+const MAX_WORKBOOK_BYTES = 15 * 1024 * 1024;
+const MAX_WORKBOOK_SHEETS = 20;
+const MAX_WORKBOOK_ROWS_PER_SHEET = 5_000;
+const MAX_WORKBOOK_COLUMNS = 100;
+const MAX_WORKBOOK_CELLS = 200_000;
+const MAX_WORKBOOK_CELL_CHARS = 20_000;
+
 type HeaderField =
   | 'sequence'
   | 'shotNo'
@@ -231,20 +238,52 @@ function rowsToStoryboard(rows: string[][], sheetName: string): WorkbookImportRe
 }
 
 export async function parseStoryboardWorkbookFile(file: File): Promise<WorkbookImportResult> {
-  const XLSX = await import('xlsx');
-  const buffer = await file.arrayBuffer();
-  const workbook = XLSX.read(buffer, { type: 'array' });
-  const sheetNames = workbook.SheetNames.filter(Boolean);
-  if (sheetNames.length === 0) {
+  if (!/\.xlsx$/i.test(file.name)) {
+    throw new Error('为保证导入安全，目前只支持 .xlsx 文件。请先将旧版 .xls 另存为 .xlsx。');
+  }
+  if (file.size <= 0) {
+    throw new Error('Excel 文件为空。');
+  }
+  if (file.size > MAX_WORKBOOK_BYTES) {
+    throw new Error(`Excel 文件不能超过 ${MAX_WORKBOOK_BYTES / 1024 / 1024} MB。`);
+  }
+
+  const { default: readXlsxFile } = await import('read-excel-file/browser');
+  const sheets = await readXlsxFile(file);
+  if (sheets.length === 0) {
     throw new Error('Excel 文件里没有可读取的工作表。');
+  }
+  if (sheets.length > MAX_WORKBOOK_SHEETS) {
+    throw new Error(`Excel 文件工作表过多，最多支持 ${MAX_WORKBOOK_SHEETS} 个。`);
   }
 
   let lastError: Error | null = null;
-  for (const sheetName of sheetNames) {
-    const worksheet = workbook.Sheets[sheetName];
-    const rows = XLSX.utils.sheet_to_json<string[]>(worksheet, { header: 1, defval: '' });
+  let totalCells = 0;
+  for (const sheet of sheets) {
+    const sheetName = asText(sheet.sheet) || '未命名工作表';
+    if (sheet.data.length > MAX_WORKBOOK_ROWS_PER_SHEET) {
+      throw new Error(`工作表“${sheetName}”行数过多，最多支持 ${MAX_WORKBOOK_ROWS_PER_SHEET} 行。`);
+    }
+
+    const rows = sheet.data.map((rawRow) => {
+      if (rawRow.length > MAX_WORKBOOK_COLUMNS) {
+        throw new Error(`工作表“${sheetName}”列数过多，最多支持 ${MAX_WORKBOOK_COLUMNS} 列。`);
+      }
+      totalCells += rawRow.length;
+      if (totalCells > MAX_WORKBOOK_CELLS) {
+        throw new Error(`Excel 文件单元格过多，最多支持 ${MAX_WORKBOOK_CELLS} 个单元格。`);
+      }
+      return rawRow.map((value) => {
+        const text = asText(value);
+        if (text.length > MAX_WORKBOOK_CELL_CHARS) {
+          throw new Error(`工作表“${sheetName}”包含超长单元格，单格最多 ${MAX_WORKBOOK_CELL_CHARS} 个字符。`);
+        }
+        return text;
+      });
+    });
+
     try {
-      return rowsToStoryboard(rows.map((row) => row.map(asText)), sheetName);
+      return rowsToStoryboard(rows, sheetName);
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
     }

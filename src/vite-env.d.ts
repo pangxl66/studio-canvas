@@ -8,6 +8,7 @@ interface ImportMetaEnv {
   readonly VITE_LLM_MODE?: string;
   readonly VITE_LLM_TIMEOUT_MS?: string;
   readonly VITE_LLM_PROVIDER?: string;
+  readonly VITE_IMAGE_PROXY_URL?: string;
   readonly VITE_GPT_LLM_PROXY_URL?: string;
   readonly VITE_GPT_LLM_BASE_URL?: string;
   readonly VITE_GPT_LLM_API_KEY?: string;

@@ -72,7 +72,18 @@ The production check blocks unsafe browser-exposed LLM keys such as `VITE_LLM_AP
 /api/projects
 /api/projects/[id]
 /api/llm/chat
+/api/images/generate
+/api/admin/credits
+/api/admin/usage
+/api/admin/users
 ```
+
+The Node/Docker deployment also provides `/api/video/contact-sheet` through FFmpeg. Vercel does not provide this
+large-file fallback; supported browser codecs are still processed locally in the browser.
+
+The image node can read connected storyboard tables or individual shot outputs and generate a 3×3 storyboard grid
+through `gpt-image-2`. The image route reuses server-side `LLM_BASE_URL` and `LLM_API_KEY` by default; optional
+`IMAGE_BASE_URL`, `IMAGE_API_KEY`, and `IMAGE_MODEL` values can override them without exposing credentials to the browser.
 
 ## Security Notes
 

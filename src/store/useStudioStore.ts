@@ -2531,6 +2531,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
     const feedingText = from.type === 'textNode' && hid === 'in' && ht === 'target';
 
+    const feedingImage = from.type === 'imageNode' && hid === 'in' && ht === 'target';
+
     const feedingAiFilm =
       (from.type === 'aiFilmCharacter' ||
         from.type === 'aiFilmStoryboard' ||
@@ -2541,6 +2543,44 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     const fromDownstreamOut =
       ht === 'source' &&
       (from.type === 'shotList' ? isShotListItemOutputHandleId(hid) : hid === 'out');
+
+    if (feedingImage) {
+      if (p.pick === 'storyboard_file_node') {
+        const id = get().addStoryboardFileNode(upstreamPos);
+        set((s) => ({
+          edges: addEdge(
+            {
+              source: id,
+              target: from.id,
+              sourceHandle: DEPT_OUTPUT_HANDLE_ID,
+              targetHandle: 'in',
+              animated: true,
+            },
+            s.edges,
+          ),
+        }));
+        get().pushMessage({ role: 'system', text: '已创建分镜表文件节点，并接入图片节点。', nodeId: id });
+        return id;
+      }
+      if (p.pick === 'storyboard') {
+        const id = get().addDepartmentNode('storyboard', upstreamPos);
+        set((s) => ({
+          edges: addEdge(
+            {
+              source: id,
+              target: from.id,
+              sourceHandle: DEPT_OUTPUT_HANDLE_ID,
+              targetHandle: 'in',
+              animated: true,
+            },
+            s.edges,
+          ),
+        }));
+        get().pushMessage({ role: 'system', text: '已创建分镜节点，并接入图片节点作为九宫格来源。', nodeId: id });
+        return id;
+      }
+      return pushErr('图片节点 Input 支持分镜表文件、分镜部门或镜头表的逐镜头 Output。');
+    }
 
     if (feedingAiFilm) {
       if (p.pick === 'text_node') {
@@ -2945,6 +2985,29 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
       if (from.type === 'shotList') {
         if (from.data.type !== 'shot_list_node') return pushErr('当前镜头表节点类型不支持该操作。');
+        if (p.pick === 'image_node') {
+          const id = get().addImageNode(downstreamPos);
+          const sourceHandles = resolveShotListSourceHandlesForConnect(
+            get().shotListSelectedWiresByNodeId,
+            from.id,
+            hid,
+          );
+          if (sourceHandles.length === 0) return pushErr('请从镜头表里的逐镜头 Output 端口拖出连接。');
+          set((s) => ({
+            edges: addUniqueAnimatedEdges(
+              s.edges,
+              sourceHandles.map((sourceHandle) => ({
+                source: from.id,
+                target: id,
+                sourceHandle,
+                targetHandle: 'in',
+                animated: true,
+              })),
+            ),
+          }));
+          get().pushMessage({ role: 'broadcast', text: '已创建图片节点，并接入选中镜头用于九宫格生成。', nodeId: id });
+          return id;
+        }
         if (isAiFilmPick(p.pick)) {
           if (p.pick !== 'film_storyboard_node') {
             return pushErr('镜头表 Output 目前只支持直接接入分镜宫格节点；视频提示词请先由分镜宫格节点生成后再连接。');
@@ -3006,6 +3069,23 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       }
 
       if (from.type === 'storyboardFile') {
+        if (p.pick === 'image_node') {
+          const id = get().addImageNode(downstreamPos);
+          set((s) => ({
+            edges: addEdge(
+              {
+                source: from.id,
+                target: id,
+                sourceHandle: DEPT_OUTPUT_HANDLE_ID,
+                targetHandle: 'in',
+                animated: true,
+              },
+              s.edges,
+            ),
+          }));
+          get().pushMessage({ role: 'broadcast', text: '已创建图片节点，并接入当前分镜表用于九宫格生成。', nodeId: id });
+          return id;
+        }
         if (isAiFilmPick(p.pick)) {
           if (p.pick !== 'film_storyboard_node') {
             return pushErr('分镜表文件 Output 目前只支持直接接入分镜宫格节点。');
@@ -3057,6 +3137,23 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
       if (from.type === 'department') {
         const fk = from.data.type as PipelineKind;
+        if (p.pick === 'image_node' && fk === 'storyboard') {
+          const id = get().addImageNode(downstreamPos);
+          set((s) => ({
+            edges: addEdge(
+              {
+                source: from.id,
+                target: id,
+                sourceHandle: DEPT_OUTPUT_HANDLE_ID,
+                targetHandle: 'in',
+                animated: true,
+              },
+              s.edges,
+            ),
+          }));
+          get().pushMessage({ role: 'broadcast', text: '已创建图片节点，并读取当前分镜输出生成九宫格。', nodeId: id });
+          return id;
+        }
         if (p.pick === 'image_node' || p.pick === 'video_node') {
           return pushErr('部门 Output 暂不连接到图片/视频节点；请把图片/视频节点 Output 接到文本卡片 Input。');
         }

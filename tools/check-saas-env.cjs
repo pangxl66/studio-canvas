@@ -77,7 +77,10 @@ if (!isMock && hasValue(config, 'VITE_LLM_BASE_URL')) {
 }
 
 for (const key of requiredPublic) {
-  if (isMock && (key === 'VITE_SUPABASE_URL' || key === 'VITE_SUPABASE_ANON_KEY')) {
+  if (
+    isMock &&
+    (key === 'VITE_SUPABASE_URL' || key === 'VITE_SUPABASE_ANON_KEY' || key === 'VITE_LLM_PROXY_URL')
+  ) {
     printCheck(key, true, 'skipped in mock mode');
     continue;
   }

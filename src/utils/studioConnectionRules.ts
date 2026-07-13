@@ -5,7 +5,7 @@ import {
   DEPT_INPUT_PULL_HANDLE_ID,
   DEPT_OUTPUT_HANDLE_ID,
 } from '@/components/DepartmentNode';
-import { IMAGE_NODE_OUTPUT_HANDLE_ID } from '@/components/ImageTableNode';
+import { IMAGE_NODE_INPUT_HANDLE_ID, IMAGE_NODE_OUTPUT_HANDLE_ID } from '@/components/ImageTableNode';
 import { TEXT_NODE_INPUT_HANDLE_ID, TEXT_NODE_OUTPUT_HANDLE_ID } from '@/components/TextNode';
 import { VIDEO_NODE_OUTPUT_HANDLE_ID } from '@/components/VideoNode';
 import { FILM_INPUT_HANDLE_ID, FILM_OUTPUT_HANDLE_ID } from '@/store/slices/aiFilmmakingStore';
@@ -66,6 +66,10 @@ function upstreamConnectionPicksForNode(node: StudioRFNode): ConnectionMenuPick[
     return ['image_node', 'video_node', 'text_node'];
   }
 
+  if (node.type === 'imageNode') {
+    return ['storyboard_file_node', 'storyboard'];
+  }
+
   if (node.type === 'department') {
     const kind = node.data.type;
     if (kind === 'writing') return ['text_node'];
@@ -102,17 +106,17 @@ function downstreamConnectionPicksForNode(node: StudioRFNode): ConnectionMenuPic
   }
 
   if (node.type === 'shotList') {
-    return ['prompt', 'film_storyboard_node'];
+    return ['image_node', 'prompt', 'film_storyboard_node'];
   }
 
   if (node.type === 'storyboardFile') {
-    return ['prompt', 'film_storyboard_node'];
+    return ['image_node', 'prompt', 'film_storyboard_node'];
   }
 
   if (node.type === 'department') {
     const kind = node.data.type;
     if (kind === 'writing') return ['storyboard', 'prompt'];
-    if (kind === 'storyboard') return ['film_storyboard_node'];
+    if (kind === 'storyboard') return ['image_node', 'film_storyboard_node'];
     if (kind === 'prompt') return ['prompt_review_node'];
   }
 
@@ -225,6 +229,18 @@ export function isStudioConnectionAllowed(edge: ConnectionCandidate, nodes: Stud
     return true;
   }
 
+  if (a.type === 'storyboardFile' && b.type === 'imageNode') {
+    if (edge.sourceHandle != null && edge.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) return false;
+    if (edge.targetHandle != null && edge.targetHandle !== IMAGE_NODE_INPUT_HANDLE_ID) return false;
+    return true;
+  }
+
+  if (a.type === 'department' && a.data.type === 'storyboard' && b.type === 'imageNode') {
+    if (edge.sourceHandle != null && edge.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) return false;
+    if (edge.targetHandle != null && edge.targetHandle !== IMAGE_NODE_INPUT_HANDLE_ID) return false;
+    return true;
+  }
+
   if (a.type === 'videoNode' && b.type === 'textNode') {
     if (edge.sourceHandle != null && edge.sourceHandle !== VIDEO_NODE_OUTPUT_HANDLE_ID) return false;
     if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
@@ -283,6 +299,13 @@ export function isStudioConnectionAllowed(edge: ConnectionCandidate, nodes: Stud
     return true;
   }
 
+  if (a.type === 'shotList' && b.type === 'imageNode') {
+    if (!isShotListItemOutputHandleId(edge.sourceHandle)) return false;
+    if (edge.targetHandle != null && edge.targetHandle !== IMAGE_NODE_INPUT_HANDLE_ID) return false;
+    if (a.data.type !== 'shot_list_node') return false;
+    return true;
+  }
+
   if (a.type === 'department' && b.type === 'shotList') {
     if (a.data.type !== 'storyboard') return false;
     if (edge.sourceHandle !== SHOT_LIST_LINK_HANDLE_ID) return false;
@@ -308,6 +331,7 @@ function preferredSourceHandleForNode(node: StudioRFNode): string | null {
 
 function preferredTargetHandleForNode(node: StudioRFNode): string | null {
   if (node.type === 'textNode') return TEXT_NODE_INPUT_HANDLE_ID;
+  if (node.type === 'imageNode') return IMAGE_NODE_INPUT_HANDLE_ID;
   if (node.type === 'department') return DEPT_INPUT_HANDLE_ID;
   if (node.type === 'promptReview') return DEPT_INPUT_HANDLE_ID;
   if (node.type === 'shotList') return SHOT_LIST_PARENT_HANDLE_ID;

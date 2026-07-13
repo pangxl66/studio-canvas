@@ -1,7 +1,21 @@
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
+const licenseConfig = require('../electron/license-config.cjs');
 
 const mode = process.argv.includes('--pack') ? 'pack' : 'dir';
+const licenseEndpoint = String(
+  process.env.STUDIO_LICENSE_ENDPOINT || licenseConfig.licenseEndpoint || '',
+).trim();
+const allowUnconfiguredLicense = process.argv.includes('--allow-unconfigured-license');
+
+if (!licenseEndpoint && !allowUnconfiguredLicense) {
+  console.error(
+    'Desktop build blocked: configure STUDIO_LICENSE_ENDPOINT or electron/license-config.cjs first. ' +
+      'For an intentionally non-activatable test build, pass --allow-unconfigured-license.',
+  );
+  process.exit(1);
+}
+
 const now = new Date();
 const stamp = [
   now.getFullYear(),

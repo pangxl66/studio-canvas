@@ -8,6 +8,7 @@ const zlib = require('node:zlib');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { createClient } = require('@supabase/supabase-js');
+const runtimeDefaults = require('../shared/runtime-defaults.json');
 
 const rootDir = path.resolve(__dirname, '..');
 const distDir = path.join(rootDir, 'dist');
@@ -24,13 +25,15 @@ const MAX_INPUT_CHARS = 80_000;
 const MAX_PROJECT_SNAPSHOT_CHARS = 5_000_000;
 const PROJECT_LIST_LIMIT = 40;
 const MAX_VIDEO_UPLOAD_BYTES = Number.parseInt(process.env.VIDEO_FRAME_MAX_UPLOAD_BYTES || '', 10) || 300 * 1024 * 1024;
-const DEFAULT_MONTHLY_QUOTA = 10;
-const LEGACY_DEFAULT_MONTHLY_QUOTA = 20;
+const DEFAULT_MONTHLY_QUOTA = runtimeDefaults.defaultMonthlyQuota;
+const LEGACY_DEFAULT_MONTHLY_QUOTA = runtimeDefaults.legacyDefaultMonthlyQuota;
 const DEFAULT_TIMEOUT_MS = parseEnvMs(process.env.LLM_TIMEOUT_MS || process.env.VITE_LLM_TIMEOUT_MS, 420_000, 420_000, 900_000);
-const DEFAULT_MODEL = 'gpt-5.6-terra';
+const DEFAULT_MODEL = runtimeDefaults.defaultModel;
 const PRIMARY_MODEL_FAILURE_WINDOW_MS = 5 * 60 * 1000;
 const PRIMARY_MODEL_COOLDOWN_MS = 10 * 60 * 1000;
 const PRIMARY_MODEL_FAILURE_THRESHOLD = 2;
+const DEFAULT_IMAGE_MODEL = 'gpt-image-2';
+const IMAGE_GENERATION_QUOTA_COST = 3;
 const TEST_INVITE_TOKEN_PREFIX = 'test-invite';
 const testInviteActivationPath = path.join(rootDir, '.data', 'test-invite-activations.json');
 const testInviteUsagePath = path.join(rootDir, '.data', 'test-invite-usage-events.json');
@@ -2838,6 +2841,189 @@ async function handleLlmChat(req, res) {
   }
 }
 
+function getImageUpstreamUrl() {
+  const raw = env('IMAGE_BASE_URL') || env('GPT_LLM_BASE_URL') || env('LLM_BASE_URL') || env('LLM_PROXY_URL');
+  if (!raw) return '';
+  const base = raw.replace(/\/+$/u, '');
+  if (/\/images\/generations$/u.test(base)) return base;
+  if (/\/chat\/completions$/u.test(base)) return base.replace(/\/chat\/completions$/u, '/images/generations');
+  if (/\/v1$/u.test(base)) return `${base}/images/generations`;
+  return `${base}/v1/images/generations`;
+}
+
+function getImageApiKey() {
+  return env('IMAGE_API_KEY') || env('GPT_LLM_API_KEY') || env('LLM_API_KEY');
+}
+
+async function handleImageGenerate(req, res) {
+  if (req.method !== 'POST') {
+    sendJson(res, 405, { error: { message: 'Method not allowed.' } });
+    return;
+  }
+
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: { message: '请求体不是合法 JSON。' } });
+    return;
+  }
+  const prompt = String(body.prompt || '').trim();
+  if (!prompt || prompt.length > 32_000) {
+    sendJson(res, 400, { error: { message: '图片提示词不能为空，且不能超过 32000 字符。' } });
+    return;
+  }
+
+  const auth = await getAuthedContext(req);
+  if (auth.error) {
+    sendJson(res, auth.error.status, { error: { message: auth.error.message } });
+    return;
+  }
+
+  const model = env('IMAGE_MODEL') || DEFAULT_IMAGE_MODEL;
+  const cost = IMAGE_GENERATION_QUOTA_COST;
+  const inChars = prompt.length;
+  const isTestInvite = Boolean(auth.isTestInvite);
+  const testInviteEmail = normalizeEmail(auth.user?.email) || 'tester@studio-canvas.local';
+  const recordUsage = async (event) => {
+    if (isTestInvite) {
+      writeTestInviteUsage(testInviteEmail, event);
+      return;
+    }
+    await writeUsage(auth.serviceClient, event);
+  };
+  const refundReservedQuota = async () => {
+    if (isTestInvite) {
+      refundTestInviteQuota(testInviteEmail, cost);
+      return;
+    }
+    await refundQuota(auth.serviceClient, auth.userId, cost);
+  };
+
+  if (!isTestInvite) {
+    try {
+      await ensureUserRows(auth.serviceClient, auth.user);
+    } catch (error) {
+      sendJson(res, 500, { error: { message: sanitizeError(error) || '用户额度初始化失败。' } });
+      return;
+    }
+  }
+
+  const reservation = isTestInvite
+    ? reserveTestInviteQuota(testInviteEmail, cost)
+    : await reserveQuota(auth.serviceClient, auth.userId, cost);
+  if (!reservation.ok) {
+    await recordUsage({
+      user_id: auth.userId,
+      project_id: body.projectId || null,
+      feature: 'storyboard-grid-image',
+      model,
+      input_chars: inChars,
+      output_chars: 0,
+      estimated_tokens: estimateTokens(inChars, 0),
+      quota_cost: 0,
+      status: 'failed',
+      error_message: reservation.message,
+    });
+    sendJson(res, 402, { error: { message: reservation.message } });
+    return;
+  }
+
+  try {
+    const upstreamUrl = getImageUpstreamUrl();
+    const apiKey = getImageApiKey();
+    if (!upstreamUrl || !apiKey) throw new Error('Image upstream env is missing.');
+    const allowedSizes = new Set(['1024x1024', '1536x1536', '1536x1024', '1024x1536']);
+    const size = allowedSizes.has(String(body.size || '')) ? String(body.size) : '1536x1536';
+    const quality = body.quality === 'low' || body.quality === 'high' ? body.quality : 'medium';
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+    let upstreamResponse;
+    try {
+      upstreamResponse = await fetch(upstreamUrl, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          prompt,
+          n: 1,
+          size,
+          quality,
+          output_format: 'jpeg',
+          output_compression: 88,
+        }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const raw = await upstreamResponse.text();
+    if (!upstreamResponse.ok) {
+      const message = classifyUpstreamError(upstreamResponse.status, raw);
+      await refundReservedQuota();
+      await recordUsage({
+        user_id: auth.userId,
+        project_id: body.projectId || null,
+        feature: 'storyboard-grid-image',
+        model,
+        input_chars: inChars,
+        output_chars: 0,
+        estimated_tokens: estimateTokens(inChars, 0),
+        quota_cost: 0,
+        status: 'failed',
+        error_message: message,
+      });
+      sendJson(res, upstreamResponse.status, {
+        error: { message, upstreamStatus: upstreamResponse.status },
+      });
+      return;
+    }
+
+    const payload = JSON.parse(raw);
+    const b64 = String(payload?.data?.[0]?.b64_json || '').trim();
+    if (!b64) throw new Error('图片模型未返回 b64_json。');
+    await recordUsage({
+      user_id: auth.userId,
+      project_id: body.projectId || null,
+      feature: 'storyboard-grid-image',
+      model,
+      input_chars: inChars,
+      output_chars: 0,
+      estimated_tokens: estimateTokens(inChars, 0),
+      quota_cost: cost,
+      status: 'success',
+      error_message: null,
+    });
+    sendJson(res, 200, {
+      imageDataUrl: `data:image/jpeg;base64,${b64}`,
+      model,
+      size,
+    });
+  } catch (error) {
+    await refundReservedQuota();
+    const sanitized = sanitizeError(error);
+    const message = error instanceof Error && error.name === 'AbortError'
+      ? '图片生成超时，请稍后重试。'
+      : /Image upstream env is missing/i.test(sanitized)
+        ? '图片模型未配置：将使用现有 LLM_API_KEY，但还需要可用的 LLM_BASE_URL。'
+        : sanitized || '图片生成失败。';
+    await recordUsage({
+      user_id: auth.userId,
+      project_id: body.projectId || null,
+      feature: 'storyboard-grid-image',
+      model,
+      input_chars: inChars,
+      output_chars: 0,
+      estimated_tokens: estimateTokens(inChars, 0),
+      quota_cost: 0,
+      status: 'failed',
+      error_message: message,
+    });
+    sendJson(res, 502, { error: { message } });
+  }
+}
+
 function contentTypeFor(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   if (ext === '.html') return 'text/html; charset=utf-8';
@@ -3002,6 +3188,10 @@ async function route(req, res) {
     }
     if (url.pathname === '/api/llm/chat') {
       await handleLlmChat(req, res);
+      return;
+    }
+    if (url.pathname === '/api/images/generate') {
+      await handleImageGenerate(req, res);
       return;
     }
     if (url.pathname === '/api/video/contact-sheet') {

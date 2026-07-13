@@ -25,6 +25,12 @@ SC-DEV-LOCAL
 npm.cmd run desktop:pack
 ```
 
+打包脚本会在授权服务地址为空时直接终止，避免生成用户无法激活的正式安装包。仅在明确需要验证未配置状态时，才可手动执行：
+
+```powershell
+node tools/build-desktop.cjs --dir --allow-unconfigured-license
+```
+
 打包产物会输出到 `desktop-release/` 下的时间戳目录，避免 Windows 短时间占用旧产物导致重复打包失败。
 
 ## 授权接口协议

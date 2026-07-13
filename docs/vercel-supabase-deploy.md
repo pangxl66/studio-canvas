@@ -34,15 +34,17 @@ VITE_SAAS_MOCK=false
 SUPABASE_URL=
 SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
+ADMIN_EMAILS=
 LLM_BASE_URL=
 LLM_API_KEY=
-LLM_MODEL=gpt-5.5
+LLM_MODEL=gpt-5.6-terra
 ```
 
 注意：
 
 - `VITE_SUPABASE_ANON_KEY` 可以在浏览器公开。
 - `SUPABASE_SERVICE_ROLE_KEY` 绝对不能公开，只能放在后端环境变量。
+- `ADMIN_EMAILS` 用英文逗号分隔管理员邮箱，未配置时管理接口会拒绝访问。
 - `LLM_API_KEY` 绝对不能以 `VITE_` 开头。
 
 ## 3. 环境自检
@@ -116,11 +118,12 @@ VITE_LLM_PROXY_URL=/api/llm/chat
 SUPABASE_URL
 SUPABASE_ANON_KEY
 SUPABASE_SERVICE_ROLE_KEY
+ADMIN_EMAILS
 LLM_BASE_URL
 LLM_API_KEY
-LLM_MODEL=gpt-5.5
-LLM_FAST_MODEL=gpt-5.5
-LLM_DEEP_MODEL=gpt-5.5
+LLM_MODEL=gpt-5.6-terra
+LLM_FAST_MODEL=gpt-5.6-terra
+LLM_DEEP_MODEL=gpt-5.6-terra
 ```
 
 如果你的上游已经是完整代理地址，可以填：

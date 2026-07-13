@@ -13,6 +13,8 @@ services:
         value: false
       - key: VITE_LLM_PROXY_URL
         value: /api/llm/chat
+      - key: VITE_IMAGE_PROXY_URL
+        value: /api/images/generate
       - key: VITE_SUPABASE_URL
         sync: false
       - key: VITE_SUPABASE_ANON_KEY
@@ -23,13 +25,17 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
+      - key: ADMIN_EMAILS
+        sync: false
       - key: LLM_BASE_URL
         value: https://api.openai.com/v1
       - key: LLM_API_KEY
         sync: false
       - key: LLM_MODEL
-        value: gpt-5.5
+        value: gpt-5.6-terra
       - key: LLM_FAST_MODEL
-        value: gpt-5.5
+        value: gpt-5.6-terra
       - key: LLM_DEEP_MODEL
-        value: gpt-5.5
+        value: gpt-5.6-terra
+      - key: IMAGE_MODEL
+        value: gpt-image-2

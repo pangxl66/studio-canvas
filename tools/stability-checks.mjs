@@ -359,7 +359,21 @@ function checkHeavyDependencyLoadingGuards() {
   );
   assertIncludes(storyboardExport, "await import('html2pdf.js')", 'storyboard PDF export should lazy-load html2pdf');
   assertIncludes(writingExport, "await import('html2pdf.js')", 'writing PDF export should lazy-load html2pdf');
-  assertIncludes(storyboardWorkbook, "await import('xlsx')", 'storyboard workbook import should lazy-load xlsx');
+  assertIncludes(
+    storyboardWorkbook,
+    "await import('read-excel-file/browser')",
+    'storyboard workbook import should lazy-load the isolated workbook reader',
+  );
+  assertIncludesAll(
+    storyboardWorkbook,
+    [
+      'const MAX_WORKBOOK_BYTES',
+      'const MAX_WORKBOOK_ROWS_PER_SHEET',
+      'const MAX_WORKBOOK_CELLS',
+      "目前只支持 .xlsx 文件",
+    ],
+    'storyboard workbook import safety limits',
+  );
   assertIncludes(
     writingExportRunner,
     "await import('@/components/writing/writingScriptExport')",
@@ -377,7 +391,7 @@ function checkHeavyDependencyLoadingGuards() {
   );
   assertNotIncludes(storyboardExport, "import html2pdf from 'html2pdf.js'", 'storyboard PDF export');
   assertNotIncludes(writingExport, "import html2pdf from 'html2pdf.js'", 'writing PDF export');
-  assertNotIncludes(storyboardWorkbook, "import XLSX from 'xlsx'", 'storyboard workbook parser');
+  assertNotIncludes(storyboardWorkbook, "import('xlsx')", 'storyboard workbook parser');
 }
 
 function checkOperationalHealthGuards() {

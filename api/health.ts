@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import runtimeDefaults from '../shared/runtime-defaults.json';
 
 function env(name: string): string {
   return process.env[name]?.trim() ?? '';
@@ -18,12 +19,12 @@ function json(res: ServerResponse, status: number, payload: unknown): void {
 }
 
 const DEFAULT_TIMEOUT_MS = parseEnvMs(env('LLM_TIMEOUT_MS') || env('VITE_LLM_TIMEOUT_MS'), 420_000, 420_000, 900_000);
-const DEFAULT_MODEL = 'gpt-5.6-terra';
+const DEFAULT_MODEL = runtimeDefaults.defaultModel;
 const PRIMARY_MODEL_FAILURE_WINDOW_MS = 5 * 60 * 1000;
 const PRIMARY_MODEL_COOLDOWN_MS = 10 * 60 * 1000;
 const PRIMARY_MODEL_FAILURE_THRESHOLD = 2;
-const DEFAULT_MONTHLY_QUOTA = 10;
-const LEGACY_DEFAULT_MONTHLY_QUOTA = 20;
+const DEFAULT_MONTHLY_QUOTA = runtimeDefaults.defaultMonthlyQuota;
+const LEGACY_DEFAULT_MONTHLY_QUOTA = runtimeDefaults.legacyDefaultMonthlyQuota;
 
 function normalizeProvider(value: string): string {
   const raw = String(value || '').trim().toLowerCase();

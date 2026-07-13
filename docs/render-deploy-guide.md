@@ -61,12 +61,13 @@ VITE_LLM_PROXY_URL=/api/llm/chat
 SUPABASE_URL=你的 Supabase Project URL
 SUPABASE_ANON_KEY=你的 Supabase anon public key
 SUPABASE_SERVICE_ROLE_KEY=你的 Supabase service_role key
+ADMIN_EMAILS=你的管理员邮箱
 
 LLM_BASE_URL=https://api.openai.com/v1
 LLM_API_KEY=你的模型 API Key
-LLM_MODEL=gpt-5.5
-LLM_FAST_MODEL=gpt-5.5
-LLM_DEEP_MODEL=gpt-5.5
+LLM_MODEL=gpt-5.6-terra
+LLM_FAST_MODEL=gpt-5.6-terra
+LLM_DEEP_MODEL=gpt-5.6-terra
 ```
 
 不要添加：
@@ -112,7 +113,7 @@ https://你的-render网址.onrender.com/api/health
 
 ### 构建失败，提示缺少 Supabase 变量
 
-说明 Render 的 Environment 没填完整。补齐 `VITE_SUPABASE_URL`、`VITE_SUPABASE_ANON_KEY`、`SUPABASE_URL`、`SUPABASE_ANON_KEY`、`SUPABASE_SERVICE_ROLE_KEY`。
+说明 Render 的 Environment 没填完整。补齐 `VITE_SUPABASE_URL`、`VITE_SUPABASE_ANON_KEY`、`SUPABASE_URL`、`SUPABASE_ANON_KEY`、`SUPABASE_SERVICE_ROLE_KEY`；需要管理后台时再配置 `ADMIN_EMAILS`。
 
 ### 构建失败，提示不能使用 `VITE_LLM_API_KEY`
 

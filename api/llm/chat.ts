@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import runtimeDefaults from '../../shared/runtime-defaults.json';
 
 type AuthedUser = {
   id: string;
@@ -55,8 +56,8 @@ type QuotaReservation =
 
 const MAX_INPUT_CHARS = 80_000;
 const DEFAULT_TIMEOUT_MS = 180_000;
-const DEFAULT_MODEL = 'gpt-5.6-terra';
-const DEFAULT_MONTHLY_QUOTA = 20;
+const DEFAULT_MODEL = runtimeDefaults.defaultModel;
+const DEFAULT_MONTHLY_QUOTA = runtimeDefaults.defaultMonthlyQuota;
 const CHAT_COMPLETIONS_PATH = '/chat/completions';
 const PRIMARY_MODEL_FAILURE_WINDOW_MS = 5 * 60 * 1000;
 const PRIMARY_MODEL_COOLDOWN_MS = 10 * 60 * 1000;

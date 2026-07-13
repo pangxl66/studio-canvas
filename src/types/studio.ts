@@ -281,6 +281,14 @@ export type StudioNodeData = {
   imageMimeType?: string;
   imageFileName?: string;
   imageAnalysisSummary?: string;
+  /** 图片节点：由上游分镜信息生成九宫格时附加的用户风格要求。 */
+  imageGenerationPrompt?: string;
+  /** 图片节点：最近一次九宫格生成所用模型与来源信息。 */
+  imageGenerationModel?: string;
+  imageGenerationSourceShotIds?: number[];
+  imageGenerationSourceNodeIds?: string[];
+  imageGenerationCompletedAt?: number;
+  imageGenerationStatus?: 'idle' | 'generating';
   videoDataUrl?: string;
   videoMimeType?: string;
   videoFileName?: string;

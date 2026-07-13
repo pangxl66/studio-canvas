@@ -81,9 +81,9 @@ ADMIN_EMAILS=你的管理员邮箱
 
 LLM_BASE_URL=https://api.openai.com/v1
 LLM_API_KEY=你的模型 API Key
-LLM_MODEL=gpt-5.5
-LLM_FAST_MODEL=gpt-5.5
-LLM_DEEP_MODEL=gpt-5.5
+LLM_MODEL=gpt-5.6-terra
+LLM_FAST_MODEL=gpt-5.6-terra
+LLM_DEEP_MODEL=gpt-5.6-terra
 ```
 
 不要在 Vercel 填：

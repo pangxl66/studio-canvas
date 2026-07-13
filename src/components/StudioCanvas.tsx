@@ -902,7 +902,7 @@ export function StudioCanvas() {
         return;
       }
 
-      if (!/\.(xlsx|xls)$/i.test(file.name)) return;
+      if (!/\.xlsx$/i.test(file.name)) return;
 
       try {
         const parsed = await parseStoryboardWorkbookFile(file);
@@ -910,7 +910,7 @@ export function StudioCanvas() {
           importedFileName: file.name,
           importedSheetName: parsed.sheetName,
           importedRowCount: parsed.rowCount,
-          label: `${parsed.sheetName || '镜头表'} · ${file.name.replace(/\.(xlsx|xls)$/i, '')}`,
+          label: `${parsed.sheetName || '镜头表'} · ${file.name.replace(/\.xlsx$/i, '')}`,
         });
         focusNode(nodeId, { openDetail: true });
       } catch (error) {

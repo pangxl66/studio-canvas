@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import runtimeDefaults from '../../shared/runtime-defaults.json';
 
 type AuthedUser = {
   id: string;
@@ -13,7 +14,7 @@ type AnySupabaseClient = {
   from: (table: string) => any;
 };
 
-const DEFAULT_MONTHLY_QUOTA = 20;
+const DEFAULT_MONTHLY_QUOTA = runtimeDefaults.defaultMonthlyQuota;
 
 function env(name: string): string {
   return process.env[name]?.trim() ?? '';

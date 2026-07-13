@@ -260,7 +260,7 @@ create table subscriptions (
 {
   "feature": "prompt-generate",
   "projectId": "uuid",
-  "model": "gpt-5.5",
+  "model": "gpt-5.6-terra",
   "messages": [
     { "role": "system", "content": "..." },
     { "role": "user", "content": "..." }
@@ -375,9 +375,9 @@ SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
 LLM_BASE_URL=
 LLM_API_KEY=
-LLM_MODEL=gpt-5.5
-LLM_FAST_MODEL=gpt-5.5
-LLM_DEEP_MODEL=gpt-5.5
+LLM_MODEL=gpt-5.6-terra
+LLM_FAST_MODEL=gpt-5.6-terra
+LLM_DEEP_MODEL=gpt-5.6-terra
 ```
 
 注意：`LLM_API_KEY` 和 `SUPABASE_SERVICE_ROLE_KEY` 只能放在 Vercel 后端环境变量里，不能以 `VITE_` 开头。

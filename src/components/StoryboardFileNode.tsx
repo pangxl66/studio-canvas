@@ -92,7 +92,7 @@ function StoryboardFileNodeInner({ id, data, selected }: NodeProps<StoryboardFil
         </div>
         <div className="storyboard-file-node__submeta">
           {data.importedSheetName ? `${data.importedSheetName} · ` : ''}
-          {shotCount > 0 ? `${shotCount} 条镜头` : '支持 .xlsx / .xls'}
+          {shotCount > 0 ? `${shotCount} 条镜头` : '支持安全导入 .xlsx'}
         </div>
         <p className="storyboard-file-node__preview">
           {previewText || '读取现有分镜表文件，解析后自动生成分镜表节点，也可直接连接 Prompt 节点。'}
@@ -104,7 +104,7 @@ function StoryboardFileNodeInner({ id, data, selected }: NodeProps<StoryboardFil
           ref={inputRef}
           className="storyboard-file-node__input"
           type="file"
-          accept=".xlsx,.xls"
+          accept=".xlsx"
           onChange={onFilePicked}
         />
         {data.generation_error?.trim() ? (

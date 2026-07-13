@@ -8,9 +8,12 @@
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
+    "typecheck": "tsc --noEmit --pretty false",
     "build": "tsc -b && vite build",
-    "api:check": "tsc --noEmit --skipLibCheck --moduleResolution bundler --module ESNext --target ES2022 --types node api/health.ts api/llm/chat.ts api/credits/status.ts api/admin/credits.ts api/projects/index.ts api/projects/[id].ts",
+    "api:check": "tsc -p tsconfig.api.json --pretty false",
+    "test": "node --experimental-strip-types --test",
     "stability:check": "node --experimental-strip-types tools/stability-checks.mjs",
+    "check": "npm run typecheck && npm run api:check && npm test && npm run stability:check",
     "saas:check": "node tools/check-saas-env.cjs",
     "saas:check:prod": "node tools/check-saas-env.cjs --prod",
     "saas:dev": "npx vercel dev --listen 127.0.0.1:3000",
@@ -32,7 +35,7 @@
     "jspdf": "^4.2.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "xlsx": "^0.18.5",
+    "read-excel-file": "^9.3.1",
     "zustand": "^5.0.3"
   },
   "devDependencies": {
