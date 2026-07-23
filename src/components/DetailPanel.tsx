@@ -28,9 +28,15 @@ import type {
   StudioNodeData,
   WritingOutput,
 } from '@/types/studio';
-import { SHOT_LIST_LINK_HANDLE_ID } from '@/utils/shotListWire';
+import {
+  parseShotListItemOutputHandleId,
+  SHOT_LIST_LINK_HANDLE_ID,
+} from '@/utils/shotListWire';
 import { collectMountedSkillExportExtensions } from '@/services/skillExportExtensions';
-import { departmentNodeHasInputWire } from '@/utils/departmentInputWire';
+import {
+  DEPT_OUTPUT_HANDLE_ID,
+  departmentNodeHasInputWire,
+} from '@/utils/departmentInputWire';
 import { formatPrompt, formatSeedanceCards } from '@/utils/promptFormat';
 
 function isWritingOutput(o: unknown): o is WritingOutput {
@@ -145,6 +151,43 @@ export function DetailPanel() {
   const pushMessage = useStudioStore((s) => s.pushMessage);
   const focusNode = useStudioStore((s) => s.focusNode);
   const patchShotListNodeOutput = useStudioStore((s) => s.patchShotListNodeOutput);
+  const completeConnectionMenuPick = useStudioStore((s) => s.completeConnectionMenuPick);
+
+  const promptInputSummary = useMemo(() => {
+    if (!node || node.type !== 'prompt' || !selectedId) return null;
+    const incoming = edges.filter(
+      (edge) => edge.target === selectedId && (edge.targetHandle == null || edge.targetHandle === 'in'),
+    );
+    const sourceNodes = incoming
+      .map((edge) => rfNodes.find((candidate) => candidate.id === edge.source))
+      .filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate));
+    const selectedShotCount = incoming.filter((edge) =>
+      Boolean(parseShotListItemOutputHandleId(edge.sourceHandle)),
+    ).length;
+    const parsedStoryboard = parseStoryboardInputText(node.input ?? '');
+    const shotCount = selectedShotCount || parsedStoryboard?.shots.length || 0;
+    const colorTableCount = sourceNodes.filter(
+      (source) => source.type === 'imageNode' && source.data.type === 'image_node',
+    ).length;
+    const textCount = sourceNodes.filter(
+      (source) => source.type === 'textNode' || source.data.type === 'text_node',
+    ).length;
+    const storyboardSourceCount = sourceNodes.filter(
+      (source) =>
+        source.type === 'shotList' ||
+        source.type === 'storyboardFile' ||
+        source.data.type === 'storyboard' ||
+        source.data.type === 'shot_list_node' ||
+        source.data.type === 'storyboard_file_node',
+    ).length;
+    return {
+      sourceCount: new Set(incoming.map((edge) => edge.source)).size,
+      shotCount,
+      colorTableCount,
+      textCount,
+      storyboardSourceCount,
+    };
+  }, [edges, node, rfNodes, selectedId]);
 
   const patchDepartmentOrShotList = useCallback(
     (nid: string, patch: Partial<StudioNodeData>, bump?: boolean) => {
@@ -257,7 +300,25 @@ export function DetailPanel() {
         ? '执行任务'
         : '按当前输入重新生成并覆盖当前结果';
     const items: DetailPanelHeaderActionItem[] = [];
-    if (isPipe && node.type !== 'storyboard') {
+    if (isPipe && node.type !== 'storyboard' && node.status === 'IN_PROGRESS') {
+      items.push({
+        id: 'stop',
+        label: '停止生成',
+        node: (
+          <button
+            type="button"
+            className="node-detail-layout__btn-stop node-detail-action-btn"
+            title="停止当前生成任务"
+            onClick={() => stopNodeTask(node.id)}
+          >
+            <span className="node-detail-layout__btn-stop-icon" aria-hidden>
+              ■
+            </span>
+            停止
+          </button>
+        ),
+      });
+    } else if (isPipe && node.type !== 'storyboard') {
       items.push({
         id: 'execute',
         label: executeLabel,
@@ -311,6 +372,43 @@ export function DetailPanel() {
       const canPromptAct = Boolean(node.output && isPromptOutput(node.output));
       const promptSourceStoryboard = parseStoryboardInputText(node.input ?? '');
       items.push(
+        {
+          id: 'prompt-send-storyboard-grid',
+          label: '发送到分镜宫格',
+          node: (
+            <button
+              type="button"
+              className="writing-header-actions__download node-detail-action-btn node-detail-action-btn--primary"
+              disabled={!canPromptAct || node.status === 'IN_PROGRESS'}
+              title={
+                canPromptAct
+                  ? '创建影视分镜宫格节点，并把当前 Prompt 输出自动连入'
+                  : '请先生成 Prompt 输出'
+              }
+              onClick={() => {
+                const promptRfNode = useStudioStore
+                  .getState()
+                  .nodes.find((candidate) => candidate.id === node.id);
+                if (!promptRfNode) return;
+                const createdId = completeConnectionMenuPick({
+                  fromNodeId: node.id,
+                  fromHandleId: DEPT_OUTPUT_HANDLE_ID,
+                  fromHandleType: 'source',
+                  pick: 'film_storyboard_node',
+                  flowPosition: {
+                    x: promptRfNode.position.x + 440,
+                    y: promptRfNode.position.y + 80,
+                  },
+                });
+                if (createdId) {
+                  focusNode(createdId, { openDetail: false });
+                }
+              }}
+            >
+              发送到分镜宫格
+            </button>
+          ),
+        },
         {
           id: 'prompt-copy-all',
           label: '拷贝全部提示词',
@@ -415,7 +513,7 @@ export function DetailPanel() {
         },
       );
     }
-    if (node.type === 'writing' || node.type === 'storyboard' || node.type === 'prompt') {
+    if (node.type === 'writing' || node.type === 'storyboard') {
       const skillExports = collectMountedSkillExportExtensions(node.mounted_skills ?? [], node.type);
       if (skillExports.length) {
         items.push({
@@ -542,7 +640,9 @@ export function DetailPanel() {
     return items;
   }, [
     edges,
+    completeConnectionMenuPick,
     executeNodeTask,
+    focusNode,
     regenerateNode,
     node,
     onTextFilePicked,
@@ -561,12 +661,13 @@ export function DetailPanel() {
       <DetailPanelHeaderActionsBar
         items={headerActionItems}
         pinnedCount={
-          node.type === 'writing' ||
-          node.type === 'storyboard' ||
-          node.type === 'prompt' ||
-          node.type === 'shot_list_node'
-            ? 1
-            : 0
+          node.type === 'prompt'
+            ? 2
+            : node.type === 'writing' ||
+                node.type === 'storyboard' ||
+                node.type === 'shot_list_node'
+              ? 1
+              : 0
         }
       />
     );
@@ -616,10 +717,7 @@ export function DetailPanel() {
   const canRetry =
     (node.type === 'writing' || node.type === 'storyboard' || node.type === 'prompt') &&
     node.status === 'REJECTED';
-  const displayStatus =
-    node.type === 'prompt' && (node.status === 'WAITING_REVIEW' || node.status === 'REVIEWED')
-      ? 'APPROVED'
-      : node.status;
+  const displayStatus = node.status;
 
   const pipelineKind =
     node.type === 'writing' || node.type === 'storyboard' || node.type === 'prompt';
@@ -630,18 +728,55 @@ export function DetailPanel() {
     (Boolean(node.streaming_preview?.trim()) || node.generation_phase != null);
 
   const streamingSection = showStreamingBlock ? (
-    <div className="detail-panel__section">
-      <div className="detail-panel__hint">
-        {node.generation_phase === 'leader' ? '总监大脑 · 审核/流式' : '员工大脑 · 流式预览'}
+    node.type === 'prompt' ? (
+      <div className="detail-panel__section prompt-run-progress">
+        <div className="detail-panel__hint">Prompt 生成进度</div>
+        <div className="prompt-run-progress__steps" aria-label="生成阶段">
+          <span className="prompt-run-progress__step prompt-run-progress__step--done">1 读取输入</span>
+          <span
+            className={`prompt-run-progress__step${
+              node.generation_phase === 'leader'
+                ? ' prompt-run-progress__step--done'
+                : ' prompt-run-progress__step--active'
+            }`}
+          >
+            2 生成逐镜提示词
+          </span>
+          <span
+            className={`prompt-run-progress__step${
+              node.generation_phase === 'leader' ? ' prompt-run-progress__step--active' : ''
+            }`}
+          >
+            3 校验整理
+          </span>
+        </div>
+        <p className="prompt-run-progress__note">
+          {node.generation_phase === 'leader'
+            ? '正在校验镜头覆盖、结构字段与下游可用性。'
+            : '正在根据镜头表与参考信息生成逐镜提示词。'}
+          每次执行按 1 次任务额度计费。
+        </p>
+        <details className="prompt-run-progress__raw">
+          <summary>查看模型流式数据</summary>
+          <pre className="detail-panel__script detail-panel__script--streaming">
+            {node.streaming_preview?.trim() || '…'}
+          </pre>
+        </details>
       </div>
-      <pre className="detail-panel__script detail-panel__script--streaming">
-        {node.streaming_preview?.trim()
-          ? node.streaming_preview
-          : node.generation_phase === 'leader'
-            ? '（正在连接总监审核 API…）'
-            : '…'}
-      </pre>
-    </div>
+    ) : (
+      <div className="detail-panel__section">
+        <div className="detail-panel__hint">
+          {node.generation_phase === 'leader' ? '总监大脑 · 审核/流式' : '员工大脑 · 流式预览'}
+        </div>
+        <pre className="detail-panel__script detail-panel__script--streaming">
+          {node.streaming_preview?.trim()
+            ? node.streaming_preview
+            : node.generation_phase === 'leader'
+              ? '（正在连接总监审核 API…）'
+              : '…'}
+        </pre>
+      </div>
+    )
   ) : null;
 
   const generationErrorSection =
@@ -967,12 +1102,37 @@ export function DetailPanel() {
       ) : node.type === 'prompt' ? (
         <>
           <div className="detail-panel__section">
-            <div className="detail-panel__hint">Input 原文（镜头表 / 任务描述）</div>
-            <pre className="detail-panel__script detail-panel__script--source">
-              {node.input?.trim()
-                ? node.input
-                : '（暂无输入：请从镜头表子节点右侧 Output 或文本卡片连到 Input）'}
-            </pre>
+            <div className="detail-panel__hint">输入就绪情况</div>
+            <div className="prompt-input-summary">
+              <span>
+                <strong>{promptInputSummary?.sourceCount ?? 0}</strong>
+                个来源
+              </span>
+              <span>
+                <strong>{promptInputSummary?.shotCount ?? 0}</strong>
+                个镜头
+              </span>
+              <span>
+                <strong>{promptInputSummary?.storyboardSourceCount ?? 0}</strong>
+                个分镜源
+              </span>
+              <span>
+                <strong>{promptInputSummary?.colorTableCount ?? 0}</strong>
+                张色彩表
+              </span>
+              <span>
+                <strong>{promptInputSummary?.textCount ?? 0}</strong>
+                个文本补充
+              </span>
+            </div>
+            <details className="prompt-input-summary__raw">
+              <summary>查看合并后的 Input 原文</summary>
+              <pre className="detail-panel__script detail-panel__script--source">
+                {node.input?.trim()
+                  ? node.input
+                  : '（暂无输入：请从镜头表子节点右侧 Output 或文本卡片连到 Input）'}
+              </pre>
+            </details>
           </div>
       {node.output_stale_reason?.trim() ? (
         <div className="detail-panel__section detail-panel__section--generation-error">

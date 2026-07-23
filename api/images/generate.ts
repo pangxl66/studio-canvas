@@ -7,6 +7,13 @@ type ImageRequestBody = {
   projectId?: string | null;
   quality?: 'low' | 'medium' | 'high';
   size?: string;
+  referenceImages?: Array<{
+    dataUrl?: string;
+    name?: string;
+    kind?: 'character' | 'scene' | 'prop' | 'layout';
+    entityId?: string;
+    entityName?: string;
+  }>;
 };
 
 type AuthedUser = { id: string; email?: string | null };
@@ -19,7 +26,16 @@ type AnySupabaseClient = {
 const MODEL = process.env.IMAGE_MODEL?.trim() || 'gpt-image-2';
 const QUOTA_COST = 3;
 const TIMEOUT_MS = 420_000;
-const ALLOWED_SIZES = new Set(['1024x1024', '1536x1536', '1536x1024', '1024x1536']);
+const ALLOWED_SIZES = new Set([
+  '1024x1024',
+  '1536x1536',
+  '1536x1024',
+  '1024x1536',
+  '1536x864',
+  '864x1536',
+  '1536x576',
+  '576x1536',
+]);
 
 function env(name: string): string {
   return process.env[name]?.trim() ?? '';
@@ -117,14 +133,65 @@ async function writeUsage(
   });
 }
 
-function imageUpstreamUrl(): string {
+function imageUpstreamUrl(edit = false): string {
   const raw = env('IMAGE_BASE_URL') || env('GPT_LLM_BASE_URL') || env('LLM_BASE_URL') || env('LLM_PROXY_URL');
   if (!raw) return '';
   const base = raw.replace(/\/+$/u, '');
-  if (/\/images\/generations$/u.test(base)) return base;
-  if (/\/chat\/completions$/u.test(base)) return base.replace(/\/chat\/completions$/u, '/images/generations');
-  if (/\/v1$/u.test(base)) return `${base}/images/generations`;
-  return `${base}/v1/images/generations`;
+  const endpoint = edit ? 'edits' : 'generations';
+  if (/\/images\/(?:generations|edits)$/u.test(base)) return base.replace(/\/images\/(?:generations|edits)$/u, `/images/${endpoint}`);
+  if (/\/chat\/completions$/u.test(base)) return base.replace(/\/chat\/completions$/u, `/images/${endpoint}`);
+  if (/\/v1$/u.test(base)) return `${base}/images/${endpoint}`;
+  return `${base}/v1/images/${endpoint}`;
+}
+
+function referenceBlob(dataUrl: string): Blob | null {
+  const match = dataUrl.match(/^data:([^;,]+)?(?:;[^,]*)?;base64,(.+)$/u);
+  if (!match) return null;
+  const bytes = Buffer.from(match[2], 'base64');
+  if (!bytes.length || bytes.length > 3 * 1024 * 1024) return null;
+  return new Blob([bytes], { type: match[1] || 'image/jpeg' });
+}
+
+function imageRequestBody(body: ImageRequestBody, prompt: string, size: string, quality: string): {
+  body: BodyInit;
+  headers: Record<string, string>;
+  edit: boolean;
+  referenceImageCount: number;
+} {
+  const references = Array.isArray(body.referenceImages) ? body.referenceImages.slice(0, 16) : [];
+  const blobs = references
+    .map((reference) => referenceBlob(reference.dataUrl?.trim() ?? ''))
+    .filter((blob): blob is Blob => blob != null);
+  if (!blobs.length) {
+    if (references.length) throw new Error('参考图读取失败，已停止生成，避免静默退化为纯文本生图。');
+    return {
+      edit: false,
+      referenceImageCount: 0,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: MODEL,
+        prompt,
+        n: 1,
+        size,
+        quality,
+        output_format: 'jpeg',
+        output_compression: 88,
+      }),
+    };
+  }
+  const form = new FormData();
+  form.set('model', MODEL);
+  form.set('prompt', prompt);
+  form.set('n', '1');
+  form.set('size', size);
+  form.set('quality', quality);
+  form.set('output_format', 'jpeg');
+  form.set('output_compression', '88');
+  blobs.forEach((blob, index) => form.append('image[]', blob, `reference-${index + 1}.jpg`));
+  if (blobs.length !== references.length) {
+    throw new Error(`有 ${references.length - blobs.length} 张参考图读取失败，已停止生成。`);
+  }
+  return { edit: true, headers: {}, body: form, referenceImageCount: blobs.length };
 }
 
 function upstreamKey(): string {
@@ -197,8 +264,11 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   }
 
   try {
-    const url = imageUpstreamUrl();
     const apiKey = upstreamKey();
+    const size = ALLOWED_SIZES.has(body.size ?? '') ? body.size as string : '1536x1536';
+    const quality = body.quality === 'low' || body.quality === 'high' ? body.quality : 'medium';
+    const request = imageRequestBody(body, prompt, size, quality);
+    const url = imageUpstreamUrl(request.edit);
     if (!url || !apiKey) throw new Error('Image upstream env is missing.');
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
@@ -206,16 +276,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     try {
       response = await fetch(url, {
         method: 'POST',
-        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model: MODEL,
-          prompt,
-          n: 1,
-          size: ALLOWED_SIZES.has(body.size ?? '') ? body.size : '1536x1536',
-          quality: body.quality === 'low' || body.quality === 'high' ? body.quality : 'medium',
-          output_format: 'jpeg',
-          output_compression: 88,
-        }),
+        headers: { authorization: `Bearer ${apiKey}`, ...request.headers },
+        body: request.body,
         signal: controller.signal,
       });
     } finally {
@@ -236,7 +298,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     sendJson(res, 200, {
       imageDataUrl: `data:image/jpeg;base64,${b64}`,
       model: MODEL,
-      size: ALLOWED_SIZES.has(body.size ?? '') ? body.size : '1536x1536',
+      size,
+      referenceImageCount: request.referenceImageCount,
     });
   } catch (error) {
     await refundQuota(client, userId);

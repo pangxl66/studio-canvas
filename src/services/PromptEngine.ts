@@ -1,5 +1,10 @@
 import type { Edge } from '@xyflow/react';
-import { PROMPT_DEPT_AGENT_SYSTEM, PROMPT_DEPT_OUTPUT_SHAPE } from '@/agents/promptDeptSpec';
+import {
+  PROMPT_DEPT_AGENT_SYSTEM,
+  PROMPT_DEPT_OUTPUT_SHAPE,
+  PROMPT_DEPT_OUTPUT_SHAPE_V23,
+  PROMPT_DEPT_OUTPUT_SHAPE_V231_SEGMENTS,
+} from '@/agents/promptDeptSpec';
 import {
   STORYBOARD_DEPT_AGENT_SYSTEM,
   STORYBOARD_DEPT_OUTPUT_SHAPE,
@@ -7,7 +12,11 @@ import {
 import { WRITING_DEPT_AGENT_SYSTEM, WRITING_DEPT_OUTPUT_SHAPE } from '@/agents/writingDeptSpec';
 import type { StudioRFNode } from '@/types/reactFlow';
 import { appendProjectContextForConsumer } from '@/services/ProjectContext';
-import { resolveAndComposeMountedSkills } from '@/services/skillLoader';
+import {
+  resolveAndComposeMountedSkills,
+  STUDIO_CANVAS_PROMPT_V23_SKILL_ID,
+  STUDIO_CANVAS_PROMPT_V231_SEGMENTS_SKILL_ID,
+} from '@/services/skillLoader';
 
 export type PromptEngineGraphContext = {
   nodes: StudioRFNode[];
@@ -105,12 +114,17 @@ export function buildFinalPromptsForNode(
   }
 
   const base = departmentBaseSystem(kind);
-  const { systemPrompt: withSkills } = resolveAndComposeMountedSkills(kind, base, mounted);
+  const { systemPrompt: withSkills, resolvedIds } = resolveAndComposeMountedSkills(kind, base, mounted);
   const withProject =
     kind === 'storyboard' || kind === 'prompt'
       ? appendProjectContextForConsumer(withSkills, kind)
       : withSkills;
-  const schema = departmentOutputSchema(kind);
+  const schema =
+    kind === 'prompt' && resolvedIds.includes(STUDIO_CANVAS_PROMPT_V231_SEGMENTS_SKILL_ID)
+      ? PROMPT_DEPT_OUTPUT_SHAPE_V231_SEGMENTS
+      : kind === 'prompt' && resolvedIds.includes(STUDIO_CANVAS_PROMPT_V23_SKILL_ID)
+        ? PROMPT_DEPT_OUTPUT_SHAPE_V23
+        : departmentOutputSchema(kind);
   const combinedSystemPrompt = appendJsonSchemaConstraint(withProject, schema);
 
   return {

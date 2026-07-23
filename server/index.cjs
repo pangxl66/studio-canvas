@@ -2841,14 +2841,60 @@ async function handleLlmChat(req, res) {
   }
 }
 
-function getImageUpstreamUrl() {
+function getImageUpstreamUrl(edit = false) {
   const raw = env('IMAGE_BASE_URL') || env('GPT_LLM_BASE_URL') || env('LLM_BASE_URL') || env('LLM_PROXY_URL');
   if (!raw) return '';
   const base = raw.replace(/\/+$/u, '');
-  if (/\/images\/generations$/u.test(base)) return base;
-  if (/\/chat\/completions$/u.test(base)) return base.replace(/\/chat\/completions$/u, '/images/generations');
-  if (/\/v1$/u.test(base)) return `${base}/images/generations`;
-  return `${base}/v1/images/generations`;
+  const endpoint = edit ? 'edits' : 'generations';
+  if (/\/images\/(?:generations|edits)$/u.test(base)) return base.replace(/\/images\/(?:generations|edits)$/u, `/images/${endpoint}`);
+  if (/\/chat\/completions$/u.test(base)) return base.replace(/\/chat\/completions$/u, `/images/${endpoint}`);
+  if (/\/v1$/u.test(base)) return `${base}/images/${endpoint}`;
+  return `${base}/v1/images/${endpoint}`;
+}
+
+function parseImageReferenceDataUrl(dataUrl) {
+  const match = String(dataUrl || '').match(/^data:([^;,]+)?(?:;[^,]*)?;base64,(.+)$/u);
+  if (!match) return null;
+  const buffer = Buffer.from(match[2], 'base64');
+  if (!buffer.length || buffer.length > 3 * 1024 * 1024) return null;
+  return { buffer, mimeType: match[1] || 'image/jpeg' };
+}
+
+function createImageUpstreamRequest(body, model, prompt, size, quality) {
+  const references = Array.isArray(body.referenceImages) ? body.referenceImages.slice(0, 16) : [];
+  const parsed = references.map((reference) => parseImageReferenceDataUrl(reference?.dataUrl)).filter(Boolean);
+  if (!parsed.length) {
+    if (references.length) throw new Error('参考图读取失败，已停止生成，避免静默退化为纯文本生图。');
+    return {
+      edit: false,
+      referenceImageCount: 0,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        prompt,
+        n: 1,
+        size,
+        quality,
+        output_format: 'jpeg',
+        output_compression: 88,
+      }),
+    };
+  }
+  const form = new FormData();
+  form.set('model', model);
+  form.set('prompt', prompt);
+  form.set('n', '1');
+  form.set('size', size);
+  form.set('quality', quality);
+  form.set('output_format', 'jpeg');
+  form.set('output_compression', '88');
+  parsed.forEach((reference, index) => {
+    form.append('image[]', new Blob([reference.buffer], { type: reference.mimeType }), `reference-${index + 1}.jpg`);
+  });
+  if (parsed.length !== references.length) {
+    throw new Error(`有 ${references.length - parsed.length} 张参考图读取失败，已停止生成。`);
+  }
+  return { edit: true, headers: {}, body: form, referenceImageCount: parsed.length };
 }
 
 function getImageApiKey() {
@@ -2930,28 +2976,30 @@ async function handleImageGenerate(req, res) {
   }
 
   try {
-    const upstreamUrl = getImageUpstreamUrl();
     const apiKey = getImageApiKey();
-    if (!upstreamUrl || !apiKey) throw new Error('Image upstream env is missing.');
-    const allowedSizes = new Set(['1024x1024', '1536x1536', '1536x1024', '1024x1536']);
+    const allowedSizes = new Set([
+      '1024x1024',
+      '1536x1536',
+      '1536x1024',
+      '1024x1536',
+      '1536x864',
+      '864x1536',
+      '1536x576',
+      '576x1536',
+    ]);
     const size = allowedSizes.has(String(body.size || '')) ? String(body.size) : '1536x1536';
     const quality = body.quality === 'low' || body.quality === 'high' ? body.quality : 'medium';
+    const request = createImageUpstreamRequest(body, model, prompt, size, quality);
+    const upstreamUrl = getImageUpstreamUrl(request.edit);
+    if (!upstreamUrl || !apiKey) throw new Error('Image upstream env is missing.');
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
     let upstreamResponse;
     try {
       upstreamResponse = await fetch(upstreamUrl, {
         method: 'POST',
-        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model,
-          prompt,
-          n: 1,
-          size,
-          quality,
-          output_format: 'jpeg',
-          output_compression: 88,
-        }),
+        headers: { authorization: `Bearer ${apiKey}`, ...request.headers },
+        body: request.body,
         signal: controller.signal,
       });
     } finally {
@@ -2999,6 +3047,7 @@ async function handleImageGenerate(req, res) {
       imageDataUrl: `data:image/jpeg;base64,${b64}`,
       model,
       size,
+      referenceImageCount: request.referenceImageCount,
     });
   } catch (error) {
     await refundReservedQuota();

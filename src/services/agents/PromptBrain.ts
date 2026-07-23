@@ -2,7 +2,12 @@ import { runPromptEmployee } from '@/agents/promptAgents';
 import { PROMPT_DEPT_AGENT_SYSTEM } from '@/agents/promptDeptSpec';
 import { resolveDepartmentExecutionInput } from '@/services/graphInput';
 import { appendProjectContextForConsumer } from '@/services/ProjectContext';
-import { resolveAndComposeMountedSkills } from '@/services/skillLoader';
+import {
+  resolveAndComposeMountedSkills,
+  STUDIO_CANVAS_PROMPT_V23_SKILL_ID,
+  STUDIO_CANVAS_PROMPT_V231_SEGMENTS_SKILL_ID,
+  STUDIO_CANVAS_PROMPT_V25_SKILL_ID,
+} from '@/services/skillLoader';
 import type { StudioRFNode } from '@/types/reactFlow';
 import type { ApprovedAsset, PromptOutput } from '@/types/studio';
 import { BrainExecuteContext, BrainInputError } from '@/services/agents/brainTypes';
@@ -17,6 +22,21 @@ export class PromptBrain {
 1. 主提示词以**英文或中英混合标签串**为主（材质、光位、镜头焦距、运动、风格锚点），避免空泛形容词堆砌。
 2. 每个 shot 的 prompt 须可直接复制进 SD / Seeddance；negative_prompt 与主 prompt 语义一致、排除常见视频瑕疵。
 3. dimensions 十维字段填满可检索关键词，便于资产系统与连贯性约束；shot_id 与源镜头严格对应。`;
+
+  static readonly V23_FOCUS_INSTRUCTION = `【PromptBrain · Studio Canvas 2.3 工程化重点】
+1. seedanceCard 是完整 Studio Card；“提示词”字段是去重、消解冲突后的 Engine Prompt。
+2. 严格保留 Studio Canvas 2.3 的18个全角冒号字段，四类钉子不得合并为旧版“钉子4行”。
+3. dimensions 十维字段填满可检索关键词；shot_id、资产引用与源镜头严格对应。`;
+
+  static readonly V231_SEGMENTS_FOCUS_INSTRUCTION = `【PromptBrain · Studio Canvas 2.3.1 组合镜头重点】
+1. 完整保留 Studio Canvas 2.3 的 seedanceCard 与 Engine Prompt 双层结构。
+2. mergedMembers 仍只生成一条连续 shotPrompt，但必须同步生成逐一对应源分镜的 shotSegments。
+3. 每个 segment 的 image_prompt 只描述一个静态决定性关键帧，供影视分镜宫格直接读取；禁止时间线、运镜过程和音频描述。`;
+
+  static readonly V25_FOCUS_INSTRUCTION = `【PromptBrain · Studio Canvas 2.5 生产校验重点】
+1. seedanceCard 保持18字段 Studio Card；“提示词”是去重后的 Engine Prompt，不重复 Project Bible。
+2. 挂载只允许真实独立资产，标记之间使用一个空格；禁止把场景内部结构、材质、灯具或参考图虚构成资产。
+3. 内部按 HARD / SOFT / AUTO 消解冲突，检查伪精确数字、景别可见性、动作预算、连续时间轴、节拍映射和引擎适配。`;
 
   /**
    * 要求：非空输入；若以 JSON 传入，须含非空 shots（分镜镜头表）。编剧-only 的 scenes JSON 会明确报错引导接线。
@@ -78,9 +98,20 @@ export class PromptBrain {
   ): Promise<PromptOutput> {
     const text = this.validate(node, ctx);
     const mounted = Array.isArray(node.data.mounted_skills) ? node.data.mounted_skills : [];
-    const { systemPrompt } = resolveAndComposeMountedSkills('prompt', PROMPT_DEPT_AGENT_SYSTEM, mounted);
+    const { systemPrompt, resolvedIds } = resolveAndComposeMountedSkills(
+      'prompt',
+      PROMPT_DEPT_AGENT_SYSTEM,
+      mounted,
+    );
     const composed = appendProjectContextForConsumer(systemPrompt, 'prompt');
-    const executionSystemPrompt = `${composed}\n\n${this.FOCUS_INSTRUCTION}`;
+    const focusInstruction = resolvedIds.includes(STUDIO_CANVAS_PROMPT_V231_SEGMENTS_SKILL_ID)
+      ? this.V231_SEGMENTS_FOCUS_INSTRUCTION
+      : resolvedIds.includes(STUDIO_CANVAS_PROMPT_V25_SKILL_ID)
+        ? this.V25_FOCUS_INSTRUCTION
+      : resolvedIds.includes(STUDIO_CANVAS_PROMPT_V23_SKILL_ID)
+        ? this.V23_FOCUS_INSTRUCTION
+        : this.FOCUS_INSTRUCTION;
+    const executionSystemPrompt = `${composed}\n\n${focusInstruction}`;
     return runPromptEmployee(text, approvedAssets, executionSystemPrompt);
   }
 }

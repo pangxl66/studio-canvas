@@ -7,9 +7,11 @@ import {
   type NodeProps,
 } from '@xyflow/react';
 import { memo, useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react';
+import { mergedUpstreamForPromptReviewNode } from '@/services/graphInput';
 import { useStudioStore } from '@/store/useStudioStore';
 import type { PromptReviewHistoryEntry, StudioNodeData } from '@/types/studio';
 import { DEPT_OUTPUT_HANDLE_ID } from '@/utils/departmentInputWire';
+import { sanitizePromptAssetPlaceholders } from '@/utils/promptAssetRefs';
 
 type PromptReviewRF = Node<StudioNodeData, 'promptReview'>;
 
@@ -38,20 +40,67 @@ function historyPreview(text: string): string {
   return normalized.length > 72 ? `${normalized.slice(0, 72)}...` : normalized;
 }
 
+function restoreResolvedMountLines(currentText: string, upstreamText: string): string {
+  const upstreamMounts = upstreamText
+    .split(/\r?\n/)
+    .filter((line) => /^\s*挂载[:：]/.test(line) && !/^\s*挂载[:：]\s*无\s*$/.test(line));
+  if (upstreamMounts.length === 0) return currentText;
+  let index = 0;
+  return currentText
+    .split(/\r?\n/)
+    .map((line) => {
+      const tokens = Array.from(line.matchAll(/\|@=([^|]+)\|/g)).map((match) =>
+        String(match[1] ?? '').trim(),
+      );
+      const needsRepair =
+        /^\s*挂载[:：]\s*无\s*$/.test(line) ||
+        (tokens.length > 0 &&
+          (tokens.length > 8 ||
+            tokens.some(
+              (token) =>
+                token.length <= 1 ||
+                token.length > 20 ||
+                /[。！？!?]/.test(token) ||
+                /^(身份|人数)$/.test(token) ||
+                /(可见|保持稳定|相对座次|形成入口边界|中央为)/.test(token),
+            )));
+      if (!needsRepair) return line;
+      const replacement = upstreamMounts[index];
+      index += 1;
+      return replacement ?? line;
+    })
+    .join('\n');
+}
+
 function PromptReviewNodeInner({ id, data, selected }: NodeProps<PromptReviewRF>) {
   const [instruction, setInstruction] = useState('');
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
   const patchNodeData = useStudioStore((s) => s.patchNodeData);
-  const syncPromptReviewInputFromGraph = useStudioStore((s) => s.syncPromptReviewInputFromGraph);
   const savePromptReviewSnapshot = useStudioStore((s) => s.savePromptReviewSnapshot);
   const restorePromptReviewSnapshot = useStudioStore((s) => s.restorePromptReviewSnapshot);
   const runPromptReviewLlm = useStudioStore((s) => s.runPromptReviewLlm);
   const stopNodeTask = useStudioStore((s) => s.stopNodeTask);
+  const completeConnectionMenuPick = useStudioStore((s) => s.completeConnectionMenuPick);
+  const focusNode = useStudioStore((s) => s.focusNode);
+  const pushMessage = useStudioStore((s) => s.pushMessage);
   const activeNodeId = useStudioStore((s) => s.activeNodeId);
+  const upstreamReviewText = useStudioStore(
+    useCallback(
+      (state) => mergedUpstreamForPromptReviewNode(id, state.nodes, state.edges) ?? '',
+      [id],
+    ),
+  );
   const updateNodeInternals = useUpdateNodeInternals();
-  const text = data.raw_text ?? data.input ?? '';
+  const rawText = data.raw_text ?? data.input ?? '';
+  const text = restoreResolvedMountLines(
+    sanitizePromptAssetPlaceholders(rawText),
+    sanitizePromptAssetPlaceholders(upstreamReviewText),
+  );
   const busy = data.status === 'IN_PROGRESS';
-  const displayText = busy ? (data.streaming_preview ?? text) : text;
+  const displayText = sanitizePromptAssetPlaceholders(
+    busy ? (data.streaming_preview ?? text) : text,
+  );
   const totalChars = displayText.replace(/\s+/g, '').length;
   const history = (Array.isArray(data.prompt_review_history)
     ? data.prompt_review_history
@@ -107,6 +156,19 @@ function PromptReviewNodeInner({ id, data, selected }: NodeProps<PromptReviewRF>
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [activeNodeId, busy, id, selected, stopNodeTask]);
 
+  useEffect(() => {
+    if (busy || rawText === text) return;
+    patchNodeData(
+      id,
+      {
+        input: text,
+        raw_text: text,
+        output: { text },
+      },
+      false,
+    );
+  }, [busy, id, patchNodeData, rawText, text]);
+
   const onTextChange = useCallback(
     (event: ChangeEvent<HTMLTextAreaElement>) => {
       const next = event.target.value;
@@ -124,10 +186,6 @@ function PromptReviewNodeInner({ id, data, selected }: NodeProps<PromptReviewRF>
   const onInstructionChange = useCallback((event: ChangeEvent<HTMLTextAreaElement>) => {
     setInstruction(event.target.value);
   }, []);
-
-  const onSync = useCallback(() => {
-    syncPromptReviewInputFromGraph(id);
-  }, [id, syncPromptReviewInputFromGraph]);
 
   const onSaveSnapshot = useCallback(() => {
     if (savePromptReviewSnapshot(id)) {
@@ -151,6 +209,65 @@ function PromptReviewNodeInner({ id, data, selected }: NodeProps<PromptReviewRF>
   const onStop = useCallback(() => {
     stopNodeTask(id);
   }, [id, stopNodeTask]);
+
+  const onCopy = useCallback(async () => {
+    const copyText = text.trim();
+    if (!copyText) return;
+    try {
+      await navigator.clipboard.writeText(copyText);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+      pushMessage({
+        role: 'system',
+        text: '已复制审核后的完整提示词。',
+        nodeId: id,
+      });
+    } catch {
+      pushMessage({
+        role: 'system',
+        text: '复制失败，请检查浏览器剪贴板权限。',
+        nodeId: id,
+      });
+    }
+  }, [id, pushMessage, text]);
+
+  const onSendStoryboardGrid = useCallback(() => {
+    const state = useStudioStore.getState();
+    const reviewNode = state.nodes.find((node) => node.id === id);
+    if (!reviewNode) return;
+    if ((reviewNode.data.raw_text ?? reviewNode.data.input ?? '') !== text) {
+      patchNodeData(id, { input: text, raw_text: text, output: { text } }, false);
+    }
+    const existingGridId = state.edges
+      .filter((edge) => edge.source === id)
+      .map((edge) => state.nodes.find((node) => node.id === edge.target))
+      .find(
+        (node) =>
+          node?.type === 'aiFilmStoryboard' && node.data.type === 'film_storyboard_node',
+      )?.id;
+    if (existingGridId) {
+      focusNode(existingGridId, { openDetail: false });
+      pushMessage({
+        role: 'system',
+        text: '审核提示词已连接分镜宫格，已定位现有节点。',
+        nodeId: existingGridId,
+      });
+      return;
+    }
+    const createdId = completeConnectionMenuPick({
+      fromNodeId: id,
+      fromHandleId: PROMPT_REVIEW_OUTPUT_HANDLE_ID,
+      fromHandleType: 'source',
+      pick: 'film_storyboard_node',
+      flowPosition: {
+        x: reviewNode.position.x + width + 72,
+        y: reviewNode.position.y + 70,
+      },
+    });
+    if (createdId) {
+      focusNode(createdId, { openDetail: false });
+    }
+  }, [completeConnectionMenuPick, focusNode, id, patchNodeData, pushMessage, text, width]);
 
   return (
     <div
@@ -216,10 +333,21 @@ function PromptReviewNodeInner({ id, data, selected }: NodeProps<PromptReviewRF>
         </span>
       </header>
 
-      <div className="prompt-review-node__toolbar nodrag nopan">
-        <button type="button" onClick={onSync} disabled={busy}>
-          同步上游
+      <div className="prompt-review-node__toolbar prompt-review-node__toolbar--handoff nodrag nopan">
+        <button type="button" onClick={() => void onCopy()} disabled={busy || !text.trim()}>
+          {copied ? '已复制' : '复制提示词'}
         </button>
+        <button
+          type="button"
+          className="prompt-review-node__send-grid"
+          onClick={onSendStoryboardGrid}
+          disabled={busy || !text.trim()}
+        >
+          发送到分镜宫格
+        </button>
+      </div>
+
+      <div className="prompt-review-node__toolbar prompt-review-node__toolbar--edit nodrag nopan">
         <button type="button" onClick={onSaveSnapshot} disabled={busy || !text.trim()}>
           保存版本
         </button>

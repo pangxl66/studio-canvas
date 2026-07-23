@@ -143,7 +143,13 @@ function normalizeSkill(mod: SkillJson, id: string, folder: SkillFolder, fileNam
 
 const rawModules = import.meta.glob<{ default: SkillJson }>('../skills/**/*.json', { eager: true });
 
-export const DEFAULT_PROMPT_STYLE_SKILL_ID = 'prompt/studio_canvas_prompt_spec_v1';
+export const STUDIO_CANVAS_PROMPT_V1_SKILL_ID = 'prompt/studio_canvas_prompt_spec_v1';
+export const STUDIO_CANVAS_PROMPT_V23_SKILL_ID = 'prompt/studio_canvas_prompt_spec_v2_3_production';
+export const STUDIO_CANVAS_PROMPT_V231_SEGMENTS_SKILL_ID =
+  'prompt/studio_canvas_prompt_spec_v2_3_1_segments';
+export const STUDIO_CANVAS_PROMPT_V25_SKILL_ID =
+  'prompt/studio_canvas_prompt_spec_v2_5_validation';
+export const DEFAULT_PROMPT_STYLE_SKILL_ID = STUDIO_CANVAS_PROMPT_V25_SKILL_ID;
 export const DEFAULT_STORYBOARD_SKILL_ID = 'storyboard/xuke_storyboard_v1';
 
 const registry = new Map<string, SkillFileRecord>();

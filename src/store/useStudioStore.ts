@@ -85,7 +85,11 @@ import {
 } from '@/utils/studioNodePersistence';
 import { formatReviewOptimizationPayload } from '@/utils/pipelineReviewContentPreview';
 import { formatPipelineOutputPreview, typewriterStream } from '@/utils/streamPreview';
-import { canTransitionPipelineStatus, PIPELINE_INITIAL_STATUS } from './workflow';
+import {
+  canTransitionPipelineStatus,
+  PIPELINE_INITIAL_STATUS,
+  PROMPT_GENERATED_STATUS,
+} from './workflow';
 
 function uid(prefix: string) {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -188,6 +192,9 @@ function positiveNumber(value: unknown): number | undefined {
 }
 
 function defaultNodeSize(node: StudioRFNode): { width: number; height: number } {
+  if (node.type === 'department' && node.data.type === 'prompt') {
+    return { width: 360, height: 360 };
+  }
   if (node.type === 'textNode') return { width: 430, height: 420 };
   if (node.type === 'storyboardFile') return { width: 260, height: 190 };
   if (node.type === 'imageNode') return { width: 560, height: 390 };
@@ -332,6 +339,78 @@ async function prepareStoryboardImageReferencesForExecution(args: {
       const message = error instanceof Error ? error.message : String(error);
       args.patchNodeData(imageNode.id, { generation_error: message }, true);
       throw new Error(`场景参考图“${label}”分析失败：${message}`);
+    }
+  }
+
+  return analyzedCount;
+}
+
+async function preparePromptColorReferencesForExecution(args: {
+  deptId: string;
+  nodes: StudioRFNode[];
+  edges: Edge[];
+  signal: AbortSignal;
+  patchNodeData: (id: string, patch: Partial<StudioNodeData>, bumpVersion?: boolean) => void;
+  pushMessage: (m: Omit<ChatMessage, 'id' | 'ts'> & { id?: string }) => string;
+}): Promise<number> {
+  const imageNodes = connectedImageNodesForDepartment(args.deptId, args.nodes, args.edges);
+  let analyzedCount = 0;
+  let analyzePromptColorReferenceFn:
+    | ((params: { imageDataUrl: string; signal?: AbortSignal }) => Promise<string>)
+    | null = null;
+
+  for (let index = 0; index < imageNodes.length; index += 1) {
+    const imageNode = imageNodes[index];
+    const summary = imageNode.data.imageColorAnalysisSummary?.trim();
+    if (summary) continue;
+    const imageDataUrl = imageNode.data.imageDataUrl;
+    const label =
+      imageNode.data.imageFileName?.trim() ||
+      imageNode.data.label?.trim() ||
+      `色彩表 ${index + 1}`;
+    if (!imageDataUrl) {
+      args.pushMessage({
+        role: 'system',
+        text: `Prompt 节点已连接色彩表“${label}”，但该图片还没有载入文件，已跳过色彩分析。`,
+        nodeId: args.deptId,
+      });
+      continue;
+    }
+
+    args.patchNodeData(
+      args.deptId,
+      {
+        streaming_preview: `正在读取色彩表“${label}”，分析主色、冷暖、明暗、对比度与光线关系...`,
+        generation_phase: 'employee',
+      },
+      false,
+    );
+
+    try {
+      analyzePromptColorReferenceFn ??=
+        (await import('@/services/promptColorReferenceAnalysis')).analyzePromptColorReference;
+      const analyzed = await analyzePromptColorReferenceFn({
+        imageDataUrl,
+        signal: args.signal,
+      });
+      args.patchNodeData(
+        imageNode.id,
+        {
+          imageColorAnalysisSummary: analyzed,
+          generation_error: undefined,
+        },
+        true,
+      );
+      args.pushMessage({
+        role: 'system',
+        text: `已读取色彩表：${label}。生成时只会把它用于“灯光布置与基调”和必要的色彩光影描述。`,
+        nodeId: args.deptId,
+      });
+      analyzedCount += 1;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      args.patchNodeData(imageNode.id, { generation_error: message }, true);
+      throw new Error(`色彩表“${label}”分析失败：${message}`);
     }
   }
 
@@ -707,7 +786,7 @@ export type StudioState = {
   ) => string;
   addImageNode: (
     position?: { x: number; y: number },
-    opts?: { imageDataUrl?: string; imageMimeType?: string; imageFileName?: string; label?: string },
+    opts?: { imageDataUrl?: string; imageMimeType?: string; imageFileName?: string; label?: string; silent?: boolean },
   ) => string;
   addVideoNode: (
     position?: { x: number; y: number },
@@ -1102,8 +1181,6 @@ function restoreUndoSnapshot(snapshot: UndoSnapshot, get: () => StudioState): Pa
   };
 }
 
-type PromptReviewEnsureResult = { id: string; created: boolean } | null;
-
 function findConnectedPromptReviewNodeId(
   promptNodeId: string,
   nodes: StudioRFNode[],
@@ -1122,13 +1199,12 @@ function findConnectedPromptReviewNodeId(
   return null;
 }
 
-function findAutoPromptReviewPosition(promptNode: StudioRFNode, nodes: StudioRFNode[]): { x: number; y: number } {
+function findAutoPromptReviewPosition(
+  promptNode: StudioRFNode,
+  nodes: StudioRFNode[],
+): { x: number; y: number } {
   const promptSize = getNodeSize(promptNode);
-  const reviewSize = defaultNodeSize({
-    ...promptNode,
-    type: 'promptReview',
-    data: makePromptReviewNodeData('promptreview-preview'),
-  });
+  const reviewSize = { width: 380, height: 640 };
   const occupiedRects = nodes
     .filter((node) => node.id !== promptNode.id)
     .map((node) => {
@@ -1146,7 +1222,6 @@ function findAutoPromptReviewPosition(promptNode: StudioRFNode, nodes: StudioRFN
     width: reviewSize.width,
     height: reviewSize.height,
   };
-
   for (let attempt = 0; attempt < 16; attempt += 1) {
     if (
       !occupiedRects.some((occupied) =>
@@ -1164,24 +1239,26 @@ function ensurePromptReviewNodeForPromptOutput(
   get: () => StudioState,
   set: StudioSet,
   promptNodeId: string,
-): PromptReviewEnsureResult {
+): string | null {
   const { nodes, edges } = get();
   const promptNode = nodes.find((node) => node.id === promptNodeId);
   if (!promptNode || promptNode.type !== 'department' || promptNode.data.type !== 'prompt') {
     return null;
   }
 
-  const text = departmentAssetAsInputText(promptNode.data, 'prompt_review_node')?.trim() ?? '';
-  if (!text) return null;
-
   const existingId = findConnectedPromptReviewNodeId(promptNodeId, nodes, edges);
   if (existingId) {
     get().syncPromptReviewInputFromGraph(existingId);
     get().focusNode(existingId, { openDetail: false });
-    return { id: existingId, created: false };
+    return existingId;
   }
 
-  const reviewId = get().addPromptReviewNode(findAutoPromptReviewPosition(promptNode, nodes), text);
+  const text = departmentAssetAsInputText(promptNode.data, 'prompt_review_node')?.trim() ?? '';
+  if (!text) return null;
+  const reviewId = get().addPromptReviewNode(
+    findAutoPromptReviewPosition(promptNode, nodes),
+    text,
+  );
   set((state) => ({
     edges: addUniqueAnimatedEdges(state.edges, [
       {
@@ -1194,7 +1271,7 @@ function ensurePromptReviewNodeForPromptOutput(
   }));
   get().syncPromptReviewInputFromGraph(reviewId);
   get().focusNode(reviewId, { openDetail: false });
-  return { id: reviewId, created: true };
+  return reviewId;
 }
 
 export const useStudioStore = create<StudioState>((set, get) => ({
@@ -2612,11 +2689,11 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         return id;
       }
       if (p.pick === 'image_node') {
-        if (from.type === 'aiFilmStoryboard') {
-          return pushErr('影视分镜节点主要读取文本或分镜表镜头；如要读取宫格分镜图，请连接到影视分镜提示词节点。');
-        }
         const id = get().addImageNode(upstreamPos);
         connectToAiFilmNode(id, from.id, 'out');
+        if (from.type === 'aiFilmStoryboard') {
+          get().pushMessage({ role: 'system', text: '已创建图片节点，并接入影视分镜作为角色、场景或道具参考图。', nodeId: id });
+        }
         return id;
       }
       if (
@@ -2636,8 +2713,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     if (feedingDept) {
       const dk = from.data.type as PipelineKind;
       if (p.pick === 'image_node') {
-        if (dk !== 'storyboard') {
-          return pushErr('图片节点目前可作为文本卡片视觉参考，或作为分镜节点的场景设定参考。');
+        if (dk !== 'storyboard' && dk !== 'prompt') {
+          return pushErr('图片节点可作为分镜节点的场景参考，或作为 Prompt 节点的色彩表。');
         }
         const id = get().addImageNode(upstreamPos);
         set((s) => ({
@@ -2653,7 +2730,14 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           ),
         }));
         syncDeptIn(from.id);
-        get().pushMessage({ role: 'system', text: '已创建图片节点，并接入当前分镜节点作为场景参考。', nodeId: id });
+        get().pushMessage({
+          role: 'system',
+          text:
+            dk === 'prompt'
+              ? '已创建图片节点，并接入当前 Prompt 节点作为色彩表。'
+              : '已创建图片节点，并接入当前分镜节点作为场景参考。',
+          nodeId: id,
+        });
         return id;
       }
       if (p.pick === 'video_node') {
@@ -2878,6 +2962,28 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           get().pushMessage({ role: 'system', text: '已创建分镜节点，并接入当前图片作为场景参考。', nodeId: id });
           return id;
         }
+        if (from.type === 'imageNode' && p.pick === 'prompt') {
+          const id = get().addDepartmentNode('prompt', downstreamPos);
+          set((s) => ({
+            edges: addEdge(
+              {
+                source: from.id,
+                target: id,
+                sourceHandle: 'out',
+                targetHandle: 'in',
+                animated: true,
+              },
+              s.edges,
+            ),
+          }));
+          syncDeptIn(id);
+          get().pushMessage({
+            role: 'system',
+            text: '已创建 Prompt 节点，并接入当前图片作为色彩表。',
+            nodeId: id,
+          });
+          return id;
+        }
         if (from.type === 'imageNode' && (p.pick === 'film_character_node' || p.pick === 'film_video_prompt_node')) {
           const id = addAiFilmNodeForPick(p.pick, downstreamPos);
           connectToAiFilmNode(from.id, id, 'out');
@@ -2891,7 +2997,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           );
         }
         if (p.pick !== 'text_node') {
-          return pushErr('图片节点 Output 可连接到文本卡片、分镜节点、角色设定或影视分镜提示词；视频节点 Output 目前只支持连接到文本卡片。');
+          return pushErr('图片节点 Output 可连接到文本卡片、分镜节点、Prompt 节点、角色设定或影视分镜提示词；视频节点 Output 目前只支持连接到文本卡片。');
         }
         const id = uid('text');
         const data = makeTextNodeData(id, '');
@@ -3151,7 +3257,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
               s.edges,
             ),
           }));
-          get().pushMessage({ role: 'broadcast', text: '已创建图片节点，并读取当前分镜输出生成九宫格。', nodeId: id });
+          get().pushMessage({ role: 'broadcast', text: '已创建图片节点，并读取当前分镜输出生成动态分镜宫格。', nodeId: id });
           return id;
         }
         if (p.pick === 'image_node' || p.pick === 'video_node') {
@@ -3263,12 +3369,67 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         if (p.pick === 'image_node' || p.pick === 'video_node') {
           return pushErr('提示词审核节点 Output 暂不连接到图片/视频节点；请把图片/视频节点 Output 接到文本卡片 Input。');
         }
+        if (p.pick === 'film_storyboard_node') {
+          const id = addAiFilmNodeForPick(p.pick, downstreamPos);
+          const current = get();
+          const promptSourceIds = new Set(
+            current.edges
+              .filter((edge) => edge.target === from.id)
+              .map((edge) => current.nodes.find((node) => node.id === edge.source))
+              .filter(
+                (node): node is StudioRFNode =>
+                  Boolean(
+                    node &&
+                      node.type === 'department' &&
+                      node.data.type === 'prompt',
+                  ),
+              )
+              .map((node) => node.id),
+          );
+          const inheritedStoryboardEdges = current.edges
+            .filter((edge) => promptSourceIds.has(edge.target))
+            .filter((edge) => {
+              const source = current.nodes.find((node) => node.id === edge.source);
+              return Boolean(
+                source &&
+                  (source.type === 'shotList' ||
+                    source.type === 'storyboardFile' ||
+                    (source.type === 'department' && source.data.type === 'storyboard')),
+              );
+            })
+            .map((edge) => ({
+              source: edge.source,
+              target: id,
+              sourceHandle: edge.sourceHandle ?? null,
+              targetHandle: 'in',
+            }));
+          set((s) => ({
+            edges: addUniqueAnimatedEdges(s.edges, [
+              {
+                source: from.id,
+                target: id,
+                sourceHandle: DEPT_OUTPUT_HANDLE_ID,
+                targetHandle: 'in',
+              },
+              ...inheritedStoryboardEdges,
+            ]),
+          }));
+          get().pushMessage({
+            role: 'broadcast',
+            text:
+              inheritedStoryboardEdges.length > 0
+                ? '已把审核后的提示词和上游分镜表一起发送到分镜宫格。'
+                : '已把审核后的提示词发送到分镜宫格；未发现可继承的上游分镜表。',
+            nodeId: id,
+          });
+          return id;
+        }
         if (p.pick === 'film_video_prompt_node') {
           const id = addAiFilmNodeForPick(p.pick, downstreamPos);
           connectToAiFilmNode(from.id, id, DEPT_OUTPUT_HANDLE_ID);
           return id;
         }
-        if (p.pick === 'film_character_node' || p.pick === 'film_storyboard_node') {
+        if (p.pick === 'film_character_node') {
           return pushErr('提示词审核节点 Output 建议连接到影视分镜提示词节点。');
         }
         if (p.pick === 'text_node') {
@@ -3317,7 +3478,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           get().syncPromptReviewInputFromGraph(id);
           return id;
         }
-        return pushErr('提示词审核节点 Output 目前只支持继续接文本卡片或审核节点。');
+        return pushErr('提示词审核节点 Output 目前支持发送到分镜宫格、文本卡片或审核节点。');
       }
 
       if (
@@ -3485,6 +3646,36 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           }
         }
       }
+      if (kind === 'prompt') {
+        const analyzedColorTables = await preparePromptColorReferencesForExecution({
+          deptId: nodeId,
+          nodes: get().nodes,
+          edges: get().edges,
+          signal: controller.signal,
+          patchNodeData: get().patchNodeData,
+          pushMessage: get().pushMessage,
+        });
+        ensureNotStopped();
+        if (analyzedColorTables > 0) {
+          const mergedWithColorAnalysis = mergedTextInputForDepartment(
+            nodeId,
+            get().nodes,
+            get().edges,
+          );
+          if (mergedWithColorAnalysis !== null && mergedWithColorAnalysis.trim() !== '') {
+            get().patchNodeData(
+              nodeId,
+              {
+                input: mergedWithColorAnalysis.trim(),
+                inputSource: 'graph',
+                streaming_preview: '色彩表已读取，正在按参考色彩与光影关系生成分镜提示词...',
+                generation_phase: 'employee',
+              },
+              false,
+            );
+          }
+        }
+      }
 
       const src = get().nodes.find((n) => n.id === nodeId);
       const reviewOptimization =
@@ -3619,7 +3810,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       }
       get().patchNodeData(nodeId, afterEmployee, true);
 
-      const finalStatus: NodeStatus = kind === 'prompt' ? 'APPROVED' : 'WAITING_REVIEW';
+      const finalStatus: NodeStatus =
+        kind === 'prompt' ? PROMPT_GENERATED_STATUS : 'WAITING_REVIEW';
       get().patchNodeData(
         nodeId,
         {
@@ -3638,7 +3830,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         get().ensureShotListForStoryboard(nodeId);
         get().syncShotListNodesFromStoryboard(nodeId);
       }
-      let autoPromptReview: PromptReviewEnsureResult = null;
+      let syncedPromptReviewId: string | null = null;
       if (kind === 'prompt') {
         const version = get().nodes.find((x) => x.id === nodeId)?.data.version ?? 1;
         get().registerAsset({
@@ -3648,18 +3840,16 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           payload: emp.output as PromptOutput,
           createdAt: Date.now(),
         });
-        autoPromptReview = ensurePromptReviewNodeForPromptOutput(get, set, nodeId);
+        syncedPromptReviewId = ensurePromptReviewNodeForPromptOutput(get, set, nodeId);
       }
 
       get().pushMessage({
         role: 'broadcast',
         text:
           kind === 'prompt'
-            ? autoPromptReview?.created
-              ? 'Prompt 节点已生成完成，已自动创建并连接提示词审核节点。'
-              : autoPromptReview
-                ? 'Prompt 节点已生成完成，已同步到已连接的提示词审核节点。'
-                : 'Prompt 节点已生成完成，可直接使用。'
+            ? syncedPromptReviewId
+              ? 'Prompt 节点已生成完成，提示词审核节点已自动打开。'
+              : 'Prompt 节点已生成完成，但自动创建提示词审核节点失败。'
             : `${deptLabel(kindToDepartment(kind))} 已生成完成，请填写审核意见。`,
         nodeId,
       });
@@ -4004,13 +4194,15 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         },
       ],
     }));
-    get().pushMessage({
-      role: 'system',
-      text: opts?.imageDataUrl
-        ? '已创建图片节点。连接到文本卡片后，可参与 LLM 润色。'
-        : '已创建图片节点。上传或粘贴图片后，可作为文本润色的视觉参考。',
-      nodeId: id,
-    });
+    if (!opts?.silent) {
+      get().pushMessage({
+        role: 'system',
+        text: opts?.imageDataUrl
+          ? '已创建图片节点。连接到文本卡片后，可参与 LLM 润色。'
+          : '已创建图片节点。上传或粘贴图片后，可作为文本润色的视觉参考。',
+        nodeId: id,
+      });
+    }
     return id;
   },
 
@@ -4794,4 +4986,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 }));
 
 export { getLatestApprovedWritingAsset, getLatestApprovedWritingBundle } from './workflow';
-export { canTransitionPipelineStatus, PIPELINE_INITIAL_STATUS } from './workflow';
+export {
+  canTransitionPipelineStatus,
+  PIPELINE_INITIAL_STATUS,
+  PROMPT_GENERATED_STATUS,
+} from './workflow';

@@ -85,6 +85,13 @@ export function NodeDetailPanelLayout(props: {
 
   const fb = leaderFeedback?.trim() ?? '';
   const preview = fb.length > 160 ? `${fb.slice(0, 160)}…` : fb;
+  const statusLabel =
+    kind === 'prompt' &&
+    (status === 'WAITING_REVIEW' || status === 'REVIEWED' || status === 'APPROVED')
+      ? '已生成'
+      : kind === 'prompt' && status === 'IN_PROGRESS'
+        ? '生成中'
+        : STATUS_LABEL[status] ?? status;
 
   return (
     <div className="node-detail-layout">
@@ -115,7 +122,7 @@ export function NodeDetailPanelLayout(props: {
         </header>
 
         <div className={`node-detail-layout__status node-detail-layout__status--${status}`} role="status">
-          <span className="node-detail-layout__status-badge">{STATUS_LABEL[status] ?? status}</span>
+          <span className="node-detail-layout__status-badge">{statusLabel}</span>
           <div className="node-detail-layout__leader-preview-wrap">
             {preview ? (
               <p className="node-detail-layout__leader-preview" title={fb}>

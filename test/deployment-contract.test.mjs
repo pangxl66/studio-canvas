@@ -42,11 +42,30 @@ test('Vercel exposes every admin endpoint used by the browser client', () => {
 
 test('storyboard grid image generation is available in browser and both server targets', () => {
   const client = read('src/services/storyboardGridImage.ts');
+  const filmStoryboardNode = read('src/components/AiFilmmakingNode.tsx');
   assert.match(client, /gpt-image-2/);
   assert.match(client, /\/api\/images\/generate/);
+  assert.match(client, /explicitImageProxyUrl/);
+  assert.match(client, /window\.location\.protocol !== 'file:'/);
+  assert.match(client, /1536x1024/);
+  assert.match(client, /1024x1536/);
+  assert.match(client, /paginateStoryboardGridSources/);
+  assert.doesNotMatch(client, /input_fidelity/);
+  assert.doesNotMatch(read('api/images/generate.ts'), /input_fidelity/);
+  assert.doesNotMatch(read('server/index.cjs'), /input_fidelity/);
+  assert.doesNotMatch(client, /PANEL_COVERAGE/);
+  assert.doesNotMatch(client, /index % selected\.length/);
   assert.equal(fs.existsSync(path.join(root, 'api/images/generate.ts')), true);
   assert.match(read('server/index.cjs'), /url\.pathname === '\/api\/images\/generate'/);
-  assert.match(read('src/components/ImageTableNode.tsx'), /生成九宫格/);
+  assert.match(read('src/components/ImageTableNode.tsx'), /storyboardGridActionLabel/);
+  assert.match(filmStoryboardNode, /resolveStoryboardGridSource/);
+  assert.match(filmStoryboardNode, /storyboardGridActionLabel/);
+  assert.match(filmStoryboardNode, /imageGenerationStatus/);
+  assert.match(filmStoryboardNode, /resolveStoryboardReferenceContext/);
+  assert.match(filmStoryboardNode, /prepareStoryboardReferenceImages/);
+  assert.match(client, /\/images\/edits/);
+  assert.match(read('api/images/generate.ts'), /image\[\]/);
+  assert.match(read('server/index.cjs'), /image\[\]/);
 });
 
 test('known vulnerable xlsx package is not part of the application', () => {

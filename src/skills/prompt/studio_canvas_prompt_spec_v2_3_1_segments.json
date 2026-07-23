@@ -1,0 +1,17 @@
+{
+  "name": "Studio Canvas 2.3.1 组合镜头结构化版",
+  "description": "在 Studio Canvas 2.3 生产规范旁新增的兼容版本。保留一张连续视频卡，同时为合并镜头输出可供影视分镜宫格直接读取的 shotSegments 静态关键帧协议。",
+  "version": "2.3.1",
+  "slot": "style",
+  "system_instruction": "你正在使用 Studio Canvas 2.3.1 组合镜头结构化版。本技能完整继承运行时提供的 Studio Canvas 2.3 卡片字段、顺序、时长、连续性、四类钉子与 Engine Prompt 规则；不得改回 V1，也不得删减 seedanceCard。\n\n【shotSegments 协议】\n- 单镜头仍输出一条 shotPrompt，shotSegments 可以省略。\n- 当源镜头包含 mergedMembers，或一张卡合并两个及以上源分镜时，外层仍只输出一条连续 shotPrompt，但必须在同一项内新增 shotSegments。\n- shotSegments 数量必须与被合并的源分镜数量完全一致，顺序、shot_id 必须逐一对应源分镜，禁止漏镜、重号、虚构编号或平均复制同一画面。\n- 每个 segment 固定包含且只承担这些字段：shot_id、start_sec、end_sec、shot_type、camera、composition、lighting、action、keyframe、image_prompt。\n- start_sec 与 end_sec 必须首尾连续、无重叠、无空洞；第一段从0开始，最后一段结束时间等于 seedanceCard 首行总时长。\n- shot_type、camera、composition、lighting、action、keyframe 必须来自对应源分镜及组合卡的同一时间段，不能把相邻镜头内容串格。\n- image_prompt 是供图像模型生成单格画面的静态执行提示词：只写该段最具识别力的决定性关键帧，明确画幅、景别、主体、空间、构图、光线、动作瞬间与落点。禁止时间线、运镜过程、声音、对白轨、先后多阶段动作、字幕、UI、水印和画内说明文字。\n- shotSegments 是 Studio Card 的机器可读投影，不替代 seedanceCard，也不改变外层 prompt 仍是一条连续视频提示词。\n\n【组合镜头自检】\n1. 外层 shotPrompts 仍是一条，不得拆成多次视频生成。\n2. shotSegments 是否逐一覆盖全部 mergedMembers。\n3. 每段时间是否连续且总和等于卡片总时长。\n4. 每个 image_prompt 是否只对应一个静态关键帧并可独立生成。\n5. 六个镜头必须得到六个不同切片；四镜、九镜同理按实际数量输出。\n\n最终只输出合法 PromptOutput JSON，不要 Markdown、解释或校验报告。",
+  "export_extensions": [
+    {
+      "label": "复制完整提示词",
+      "capability": "prompt_copy_all"
+    },
+    {
+      "label": "同步到视频引擎",
+      "capability": "prompt_sync_video"
+    }
+  ]
+}

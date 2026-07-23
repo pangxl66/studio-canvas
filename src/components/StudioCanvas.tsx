@@ -531,7 +531,8 @@ export function StudioCanvas() {
       lastPaneClickRef.current = null;
       setContextMenu(null);
       setPaneCreateMenu(null);
-      const openDetail = n.type === 'department' || n.type === 'shotList';
+      const openDetail =
+        (n.type === 'department' && n.data.type !== 'prompt') || n.type === 'shotList';
       focusNode(n.id, { openDetail });
     },
     [focusNode],

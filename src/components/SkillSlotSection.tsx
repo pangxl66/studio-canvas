@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   DEFAULT_PROMPT_STYLE_SKILL_ID,
   getFixedSkillIdsForPipelineKind,
@@ -30,9 +31,9 @@ const folderLabel: Record<string, string> = {
   prompt: '提示词',
 };
 
-function skillDisplayLabel(id: string): string {
+function skillDisplayLabel(id: string, compact = false): string {
   const skill = getSkillById(id);
-  return skill ? `${skill.name} (${id})` : id;
+  return skill ? (compact ? skill.name : `${skill.name} (${id})`) : id;
 }
 
 export function SkillSlotSection(props: {
@@ -40,8 +41,9 @@ export function SkillSlotSection(props: {
   kind: PipelineKind;
   mounted: string[];
   patchNodeData: (id: string, patch: Partial<StudioNodeData>, bumpVersion?: boolean) => void;
+  compact?: boolean;
 }) {
-  const { nodeId, kind, mounted, patchNodeData } = props;
+  const { nodeId, kind, mounted, patchNodeData, compact = false } = props;
   const [open, setOpen] = useState(false);
   const isPromptKind = kind === 'prompt';
   const catalog = useMemo(() => listSkillsForPipelineKind(kind), [kind]);
@@ -113,7 +115,7 @@ export function SkillSlotSection(props: {
     return (
       <li key={id} className={chipClass}>
         <span className="skill-slot__chip-label">
-          {skillDisplayLabel(id)}
+          {skillDisplayLabel(id, compact)}
           {options?.styleSlot ? <span className="skill-slot__chip-tag">规范槽</span> : null}
           {fixed ? <span className="skill-slot__chip-tag">固定</span> : null}
         </span>
@@ -131,15 +133,21 @@ export function SkillSlotSection(props: {
   };
 
   return (
-    <div className="detail-panel__section detail-panel__section--skill">
+    <div
+      className={`detail-panel__section detail-panel__section--skill${
+        compact ? ' skill-slot--compact' : ''
+      }`}
+    >
       <div className="detail-panel__hint">{isPromptKind ? 'Prompt 规范技能槽' : '技能插槽'}</div>
-      <p className="detail-panel__tip">
-        {isPromptKind
-          ? '提示词节点只显示提示词类 Skill。主规范槽决定最终提示词结构；增强技能只补风格、动作、清晰度等偏好，不能改掉主结构。'
-            : kind === 'storyboard'
-              ? '分镜节点只显示分镜类 Skill，一次只启用一个；选择新的分镜 Skill 会替换当前分镜规范。'
-              : '编剧节点只显示编剧类 Skill。执行时 LLM 的 system = 部门基础指令 + 下方挂载技能片段，user 侧为任务输入。'}
-      </p>
+      {!compact ? (
+        <p className="detail-panel__tip">
+          {isPromptKind
+            ? '提示词节点只显示提示词类 Skill。主规范槽决定最终提示词结构；增强技能只补风格、动作、清晰度等偏好，不能改掉主结构。'
+              : kind === 'storyboard'
+                ? '分镜节点只显示分镜类 Skill，一次只启用一个；选择新的分镜 Skill 会替换当前分镜规范。'
+                : '编剧节点只显示编剧类 Skill。执行时 LLM 的 system = 部门基础指令 + 下方挂载技能片段，user 侧为任务输入。'}
+        </p>
+      ) : null}
 
       {isPromptKind ? (
         <>
@@ -173,76 +181,79 @@ export function SkillSlotSection(props: {
         {isPromptKind ? '选择规范 / 挂载增强…' : '选择 / 下载技能…'}
       </button>
 
-      {open ? (
-        <div
-          className="skill-picker-backdrop"
-          role="presentation"
-          onClick={() => setOpen(false)}
-          onKeyDown={(e) => e.key === 'Escape' && setOpen(false)}
-        >
-          <div
-            className="skill-picker"
-            role="dialog"
-            aria-modal="true"
-            aria-label={isPromptKind ? 'Prompt 技能槽' : '技能列表'}
-            onClick={(e) => e.stopPropagation()}
-            onPointerDown={(e) => e.stopPropagation()}
-          >
-            <div className="skill-picker__head">
-              <span className="skill-picker__title">{isPromptKind ? 'Prompt 技能槽' : '挂载技能'}</span>
-              <button type="button" className="skill-picker__close" onClick={() => setOpen(false)}>
-                关闭
-              </button>
-            </div>
-            <ul className="skill-picker__list">
-              {catalog.map((skill) => {
-                const styleSlot = isPromptStyleSkillId(skill.id);
-                const storyboardSlot = kind === 'storyboard' && skill.folder === 'storyboard';
-                const on = styleSlot ? activePromptStyleId === skill.id : normalizedMounted.includes(skill.id);
-                const fixed = fixedSet.has(skill.id);
-                const rowClass = styleSlot ? 'skill-picker__row skill-picker__row--style' : 'skill-picker__row';
-                return (
-                  <li key={skill.id} className={rowClass}>
-                    <div className="skill-picker__meta">
-                      <div className="skill-picker__name">
-                        {skill.name}
-                        <span className="skill-picker__badge">
-                          {styleSlot ? '提示词规范' : folderLabel[skill.folder] ?? skill.folder}
-                        </span>
-                        <span className="skill-picker__ver">v{skill.version}</span>
-                      </div>
-                      <div className="skill-picker__desc">{skill.description || '—'}</div>
-                      <code className="skill-picker__id">{skill.id}</code>
-                    </div>
-                    <div className="skill-picker__actions">
-                      {fixed ? (
-                        <button type="button" className="skill-picker__btn skill-picker__btn--muted" disabled>
-                          已固定
-                        </button>
-                      ) : on ? (
-                        <button type="button" className="skill-picker__btn skill-picker__btn--muted" disabled>
-                          {styleSlot ? '当前规范' : storyboardSlot ? '当前' : '已挂载'}
-                        </button>
-                      ) : (
-                        <button type="button" className="skill-picker__btn" onClick={() => mount(skill.id)}>
-                          {styleSlot ? '使用规范' : storyboardSlot ? '使用' : '挂载'}
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        className="skill-picker__btn skill-picker__btn--ghost"
-                        onClick={() => downloadSkillJson(skill)}
-                      >
-                        下载 JSON
-                      </button>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          </div>
-        </div>
-      ) : null}
+      {open
+        ? createPortal(
+            <div
+              className="skill-picker-backdrop"
+              role="presentation"
+              onClick={() => setOpen(false)}
+              onKeyDown={(e) => e.key === 'Escape' && setOpen(false)}
+            >
+              <div
+                className="skill-picker"
+                role="dialog"
+                aria-modal="true"
+                aria-label={isPromptKind ? 'Prompt 技能槽' : '技能列表'}
+                onClick={(e) => e.stopPropagation()}
+                onPointerDown={(e) => e.stopPropagation()}
+              >
+                <div className="skill-picker__head">
+                  <span className="skill-picker__title">{isPromptKind ? 'Prompt 技能槽' : '挂载技能'}</span>
+                  <button type="button" className="skill-picker__close" onClick={() => setOpen(false)}>
+                    关闭
+                  </button>
+                </div>
+                <ul className="skill-picker__list">
+                  {catalog.map((skill) => {
+                    const styleSlot = isPromptStyleSkillId(skill.id);
+                    const storyboardSlot = kind === 'storyboard' && skill.folder === 'storyboard';
+                    const on = styleSlot ? activePromptStyleId === skill.id : normalizedMounted.includes(skill.id);
+                    const fixed = fixedSet.has(skill.id);
+                    const rowClass = styleSlot ? 'skill-picker__row skill-picker__row--style' : 'skill-picker__row';
+                    return (
+                      <li key={skill.id} className={rowClass}>
+                        <div className="skill-picker__meta">
+                          <div className="skill-picker__name">
+                            {skill.name}
+                            <span className="skill-picker__badge">
+                              {styleSlot ? '提示词规范' : folderLabel[skill.folder] ?? skill.folder}
+                            </span>
+                            <span className="skill-picker__ver">v{skill.version}</span>
+                          </div>
+                          <div className="skill-picker__desc">{skill.description || '—'}</div>
+                          <code className="skill-picker__id">{skill.id}</code>
+                        </div>
+                        <div className="skill-picker__actions">
+                          {fixed ? (
+                            <button type="button" className="skill-picker__btn skill-picker__btn--muted" disabled>
+                              已固定
+                            </button>
+                          ) : on ? (
+                            <button type="button" className="skill-picker__btn skill-picker__btn--muted" disabled>
+                              {styleSlot ? '当前规范' : storyboardSlot ? '当前' : '已挂载'}
+                            </button>
+                          ) : (
+                            <button type="button" className="skill-picker__btn" onClick={() => mount(skill.id)}>
+                              {styleSlot ? '使用规范' : storyboardSlot ? '使用' : '挂载'}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="skill-picker__btn skill-picker__btn--ghost"
+                            onClick={() => downloadSkillJson(skill)}
+                          >
+                            下载 JSON
+                          </button>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

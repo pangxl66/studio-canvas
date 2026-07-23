@@ -7,6 +7,10 @@ import type { Edge } from '@xyflow/react';
 import type { StudioRFNode } from '@/types/reactFlow';
 import type { NodeKind, PromptOutput, StoryboardOutput, StudioNodeData, WritingOutput } from '@/types/studio';
 import { formatPrompt, formatSeedanceCards } from '@/utils/promptFormat';
+import {
+  resolvePromptAssetPlaceholders,
+  sanitizePromptAssetPlaceholders,
+} from '@/utils/promptAssetRefs';
 import { parseShotListItemOutputHandleId } from '@/utils/shotListWire';
 import { mergeStoryboardShotSlice } from '@/utils/storyboardSeedance';
 
@@ -107,11 +111,68 @@ export function departmentAssetAsInputText(
     const o = data.output as PromptOutput;
     if (typeof o.userTemplate !== 'string') return null;
     if (consumer === 'prompt_review_node') {
+      const sourceStoryboard = tryParseStoryboardOutput(o.userTemplate);
+      const fallbackCharacterNames = (value: unknown): string[] => {
+        const subject = String(value ?? '')
+          .split(/[，,；;。]/, 1)[0]
+          .replace(/(可见|身份|人数|保持|稳定|相对|位置|画面|镜头|角色).*$/, '')
+          .trim();
+        return subject
+          .split(/、|与|及|\//)
+          .map((item) => item.trim().replace(/[（(：:].*$/, '').trim())
+          .filter((item) => item.length > 0 && item.length <= 12);
+      };
+      const fallbackSceneNames = (value: unknown): string[] => {
+        const scene = String(value ?? '')
+          .split(/[，,；;。]/, 1)[0]
+          .replace(/[（(：:].*$/, '')
+          .trim();
+        return scene.length > 0 && scene.length <= 16 ? [scene] : [];
+      };
+      const reviewShotPrompts = (o.shotPrompts ?? []).map((pack, index) => {
+        const sourceShot =
+          sourceStoryboard?.shots.find((shot) => String(shot.id) === String(pack.shot_id)) ??
+          sourceStoryboard?.shots[index];
+        const sourceShots = sourceShot?.mergedMembers?.length
+          ? sourceShot.mergedMembers
+          : sourceShot
+            ? [sourceShot]
+            : [];
+        const characterNames = Array.from(
+          new Set(
+            sourceShots
+              .flatMap((shot) => shot.characters ?? [])
+              .map((item) => item.trim())
+              .filter(Boolean),
+          ),
+        );
+        const sceneNames = Array.from(
+          new Set(
+            sourceShots
+              .map((shot) => shot.sceneRef?.trim() ?? '')
+              .filter(Boolean),
+          ),
+        );
+        return {
+          ...pack,
+          seedanceCard: resolvePromptAssetPlaceholders(pack.seedanceCard ?? '', {
+            characterNames:
+              characterNames.length > 0
+                ? characterNames
+                : fallbackCharacterNames(pack.dimensions?.角色),
+            sceneNames:
+              sceneNames.length > 0
+                ? sceneNames
+                : fallbackSceneNames(pack.dimensions?.场景),
+          }),
+        };
+      });
       const seedanceCards =
-        Array.isArray(o.shotPrompts) && o.shotPrompts.length > 0
-          ? formatSeedanceCards(o.shotPrompts, null).trim()
+        reviewShotPrompts.length > 0
+          ? formatSeedanceCards(reviewShotPrompts, null).trim()
           : '';
-      return seedanceCards || formatPrompt(o).trim() || null;
+      const reviewText = seedanceCards || formatPrompt(o).trim();
+      return reviewText ? sanitizePromptAssetPlaceholders(reviewText) : null;
     }
     const shotBlock =
       Array.isArray(o.shotPrompts) && o.shotPrompts.length > 0
@@ -196,6 +257,25 @@ function imageNodeAsStoryboardReferenceText(node: StudioRFNode, index: number): 
   ].join('\n');
 }
 
+export function imageNodeAsPromptColorReferenceText(
+  node: StudioRFNode,
+  index: number,
+): string | null {
+  if (node.type !== 'imageNode' || node.data.type !== 'image_node') return null;
+  const label = node.data.label?.trim() || `色彩表 ${index + 1}`;
+  const fileName = node.data.imageFileName?.trim();
+  const summary = node.data.imageColorAnalysisSummary?.trim();
+  if (!summary && !node.data.imageDataUrl) return null;
+  return [
+    `【色彩表参考图 ${index + 1}】${label}${fileName ? `（${fileName}）` : ''}`,
+    summary
+      ? `色彩与灯光分析：${summary}`
+      : '色彩与灯光分析：待视觉模型读取。生成提示词前必须先识别主色底、辅助色、点睛色、冷暖关系、明暗层次、对比度、高光、暗部和光线软硬。',
+    '色彩表用途约束：本图只控制“灯光布置与基调”以及 Engine Prompt 中必要的色彩光影结果；不得把图中人物、场景、道具、文字或构图事件带入当前镜头。',
+    '挂载约束：色彩表属于“仅作灯光与色彩参考”，禁止进入挂载，禁止替换源分镜中的角色、场景、道具和剧情事实。',
+  ].join('\n');
+}
+
 export function mergedTextInputForDepartment(
   deptId: string,
   nodes: StudioRFNode[],
@@ -228,11 +308,15 @@ export function mergedTextInputForDepartment(
     if (src.type === 'textNode') {
       parts.push(src.data.raw_text ?? src.data.input ?? '');
     } else if (src.type === 'imageNode') {
-      if (consumerKind !== 'storyboard') continue;
       if (e.sourceHandle != null && e.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) continue;
       const imageRefs = connectedImageNodesForDepartment(deptId, nodes, edges);
       const index = Math.max(0, imageRefs.findIndex((item) => item.id === src.id));
-      const block = imageNodeAsStoryboardReferenceText(src, index);
+      const block =
+        consumerKind === 'storyboard'
+          ? imageNodeAsStoryboardReferenceText(src, index)
+          : consumerKind === 'prompt'
+            ? imageNodeAsPromptColorReferenceText(src, index)
+            : null;
       if (block != null && block.length > 0) parts.push(block);
     } else if (src.type === 'storyboardFile') {
       if (e.sourceHandle != null && e.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) continue;

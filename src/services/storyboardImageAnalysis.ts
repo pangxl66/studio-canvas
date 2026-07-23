@@ -16,6 +16,8 @@ type ImageStoryboardRow = {
   description?: string;
   content?: string;
   sceneRef?: string;
+  characters?: string[] | string;
+  props?: string[] | string;
   action?: string;
   sound?: string;
   note?: string;
@@ -93,6 +95,18 @@ function asStringOrNumber(value: unknown): string | number | undefined {
   return undefined;
 }
 
+function asTextList(value: unknown): string[] | undefined {
+  const raw = Array.isArray(value) ? value : typeof value === 'string' ? value.split(/[、,，;；|/]+/u) : [];
+  const values = raw
+    .map((item) => {
+      if (typeof item === 'string' || typeof item === 'number') return String(item).trim();
+      if (item && typeof item === 'object') return asText((item as Record<string, unknown>).name);
+      return '';
+    })
+    .filter(Boolean);
+  return values.length ? [...new Set(values)] : undefined;
+}
+
 function normalizeImageStoryboardRow(raw: unknown): ImageStoryboardRow {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
   const source = raw as Record<string, unknown>;
@@ -118,6 +132,8 @@ function normalizeImageStoryboardRow(raw: unknown): ImageStoryboardRow {
       typeof pickField(source, ['sceneRef', 'scene', '场次', '场景']) === 'string'
         ? String(pickField(source, ['sceneRef', 'scene', '场次', '场景']))
         : undefined,
+    characters: asTextList(pickField(source, ['characters', 'character', 'roles', 'role', '角色', '人物', '出场人物'])),
+    props: asTextList(pickField(source, ['props', 'prop', '道具', '关键道具', '道具服化'])),
     action:
       typeof pickField(source, ['action', '动作', '动作调度']) === 'string'
         ? String(pickField(source, ['action', '动作', '动作调度']))
@@ -157,6 +173,8 @@ function normalizeShot(row: ImageStoryboardRow, index: number): StoryboardShot |
     description: description || action || note,
     content,
     sceneRef: sceneRef || undefined,
+    characters: asTextList(row.characters),
+    props: asTextList(row.props),
     action: action || undefined,
     sound: sound || undefined,
     durationSec: parseDurationSec(row.durationSec),
@@ -184,7 +202,7 @@ function buildSystemPrompt(): string {
     'If a cell is partially readable, prefer a shorter clean phrase over a broken fragment.',
     'Return a single JSON object with keys: sheetTitle, summary, shots.',
     'shots must be an array of objects using only these keys:',
-    'id, shotNo, type, movement, description, content, sceneRef, action, sound, note, durationSec',
+    'id, shotNo, type, movement, description, content, sceneRef, characters, props, action, sound, note, durationSec',
     'Field mapping rules:',
     '- shotNo: 镜头号 / 镜号 / shot id',
     '- type: 景别',
@@ -192,6 +210,8 @@ function buildSystemPrompt(): string {
     '- description: 制作内容描述 / 画面描述 / 内容描述',
     '- content: 台词 / 对白',
     '- sceneRef: 场次 / 场景',
+    '- characters: 角色 / 人物 / 出场人物，始终返回字符串数组',
+    '- props: 道具 / 关键道具，始终返回字符串数组',
     '- action: 动作 / 调度',
     '- sound: 音效 / 声音提示',
     '- note: 备注 / 补充说明',
@@ -222,7 +242,7 @@ function buildRepairPrompt(originalPrompt: string, rawContent: string): string {
     rawContent.trim().slice(0, 24_000) || '(empty)',
     '',
     '[Required JSON shape]',
-    '{"sheetTitle":"","summary":"","shots":[{"id":"","shotNo":"","type":"","movement":"","description":"","content":"","sceneRef":"","action":"","sound":"","note":"","durationSec":""}]}',
+    '{"sheetTitle":"","summary":"","shots":[{"id":"","shotNo":"","type":"","movement":"","description":"","content":"","sceneRef":"","characters":[],"props":[],"action":"","sound":"","note":"","durationSec":""}]}',
   ].join('\n');
 }
 
@@ -533,7 +553,7 @@ async function repairFallbackStructuredContent(params: {
     '请把下面这段“图片表格识别结果”整理成合法 JSON。',
     '不要解释，不要 markdown，不要补剧情。',
     '只输出一个 JSON 对象，字段固定为：sheetTitle, summary, shots。',
-    'shots 中每项字段固定为：id, shotNo, type, movement, description, content, sceneRef, action, sound, note, durationSec。',
+    'shots 中每项字段固定为：id, shotNo, type, movement, description, content, sceneRef, characters, props, action, sound, note, durationSec。characters 和 props 必须是字符串数组。',
     '',
     '[待整理内容]',
     params.rawContent.trim().slice(0, 48_000) || '(empty)',

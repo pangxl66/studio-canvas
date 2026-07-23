@@ -39,13 +39,17 @@ export function createCanvasStoreSlice(set: StudioSet, get: StudioGet): CanvasSl
     consumeFitRequest: () => set({ requestFitNodeId: null }),
 
     focusNode: (id, opts) => {
-      const openDetail = opts?.openDetail !== false;
-      set((state) => ({
-        selectedNodeId: id,
-        detailOpen: openDetail,
-        activeNodeId: id,
-        nodes: state.nodes.map((node) => ({ ...node, selected: node.id === id })),
-      }));
+      set((state) => {
+        const target = state.nodes.find((node) => node.id === id);
+        const promptOwnsItsControls =
+          target?.type === 'department' && target.data.type === 'prompt';
+        return {
+          selectedNodeId: id,
+          detailOpen: opts?.openDetail !== false && !promptOwnsItsControls,
+          activeNodeId: id,
+          nodes: state.nodes.map((node) => ({ ...node, selected: node.id === id })),
+        };
+      });
     },
 
     repositionNodes: (patches) => {

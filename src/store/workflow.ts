@@ -8,6 +8,13 @@ import type { ApprovedAsset, NodeKind, NodeStatus, WritingOutput } from '@/types
  */
 
 export const PIPELINE_INITIAL_STATUS: NodeStatus = 'NOT_STARTED';
+/** Prompt 生成完成后交由独立审核节点处理，不再把 Prompt 自身标记为审核通过。 */
+export const PROMPT_GENERATED_STATUS: NodeStatus = 'WAITING_REVIEW';
+
+/** 兼容旧项目：Prompt 过去会把“生成完成”错误存成 APPROVED。 */
+export function normalizePromptDepartmentStatus(status: NodeStatus): NodeStatus {
+  return status === 'APPROVED' ? PROMPT_GENERATED_STATUS : status;
+}
 
 /** 允许的部门流水线状态边（不含 text 节点） */
 const ALLOWED_TRANSITIONS: Record<NodeStatus, NodeStatus[]> = {
@@ -23,13 +30,10 @@ const ALLOWED_TRANSITIONS: Record<NodeStatus, NodeStatus[]> = {
 };
 
 /**
- * 标准流转：NOT_STARTED → IN_PROGRESS（AI）→ WAITING_REVIEW → APPROVED | REJECTED
- * Prompt 节点例外：生成完成后可直接从 IN_PROGRESS 进入 APPROVED，跳过总监审核。
+ * 标准流转：NOT_STARTED → IN_PROGRESS（AI）→ WAITING_REVIEW → APPROVED | REJECTED。
+ * Prompt 也停在 WAITING_REVIEW，由独立的提示词审核节点承接后续操作。
  */
-export function canTransitionPipelineStatus(from: NodeStatus, to: NodeStatus, kind?: NodeKind): boolean {
-  if (kind === 'prompt' && from === 'IN_PROGRESS' && to === 'APPROVED') {
-    return true;
-  }
+export function canTransitionPipelineStatus(from: NodeStatus, to: NodeStatus, _kind?: NodeKind): boolean {
   return ALLOWED_TRANSITIONS[from]?.includes(to) ?? false;
 }
 

@@ -147,6 +147,10 @@ export interface StoryboardShot {
   content: string;
   /** 回溯场次/场记（可选） */
   sceneRef?: string;
+  /** 分镜表中的出场角色；导入表格或图片表格识别时保留。 */
+  characters?: string[];
+  /** 分镜表中的关键道具；导入表格或图片表格识别时保留。 */
+  props?: string[];
   /** 画内动作调度（可选，与 movement 区分） */
   action?: string;
   sound?: string;
@@ -179,6 +183,25 @@ export interface PromptShotDimensions {
   连贯性?: string;
 }
 
+/**
+ * A machine-readable visual slice inside one combined video prompt.
+ * The storyboard grid consumes these static keyframes without reparsing the long Studio Card.
+ */
+export interface PromptShotSegment {
+  /** Exact source storyboard shot id (for example "1", "S1-02"). */
+  shot_id: string;
+  start_sec: number;
+  end_sec: number;
+  shot_type: string;
+  camera: string;
+  composition: string;
+  lighting: string;
+  action: string;
+  keyframe: string;
+  /** One decisive, static image prompt. Must not contain a timeline or audio direction. */
+  image_prompt: string;
+}
+
 /** 单镜头输出：适配 AI 视频引擎（如 Seeddance / SVD） */
 export interface PromptShotPack {
   shot_id: string;
@@ -191,6 +214,8 @@ export interface PromptShotPack {
   scene_asset_ids?: string[];
   /** 可选：直接面向 Seedance 的卡片文本 */
   seedanceCard?: string;
+  /** 组合镜头的逐镜静态执行切片；单镜头可省略。 */
+  shotSegments?: PromptShotSegment[];
 }
 
 export interface PromptOutput {
@@ -205,6 +230,53 @@ export interface PromptOutput {
 export interface AssistantHistoryEntry {
   role: 'user' | 'assistant';
   content: string;
+}
+
+export interface StoryboardGridPanelMapping {
+  panelIndex: number;
+  sourceNodeId: string;
+  sourceLabel: string;
+  shotId: number;
+  shotNo?: string;
+  /** Connected Prompt node provenance for this panel, when a shot prompt was matched. */
+  promptSourceNodeId?: string;
+  promptShotId?: string;
+  promptMatchMode?: 'id' | 'order';
+}
+
+export interface StoryboardGridImagePage {
+  id: string;
+  imageDataUrl: string;
+  model: string;
+  size: string;
+  width?: number;
+  height?: number;
+  /** Number of connected reference images actually accepted by the image request. */
+  referenceImageCount?: number;
+  /** Ordered reference labels sent for this page, for identity/debug visibility. */
+  referenceLabels?: string[];
+  /** direct means every shot was generated separately before non-cropping composition. */
+  frameGenerationMode?: 'direct' | 'merged';
+  /** Frames whose provider did not accept the requested native 16:9/9:16 size. */
+  nativeFrameFallbackCount?: number;
+  panelCount: number;
+  pageIndex: number;
+  totalPages: number;
+  completedAt: number;
+  panels: StoryboardGridPanelMapping[];
+}
+
+export type StoryboardReferenceKind = 'character' | 'scene' | 'prop';
+
+/**
+ * 影视分镜节点上的参考图绑定。绑定保存在目标节点上，同一张图片可以在不同分镜节点中承担不同用途。
+ */
+export interface StoryboardReferenceBinding {
+  imageNodeId: string;
+  name: string;
+  kind: StoryboardReferenceKind;
+  entityId?: string;
+  entityName?: string;
 }
 
 /**
@@ -280,15 +352,46 @@ export type StudioNodeData = {
   imageDataUrl?: string;
   imageMimeType?: string;
   imageFileName?: string;
+  /** 图片节点当前预览图的原始像素尺寸，用于按导入比例渲染节点。 */
+  imageWidth?: number;
+  imageHeight?: number;
   imageAnalysisSummary?: string;
-  /** 图片节点：由上游分镜信息生成九宫格时附加的用户风格要求。 */
+  /**
+   * 图片节点连入 Prompt 节点时生成的色彩表分析。
+   * 与场景参考分析分开缓存，避免同一图片在不同消费者之间混用职责。
+   */
+  imageColorAnalysisSummary?: string;
+  /** 图片节点：由上游分镜信息生成动态宫格时附加的用户风格要求。 */
   imageGenerationPrompt?: string;
-  /** 图片节点：最近一次九宫格生成所用模型与来源信息。 */
+  /** 图片节点：最近一次分镜宫格生成所用模型与来源信息。 */
   imageGenerationModel?: string;
   imageGenerationSourceShotIds?: number[];
   imageGenerationSourceNodeIds?: string[];
+  imageGenerationReferenceSignature?: string;
+  /** Signature of connected shot prompts plus matched storyboard content used by the last image generation. */
+  imageGenerationPromptSignature?: string;
+  imageGenerationPromptSourceNodeIds?: string[];
+  imageGenerationPromptMatchedCount?: number;
+  /** 实际传给 image2 编辑请求的参考图数量；用于避免“界面已绑定但请求未携带”。 */
+  imageGenerationReferenceCount?: number;
+  /** Last request's real reference order, e.g. 角色:老和尚 → 场景:禅房. */
+  imageGenerationReferenceLabels?: string[];
+  /** 影视分镜图片实际生成时选择的目标画幅，用于切换画幅后的过期提示。 */
+  imageGenerationAspectRatio?: '16:9' | '9:16';
   imageGenerationCompletedAt?: number;
   imageGenerationStatus?: 'idle' | 'generating';
+  /** 动态分镜宫格结果；每页最多 9 个镜头，超过 9 个时按连线顺序分页。 */
+  storyboardGridImages?: StoryboardGridImagePage[];
+  /** 影视分镜节点：连入图片与剧本分解表角色/场景/道具的命名绑定。 */
+  storyboardReferenceBindings?: StoryboardReferenceBinding[];
+  imageGenerationCompletedPages?: number;
+  imageGenerationTotalPages?: number;
+  /** 图片节点作为影视分镜的独立结果展示节点时使用。 */
+  imageDisplayMode?: 'storyboard-output';
+  generatedFromStoryboardNodeId?: string;
+  generatedStoryboardPageIndex?: number;
+  /** 影视分镜节点自动创建/复用的独立图片结果节点。 */
+  storyboardOutputImageNodeIds?: string[];
   videoDataUrl?: string;
   videoMimeType?: string;
   videoFileName?: string;

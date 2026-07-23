@@ -1,6 +1,7 @@
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import { memo, useCallback, useState, type MouseEvent } from 'react';
 import { ReviewFeedbackDialog } from '@/components/ReviewFeedbackDialog';
+import { SkillSlotSection } from '@/components/SkillSlotSection';
 import { useStudioStore } from '@/store/useStudioStore';
 import type { StudioNodeData } from '@/types/studio';
 import {
@@ -24,6 +25,12 @@ const RefreshIcon = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
     <path d="M21 12a9 9 0 1 1-2.64-6.36" />
     <path d="M21 3v6h-6" />
+  </svg>
+);
+
+const StopIcon = () => (
+  <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+    <rect x="5" y="5" width="14" height="14" rx="2" />
   </svg>
 );
 
@@ -116,6 +123,7 @@ export {
 
 function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
   const [reviewOpen, setReviewOpen] = useState(false);
+  const isPromptNode = data.type === 'prompt';
 
   const dept =
     data.department === 'WRITING'
@@ -133,12 +141,18 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
     useCallback((s) => departmentNodeHasInputWire(id, s.edges, s.nodes), [id]),
   );
 
-  const displayStatus =
-    data.type === 'prompt' && (data.status === 'WAITING_REVIEW' || data.status === 'REVIEWED')
-      ? 'APPROVED'
-      : data.status;
+  const displayStatus = data.status;
+  const promptHasGenerated =
+    data.type === 'prompt' &&
+    (data.status === 'WAITING_REVIEW' ||
+      data.status === 'REVIEWED' ||
+      data.status === 'APPROVED');
   const statusDisplay =
-    displayStatus === 'NOT_STARTED' && hasInputFeed ? '输入已挂载' : displayStatus;
+    promptHasGenerated
+      ? '已生成'
+      : displayStatus === 'NOT_STARTED' && hasInputFeed
+        ? '输入已挂载'
+        : displayStatus;
 
   const canExecute =
     (data.type === 'writing' || data.type === 'storyboard' || data.type === 'prompt') &&
@@ -165,9 +179,39 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
       const shotItemHandles = incoming
         .map((edge) => parseShotListItemOutputHandleId(edge.sourceHandle))
         .filter((wireId): wireId is string => Boolean(wireId));
-      if (shotItemHandles.length >= 2) return '多镜头组合';
-      if (shotItemHandles.length === 1) return '单镜头';
-      return null;
+      const colorTableCount = incoming.filter((edge) => {
+        const source = s.nodes.find((node) => node.id === edge.source);
+        return source?.type === 'imageNode' && source.data.type === 'image_node';
+      }).length;
+      const storyboardSourceCount = new Set(
+        incoming
+          .filter((edge) => {
+            const source = s.nodes.find((node) => node.id === edge.source);
+            return (
+              source?.type === 'shotList' ||
+              source?.type === 'storyboardFile' ||
+              source?.data.type === 'storyboard' ||
+              source?.data.type === 'shot_list_node' ||
+              source?.data.type === 'storyboard_file_node'
+            );
+          })
+          .map((edge) => edge.source),
+      ).size;
+      const textSourceCount = new Set(
+        incoming
+          .filter((edge) => {
+            const source = s.nodes.find((node) => node.id === edge.source);
+            return source?.type === 'textNode' || source?.data.type === 'text_node';
+          })
+          .map((edge) => edge.source),
+      ).size;
+      const badges = [
+        shotItemHandles.length > 0 ? `镜头 ${shotItemHandles.length}个` : '',
+        storyboardSourceCount > 0 ? `分镜源 ${storyboardSourceCount}个` : '',
+        colorTableCount > 0 ? `色彩表 ${colorTableCount}张` : '',
+        textSourceCount > 0 ? `文本 ${textSourceCount}个` : '',
+      ].filter(Boolean);
+      return badges.length ? badges.join(' · ') : null;
     }, [data.type, id]),
   );
 
@@ -180,10 +224,10 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
         return;
       }
       const st = useStudioStore.getState();
-      st.focusNode(id, { openDetail: true });
+      st.focusNode(id, { openDetail: !isPromptNode });
       void st.executeNodeTask(id);
     },
-    [id, data.onExecute],
+    [id, data.onExecute, isPromptNode],
   );
 
   const submitLeaderReviewFeedback = useStudioStore((s) => s.submitLeaderReviewFeedback);
@@ -191,6 +235,8 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
   const runReviewedOptimization = useStudioStore((s) => s.runReviewedOptimization);
   const approveReviewedAsIs = useStudioStore((s) => s.approveReviewedAsIs);
   const regenerateNode = useStudioStore((s) => s.regenerateNode);
+  const stopNodeTask = useStudioStore((s) => s.stopNodeTask);
+  const patchNodeData = useStudioStore((s) => s.patchNodeData);
 
   const handleReviewInput = useCallback(
     (e: MouseEvent) => {
@@ -233,6 +279,15 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
     [id, regenerateNode],
   );
 
+  const handleStop = useCallback(
+    (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      stopNodeTask(id);
+    },
+    [id, stopNodeTask],
+  );
+
   const flash = data.pipeline_decision_flash;
   const flashClass = (() => {
     if (!flash || flash.until <= Date.now()) return '';
@@ -242,7 +297,9 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
 
   return (
     <div
-      className={`dept-node ${selected ? 'dept-node--selected' : ''} dept-node--border-${displayStatus}${
+      className={`dept-node${isPromptNode ? ' dept-node--prompt' : ''} ${
+        selected ? 'dept-node--selected' : ''
+      } dept-node--border-${displayStatus}${
         data.status === 'IN_PROGRESS' ? ' dept-node--streaming' : ''
       }${flashClass}`}
     >
@@ -267,7 +324,11 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
         position={Position.Left}
         id={DEPT_INPUT_HANDLE_ID}
         className={showPullHandle ? 'dept-handle dept-handle--in' : 'dept-handle'}
-        title="Input：接入文本卡片或上游部门输出。"
+        title={
+          data.type === 'prompt'
+            ? 'Input：接入分镜、文本或图片色彩表。'
+            : 'Input：接入文本卡片或上游部门输出。'
+        }
       />
 
       <header className="dept-node__head">
@@ -300,6 +361,19 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
               <RefreshIcon />
             </button>
           ) : null}
+          {showPullHandle && data.status === 'IN_PROGRESS' ? (
+            <button
+              type="button"
+              className="dept-node__stop nodrag nopan"
+              onPointerDown={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={handleStop}
+              title="停止生成"
+              aria-label="停止生成"
+            >
+              <StopIcon />
+            </button>
+          ) : null}
           <span
             className={`dept-node__status dept-node__status--${displayStatus}${
               displayStatus === 'NOT_STARTED' && hasInputFeed ? ' dept-node__status--feed' : ''
@@ -313,9 +387,30 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
       <div className="dept-node__body">
         <div className="dept-node__label">{displayLabel}</div>
         {promptSourceBadge ? <div className="dept-node__source-badge">{promptSourceBadge}</div> : null}
-        <p className="dept-node__preview">{previewText(data)}</p>
-        <div className="dept-node__meta">v{data.version} · Input / Output 资产</div>
+        {!isPromptNode ? <p className="dept-node__preview">{previewText(data)}</p> : null}
+        <div className="dept-node__meta">
+          {isPromptNode
+            ? data.status === 'APPROVED'
+              ? `v${data.version} · 已生成并送入审核`
+              : `v${data.version} · 生成完成后自动打开审核节点`
+            : `v${data.version} · Input / Output 资产`}
+        </div>
       </div>
+
+      {isPromptNode ? (
+        <div
+          className="prompt-node__skill-controls nodrag nopan"
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <SkillSlotSection
+            nodeId={id}
+            kind="prompt"
+            mounted={data.mounted_skills ?? []}
+            patchNodeData={patchNodeData}
+            compact
+          />
+        </div>
+      ) : null}
 
       {canReviewOnCanvas ? (
         <div className="dept-node__review-actions nodrag nopan" onPointerDown={(e) => e.stopPropagation()}>

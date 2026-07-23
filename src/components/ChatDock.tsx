@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useStudioStore } from '@/store/useStudioStore';
 import type { StudioRFNode } from '@/types/reactFlow';
 
-const CHAT_DOCK_COLLAPSED_KEY = 'studio.chatDockCollapsed';
+const CHAT_DOCK_COLLAPSED_KEY = 'studio.nodeAssistantDockCollapsed.v2';
 
 type QuickAction = {
   label: string;
@@ -11,11 +11,11 @@ type QuickAction = {
 };
 
 function readChatDockCollapsed(): boolean {
-  if (typeof window === 'undefined') return false;
+  if (typeof window === 'undefined') return true;
   try {
-    return window.localStorage.getItem(CHAT_DOCK_COLLAPSED_KEY) === '1';
+    return window.localStorage.getItem(CHAT_DOCK_COLLAPSED_KEY) !== '0';
   } catch {
-    return false;
+    return true;
   }
 }
 
@@ -130,8 +130,7 @@ export function ChatDock() {
   const messages = useStudioStore((s) => s.messages);
   const nodes = useStudioStore((s) => s.nodes);
   const selectedNodeId = useStudioStore((s) => s.selectedNodeId);
-  const activeNodeId = useStudioStore((s) => s.activeNodeId);
-  const addTextNode = useStudioStore((s) => s.addTextNode);
+  const detailOpen = useStudioStore((s) => s.detailOpen);
   const focusNode = useStudioStore((s) => s.focusNode);
   const pushMessage = useStudioStore((s) => s.pushMessage);
   const submitAssistantChat = useStudioStore((s) => s.submitAssistantChat);
@@ -141,17 +140,25 @@ export function ChatDock() {
   const [collapsed, setCollapsed] = useState(() => readChatDockCollapsed());
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const previousSelectedNodeIdRef = useRef<string | null>(null);
 
   const centerFlow = useCallback(() => {
     return screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
   }, [screenToFlowPosition]);
 
-  const sorted = useMemo(() => [...messages].sort((a, b) => a.ts - b.ts), [messages]);
-
-  const selectedChatNodeId = selectedNodeId ?? activeNodeId;
+  const selectedChatNodeId = selectedNodeId;
   const selectedChatNode = useMemo(
     () => nodes.find((node) => node.id === selectedChatNodeId) ?? null,
     [nodes, selectedChatNodeId],
+  );
+  const sorted = useMemo(
+    () =>
+      selectedChatNodeId
+        ? messages
+            .filter((message) => message.nodeId === selectedChatNodeId)
+            .sort((a, b) => a.ts - b.ts)
+        : [],
+    [messages, selectedChatNodeId],
   );
 
   useEffect(() => {
@@ -174,6 +181,28 @@ export function ChatDock() {
     } catch {
       // Ignore persistence failures.
     }
+  }, [collapsed]);
+
+  useEffect(() => {
+    if (!selectedChatNodeId) {
+      previousSelectedNodeIdRef.current = null;
+      setCollapsed(true);
+      return;
+    }
+    if (previousSelectedNodeIdRef.current !== selectedChatNodeId) {
+      previousSelectedNodeIdRef.current = selectedChatNodeId;
+      setCollapsed(true);
+      setText('');
+    }
+  }, [selectedChatNodeId]);
+
+  useEffect(() => {
+    if (collapsed) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setCollapsed(true);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
   }, [collapsed]);
 
   const focusInputWithDraft = useCallback((draft: string) => {
@@ -251,36 +280,23 @@ export function ChatDock() {
       ];
     }
 
-    return [
-      {
-        label: '创建文本卡片',
-        onClick: () => {
-          const id = addTextNode('', centerFlow());
-          focusNode(id, { openDetail: true });
-        },
-      },
-      {
-        label: '使用说明',
-        onClick: () =>
-          pushMessage({
-            role: 'assistant',
-            text: '先选中一个节点，再输入修改要求。我会调用 LLM 读取当前节点内容，并把修改后的结果写回该节点。当前优先支持文本卡片、镜头表/分镜节点、Prompt 节点。',
-          }),
-      },
-    ];
-  }, [addTextNode, centerFlow, focusInputWithDraft, focusNode, pushMessage, selectedChatNode]);
+    return [];
+  }, [focusInputWithDraft, focusNode, pushMessage, selectedChatNode]);
 
-  const assistantTitle = selectedChatNode ? `节点修改助手 · ${selectedChatNode.data.label}` : '节点修改助手';
-  const assistantHint = selectedChatNode
-    ? isNodeAssistantSupported(selectedChatNode)
-      ? `当前选中：${nodeKindLabel(selectedChatNode)}。输入修改要求后，我只处理这个节点。`
-      : `当前选中：${nodeKindLabel(selectedChatNode)}。这个节点暂不支持直接改写。`
-    : '先在画布中选中一个节点，再告诉我怎么改。这里不再做复杂流程导演，只负责节点内容修改。';
-  const collapsedTitle = '节点助手';
+  if (!selectedChatNode || !selectedChatNodeId) return null;
+
+  const assistantTitle = `节点助手 · ${selectedChatNode.data.label}`;
+  const assistantHint = isNodeAssistantSupported(selectedChatNode)
+    ? `当前选中：${nodeKindLabel(selectedChatNode)}。输入修改要求后，我只处理这个节点。`
+    : `当前选中：${nodeKindLabel(selectedChatNode)}。这个节点暂不支持直接改写。`;
 
   if (collapsed) {
     return (
-      <div className="chat-dock-rail nowheel nopan">
+      <div
+        className={`chat-dock-rail nowheel nopan${
+          detailOpen ? ' chat-dock-rail--detail-open' : ''
+        }`}
+      >
         <button
           type="button"
           className="chat-dock-rail__toggle"
@@ -289,16 +305,29 @@ export function ChatDock() {
           aria-label="展开节点助手"
         >
           <span className="chat-dock-rail__icon" aria-hidden>
-            ❯
+            ✦
           </span>
-          <span className="chat-dock-rail__label">{collapsedTitle}</span>
+          <span className="chat-dock-rail__context">
+            <strong>{selectedChatNode.data.label}</strong>
+            <small>
+              {nodeKindLabel(selectedChatNode)} · {nodeStatusLabel(selectedChatNode)}
+            </small>
+          </span>
+          <span className="chat-dock-rail__prompt">
+            {isNodeAssistantSupported(selectedChatNode)
+              ? '输入修改要求，只处理当前节点'
+              : '查看当前节点助手支持范围'}
+          </span>
+          <span className="chat-dock-rail__label">展开</span>
         </button>
       </div>
     );
   }
 
   return (
-    <div className="chat-dock nowheel nopan">
+    <div
+      className={`chat-dock nowheel nopan${detailOpen ? ' chat-dock--detail-open' : ''}`}
+    >
       <div className="chat-dock__assistant-bar">
         <div className="chat-dock__assistant-head">
           <div className="chat-dock__assistant-title">{assistantTitle}</div>
@@ -334,41 +363,26 @@ export function ChatDock() {
         {sorted.length === 0 ? (
           <div className="chat-dock__empty">
             <div className="chat-dock__empty-title">
-              {selectedChatNode ? '可以开始修改当前节点' : '请先选中一个节点'}
+              可以开始修改当前节点
             </div>
             <p className="chat-dock__empty-text">
-              {selectedChatNode
-                ? '例如：把第 3 镜里的毒雾改成红雾，保持镜头数不变；或让 Prompt 节点保持结构，只加强灯光和镜头运动。'
-                : '支持文本卡片、镜头表/分镜节点、Prompt 节点。选中后输入要求，助手会调用 LLM 改写并写回节点。'}
+              例如：把第 3 镜里的毒雾改成红雾，保持镜头数不变；或让 Prompt
+              节点保持结构，只加强灯光和镜头运动。
             </p>
             <div className="chat-dock__empty-actions">
               <button
                 type="button"
                 className="chat-dock__suggestion"
-                onClick={() =>
-                  selectedChatNode
-                    ? focusInputWithDraft(buildNodeEditDraft(selectedChatNode))
-                    : pushMessage({
-                        role: 'assistant',
-                        text: '先点一下画布上的目标节点。选中后，这里会显示节点类型和状态，再输入修改要求即可。',
-                      })
-                }
+                onClick={() => focusInputWithDraft(buildNodeEditDraft(selectedChatNode))}
               >
-                {selectedChatNode ? '填入局部修改模板' : '怎么使用'}
+                填入局部修改模板
               </button>
               <button
                 type="button"
                 className="chat-dock__suggestion"
-                onClick={() =>
-                  selectedChatNode
-                    ? focusInputWithDraft(buildPreserveDraft(selectedChatNode))
-                    : (() => {
-                        const id = addTextNode('', centerFlow());
-                        focusNode(id, { openDetail: true });
-                      })()
-                }
+                onClick={() => focusInputWithDraft(buildPreserveDraft(selectedChatNode))}
               >
-                {selectedChatNode ? '填入结构精修模板' : '新建文本卡片'}
+                填入结构精修模板
               </button>
             </div>
           </div>
@@ -417,11 +431,9 @@ export function ChatDock() {
           className="chat-dock__input"
           rows={1}
           placeholder={
-            selectedChatNode
-              ? isNodeAssistantSupported(selectedChatNode)
-                ? `修改「${selectedChatNode.data.label}」：例如把毒雾改成红雾，保持其它不变`
-                : '当前节点暂不支持直接改写，请换选文本卡片、镜头表或 Prompt 节点'
-              : '请先选中节点，再输入修改要求'
+            isNodeAssistantSupported(selectedChatNode)
+              ? `修改「${selectedChatNode.data.label}」：例如把毒雾改成红雾，保持其它不变`
+              : '当前节点暂不支持直接改写，请换选文本卡片、镜头表或 Prompt 节点'
           }
           value={text}
           disabled={isSubmitting}

@@ -16,6 +16,28 @@ export const PROMPT_CARD_SECTION_HEADINGS = [
   '钉子4行',
 ] as const;
 
+/** Studio Canvas 2.3 keeps the legacy card body but replaces the aggregate nails block. */
+export const PROMPT_CARD_V23_SECTION_HEADINGS = [
+  '挂载',
+  '相机位置',
+  '相机朝向',
+  '角色朝向',
+  '构图锚点',
+  '灯光布置与基调',
+  '起幅',
+  '落幅',
+  '连续性约束',
+  '提示词',
+  '摄影机动态参数',
+  '镜头参数',
+  '插针 / 甩拍 / 慢镜头',
+  '表演建议',
+  '主体钉子',
+  '连续性钉子',
+  '镜头钉子',
+  '结果钉子',
+] as const;
+
 export const PROMPT_CARD_HEADER_RULE =
   '每张 seedanceCard 的首行都必须只使用 `【分镜XX | 15秒】` 或 `【分镜1-14 | 15秒】` 这一类结构化标题；标题行仅保留分镜编号/范围与总时长，禁止写入类型、方案、档位/挡位、节奏。';
 
@@ -39,6 +61,15 @@ export const PROMPT_STRUCTURE_RULE =
 
 export const PROMPT_FIELD_TYPE_RULE =
   '字段必须按职责归类：挂载只写参与实体；相机位置/朝向只写摄影站位与观察方向；角色朝向只写调度关系；构图锚点只写前景/中景/后景与焦点落点；连续性约束只写必须遵守的顺序、方向和接镜规则。';
+
+export const PROMPT_COLOR_TABLE_RULE = [
+  '【色彩表参考规则】',
+  '- 输入中出现“【色彩表参考图】”时，该图片只提供主色底、辅助色、点睛色、冷暖关系、明暗层次、对比度、高光滚降、暗部密度与光线软硬参考。',
+  '- 色彩表结论必须优先落实到“灯光布置与基调”，并在“提示词”中只保留引擎执行所需的色彩和受光结果。',
+  '- 色彩表不能替换源分镜中的角色、场景、道具、时代、天气和剧情事实；图中对象不得进入挂载。',
+  '- 不机械复制参考图的具体人物、地点和构图事件。每个镜头必须结合真实场景光源、时间和主体位置对色彩关系做几何适配。',
+  '- 没有可靠数字来源时，使用冷暖、明暗、饱和度、柔硬、层次等相对描述，不虚构 RGB、HEX、色温、光比和百分比。',
+].join('\n');
 
 export const PROMPT_NOISE_FILTER_RULE =
   '先做噪声过滤，再做模块组装：像“黑牡丹在”“半空中袖”“口一翻”这类残缺主谓、动作碎片、截断短语，必须过滤或回溯修正，不能直接进入挂载、构图锚点、连续性约束、表演建议或钉子4行。';
@@ -94,6 +125,7 @@ ${PROMPT_FORBIDDEN_RULE}
 ${PROMPT_ADAPTIVE_RULE}
 ${PROMPT_STRUCTURE_RULE}
 ${PROMPT_FIELD_TYPE_RULE}
+${PROMPT_COLOR_TABLE_RULE}
 ${PROMPT_NOISE_FILTER_RULE}
 ${PROMPT_LITE_RULE}
 ${PROMPT_LOCAL_COMPRESSION_RULE}
@@ -182,6 +214,92 @@ export const PROMPT_DEPT_OUTPUT_SHAPE = `{
       "character_asset_ids": [],
       "scene_asset_ids": [],
       "seedanceCard": "必须是一张完整的工业卡，包含结构化标题、挂载、相机位置、相机朝向、角色朝向、构图锚点、灯光布置与基调、起幅、落幅、连续性约束、提示词、摄影机动态参数、镜头参数、插针 / 甩拍 / 慢镜头、表演建议、钉子4行。"
+    }
+  ]
+}`;
+
+export const PROMPT_DEPT_OUTPUT_SHAPE_V23 = `{
+  "system": "Studio Canvas 2.3",
+  "userTemplate": "{{input}}",
+  "negative": "background music, bgm, subtitle, subtitles, text overlay, ui, hud, interface overlay, watermark, logo, low quality, blurry",
+  "parameters": {
+    "engine": "seedance",
+    "aspect": "16:9",
+    "format": "studio_canvas_v2_3"
+  },
+  "shotPrompts": [
+    {
+      "shot_id": "TEXT-S1-1",
+      "prompt": "面向视频引擎的精简执行描述。",
+      "negative_prompt": "background music, bgm, subtitle, subtitles, text overlay, ui, hud, interface overlay, watermark, logo",
+      "dimensions": {
+        "场景": "",
+        "角色": "",
+        "动作": "",
+        "情感": "",
+        "镜头": "",
+        "运镜": "",
+        "灯光": "",
+        "风格": "",
+        "构图": "",
+        "连贯性": ""
+      },
+      "character_asset_ids": [],
+      "scene_asset_ids": [],
+      "seedanceCard": "【分镜01 | 5秒】\\n挂载：|@=角色|\\n相机位置：室内中景平视，摄影机位于角色正前方三米。\\n相机朝向：固定沿人物视线轴看向角色。\\n角色朝向：角色身体朝前，视线落向画外目标。\\n构图锚点：前景保留门框压边，中景角色为视觉重心，后景环境降亮度，焦点最终停在角色双眼。\\n灯光布置与基调：侧后方动机光勾勒轮廓，正面弱辅光保留面部层次。\\n起幅：角色静止站在中景，焦点锁定双眼。\\n落幅：角色完成抬眼，视线稳定停在画外目标。\\n连续性约束：必须保持角色身份、站位、视线方向与光源方向不变。\\n提示词：室内中景平视，角色由静止缓慢抬眼看向画外目标，摄影机保持稳定，侧后方动机光勾勒轮廓，正面弱辅光保留肤质，最终焦点稳定停在双眼；禁止身份漂移、额外人物、字幕、UI、水印与背景音乐。\\n摄影机动态参数：总时长5秒；0至3秒固定机位并保持双眼合焦，3至5秒轻微前推，随抬眼动作收紧焦点。\\n镜头参数：16:9，中景，50mm，中浅景深，双眼承担最终焦点。\\n插针 / 甩拍 / 慢镜头：无\\n表演建议：呼吸克制，抬眼动作缓慢，肩颈保持稳定。\\n主体钉子：角色身份与数量不得改变。\\n连续性钉子：视线始终指向同一画外目标。\\n镜头钉子：最终焦点必须落在双眼。\\n结果钉子：落幅必须看到角色完成抬眼。"
+    }
+  ]
+}`;
+
+export const PROMPT_DEPT_OUTPUT_SHAPE_V25 = PROMPT_DEPT_OUTPUT_SHAPE_V23
+  .replace('"Studio Canvas 2.3"', '"Studio Canvas 2.5"')
+  .replace('"studio_canvas_v2_3"', '"studio_canvas_v2_5"');
+
+/** Studio Canvas 2.3.1 keeps the V2.3 card and adds machine-readable combined-shot slices. */
+export const PROMPT_DEPT_OUTPUT_SHAPE_V231_SEGMENTS = `{
+  "system": "Studio Canvas 2.3.1 Segments",
+  "userTemplate": "{{input}}",
+  "negative": "background music, bgm, subtitle, subtitles, text overlay, ui, hud, interface overlay, watermark, logo, low quality, blurry",
+  "parameters": {
+    "engine": "seedance",
+    "aspect": "16:9",
+    "format": "studio_canvas_v2_3_1_segments"
+  },
+  "shotPrompts": [
+    {
+      "shot_id": "1-2",
+      "prompt": "面向视频引擎的一条连续组合镜头执行描述。",
+      "negative_prompt": "background music, bgm, subtitle, subtitles, text overlay, ui, hud, interface overlay, watermark, logo",
+      "dimensions": {},
+      "character_asset_ids": [],
+      "scene_asset_ids": [],
+      "seedanceCard": "完整沿用 Studio Canvas 2.3 的18字段卡片。",
+      "shotSegments": [
+        {
+          "shot_id": "1",
+          "start_sec": 0,
+          "end_sec": 2,
+          "shot_type": "大全景",
+          "camera": "门外固定低机位，沿门缝看向室内。",
+          "composition": "门框压住前景，人物与油灯形成纵深。",
+          "lighting": "门外冷蓝暮光与室内暖黄油灯对切。",
+          "action": "门扇微晃，灯焰摇摆，一老一少保持错位。",
+          "keyframe": "门框内完整看见一老一少与油灯的建立画面。",
+          "image_prompt": "16:9大全景静态关键帧，门外经半掩木门窥入禅房，冷蓝门缝光包围室内暖黄油灯，一老一少在纵深中错位同框。"
+        },
+        {
+          "shot_id": "2",
+          "start_sec": 2,
+          "end_sec": 5,
+          "shot_type": "中远景",
+          "camera": "低位进入门内，仍沿原观察轴。",
+          "composition": "门框压边，油灯隔开两位人物。",
+          "lighting": "暖光托住人物，背景保留冷暗层次。",
+          "action": "老人低声讲述，小和尚跪坐聆听。",
+          "keyframe": "两人关系、站位与油灯位置清晰可读。",
+          "image_prompt": "16:9中远景静态关键帧，低机位进入禅房，两名僧人隔着油灯错位对坐，门框压边，暖冷光关系和人物站位清楚。"
+        }
+      ]
     }
   ]
 }`;

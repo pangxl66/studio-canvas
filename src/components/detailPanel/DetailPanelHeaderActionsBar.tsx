@@ -15,14 +15,47 @@ export function DetailPanelHeaderActionsBar(props: {
   pinnedCount?: number;
 }) {
   const { items } = props;
+  const pinnedCount = Math.max(0, Math.min(props.pinnedCount ?? items.length, items.length));
+  const pinnedItems = items.slice(0, pinnedCount);
+  const overflowItems = items.slice(pinnedCount);
+
+  if (overflowItems.length === 0) {
+    return (
+      <div className="node-detail-header-actions-bar node-detail-header-actions-bar--inline">
+        {pinnedItems.map((item) => (
+          <span key={item.id} className="node-detail-header-actions-bar__slot" data-label={item.label}>
+            {item.node}
+          </span>
+        ))}
+      </div>
+    );
+  }
 
   return (
-    <div className="node-detail-header-actions-bar node-detail-header-actions-bar--inline">
-      {items.map((i) => (
-        <span key={i.id} className="node-detail-header-actions-bar__slot" data-label={i.label}>
-          {i.node}
-        </span>
-      ))}
+    <div className="node-detail-header-actions-bar node-detail-header-actions-bar--split">
+      <div className="node-detail-header-actions-bar__pinned">
+        {pinnedItems.map((item) => (
+          <span key={item.id} className="node-detail-header-actions-bar__slot" data-label={item.label}>
+            {item.node}
+          </span>
+        ))}
+      </div>
+      <details className="node-detail-header-actions-bar__details">
+        <summary className="node-detail-header-actions-bar__more" aria-label="更多节点操作">
+          <span className="node-detail-header-actions-bar__more-icon" aria-hidden>
+            ⋯
+          </span>
+          <span className="node-detail-header-actions-bar__more-label">更多</span>
+        </summary>
+        <div className="node-detail-header-actions-bar__dropdown">
+          {overflowItems.map((item) => (
+            <div key={item.id} className="node-detail-header-actions-bar__dropdown-row">
+              <span className="node-detail-header-actions-bar__dropdown-label">{item.label}</span>
+              <div className="node-detail-header-actions-bar__dropdown-control">{item.node}</div>
+            </div>
+          ))}
+        </div>
+      </details>
     </div>
   );
 }

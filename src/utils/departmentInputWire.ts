@@ -20,7 +20,10 @@ export function departmentNodeHasInputWire(deptNodeId: string, edges: Edge[], no
     if (src.type === 'textNode') return true;
     if (src.type === 'imageNode' && src.data.type === 'image_node') {
       const target = nodes.find((n) => n.id === deptNodeId);
-      return target?.type === 'department' && target.data.type === 'storyboard';
+      return (
+        target?.type === 'department' &&
+        (target.data.type === 'storyboard' || target.data.type === 'prompt')
+      );
     }
     if (src.type === 'department' && (e.sourceHandle == null || e.sourceHandle === DEPT_OUTPUT_HANDLE_ID))
       return true;

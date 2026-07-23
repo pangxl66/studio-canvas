@@ -7,6 +7,10 @@ import {
 } from '@/services/skillLoader';
 import type { StoryboardOutput, StudioNodeData } from '@/types/studio';
 import type { StudioRFNode } from '@/types/reactFlow';
+import {
+  normalizePromptDepartmentStatus,
+  PROMPT_GENERATED_STATUS,
+} from '@/store/workflow';
 
 /** 持久化恢复后由 store 注入，供节点 / 右键菜单调用；勿依赖 JSON 往返保留 */
 export type StudioPersistenceRuntimeApi = {
@@ -48,14 +52,32 @@ export function toPersistableNodesAndEdges(
 }
 
 function normalizeTransientNodeData(data: StudioNodeData): StudioNodeData {
+  const normalizedPromptStatus =
+    data.type === 'prompt' ? normalizePromptDepartmentStatus(data.status) : data.status;
+  if (normalizedPromptStatus !== data.status) {
+    return {
+      ...data,
+      status: normalizedPromptStatus,
+      review_result: null,
+      ai_review_feedback: null,
+      leader_review_suggested_pass: undefined,
+    };
+  }
   if (data.status !== 'IN_PROGRESS') return data;
   const hasOutput = data.output != null;
+  const preservedStatus =
+    data.type === 'prompt' ? PROMPT_GENERATED_STATUS : 'APPROVED';
   return {
     ...data,
-    status: hasOutput ? 'APPROVED' : 'NOT_STARTED',
+    status: hasOutput ? preservedStatus : 'NOT_STARTED',
     generation_error: '',
     streaming_preview: '',
-    review_result: hasOutput ? data.review_result || '上一次运行被中断，已保留已有结果。' : '上一次运行被中断，请重新运行。',
+    review_result:
+      data.type === 'prompt'
+        ? null
+        : hasOutput
+          ? data.review_result || '上一次运行被中断，已保留已有结果。'
+          : '上一次运行被中断，请重新运行。',
   };
 }
 

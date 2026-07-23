@@ -100,6 +100,7 @@ export function preparePromptPipelineInput(
   const systemPrompt = [
     systemBase,
     deps.timingSystemRule,
+    '【资产引用隔离】character_asset_ids / scene_asset_ids 只允许写真实资产 ID；没有真实 ID 时必须输出空数组。任何 PENDING_*、UNKNOWN_* 或内部占位符都禁止出现在资产数组、挂载字段、提示词与 seedanceCard 中。“挂载”只能使用 Input 中真实出现的角色、场景、道具、声音或环境物名称。',
     `【输出 JSON 形状参考】\n${deps.departmentOutputShape}`,
   ].join('\n\n');
 

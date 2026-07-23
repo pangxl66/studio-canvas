@@ -188,6 +188,8 @@ function normalizeShot(
     description: description || shotNo || `镜头 ${id}`,
     content,
     sceneRef: scene || undefined,
+    characters: role ? role.split(/[、,，;；|/]+/u).map((item) => item.trim()).filter(Boolean) : undefined,
+    props: prop ? prop.split(/[、,，;；|/]+/u).map((item) => item.trim()).filter(Boolean) : undefined,
     action: description || undefined,
     sound: sound || undefined,
     durationSec,

@@ -5,15 +5,24 @@ import {
   canTransitionPipelineStatus,
   getLatestApprovedWritingAsset,
   getLatestApprovedWritingBundle,
+  normalizePromptDepartmentStatus,
+  PROMPT_GENERATED_STATUS,
 } from '../src/store/workflow.ts';
 
 test('pipeline state machine only accepts declared transitions', () => {
   assert.equal(canTransitionPipelineStatus('NOT_STARTED', 'IN_PROGRESS', 'writing'), true);
   assert.equal(canTransitionPipelineStatus('NOT_STARTED', 'APPROVED', 'writing'), false);
   assert.equal(canTransitionPipelineStatus('IN_PROGRESS', 'APPROVED', 'writing'), false);
-  assert.equal(canTransitionPipelineStatus('IN_PROGRESS', 'APPROVED', 'prompt'), true);
+  assert.equal(canTransitionPipelineStatus('IN_PROGRESS', 'APPROVED', 'prompt'), false);
+  assert.equal(canTransitionPipelineStatus('IN_PROGRESS', PROMPT_GENERATED_STATUS, 'prompt'), true);
   assert.equal(canTransitionPipelineStatus('APPROVED', 'IN_PROGRESS', 'prompt'), false);
   assert.equal(canTransitionPipelineStatus('REJECTED', 'NOT_STARTED', 'storyboard'), true);
+});
+
+test('legacy Prompt approval state migrates to generated waiting-review state', () => {
+  assert.equal(normalizePromptDepartmentStatus('APPROVED'), PROMPT_GENERATED_STATUS);
+  assert.equal(normalizePromptDepartmentStatus('IN_PROGRESS'), 'IN_PROGRESS');
+  assert.equal(normalizePromptDepartmentStatus('REJECTED'), 'REJECTED');
 });
 
 test('latest approved writing bundle preserves asset audit metadata', () => {
