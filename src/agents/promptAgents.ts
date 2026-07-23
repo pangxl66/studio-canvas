@@ -35,6 +35,7 @@ import {
 import {
   inferPromptCharacterNames,
   inferPromptSceneNames,
+  inferPromptSoundNames,
   promptAssetRefsFromApproved,
   resolvePromptAssetPlaceholders,
   sanitizePromptAssetIds,
@@ -69,6 +70,14 @@ const MIN_SEEDANCE2_SEGMENTED_CARD_CHARS = 2000;
 const MAX_SEEDANCE2_SEGMENTED_CARD_CHARS = 3500;
 const SEEDANCE2_SEGMENTED_PROMPT_MARKER = 'Seedance2.0 分段式提示词助手';
 const SEEDANCE2_SEGMENTED_FORMAT = 'seedance2_segmented_15s_v1';
+const PROMPT_DETAILED_MOUNT_SYSTEM_AMENDMENT = [
+  '【运行时挂载兼容修订｜高优先级】',
+  '当前源分镜表本身就是本镜的最小 Asset Manifest。',
+  'characters、props、sceneRef、sound 字段，以及 description/action 中明确命名且在本镜出现或触发的角色、关键机械装置、控制台、楼梯、护栏、道具、场景、环境声和机械声，均允许进入挂载。',
+  '挂载必须尽量完整保留输入中的具体名称与限定词，不得把“巨型环形金属装置”压缩成“装置”，不得把“油污扳手”改写成“扳手”。',
+  '挂载排序固定为：角色 → 关键道具/机械装置/空间结构 → 场景 → 关键声音 → 关键环境物。',
+  '只有风格词、动作残片、摄影术语、解释句和仅作参考的图片不得挂载；不得因为独立 approved asset ID 列表为空而输出“挂载：无”。',
+].join('\n');
 const SEEDANCE2_SEGMENTED_HEADINGS = [
   '# 【全局视觉与美学基调】',
   '# 【人物与场景设定】',
@@ -1215,6 +1224,11 @@ function normalizePromptOutput(
           .filter(Boolean),
       ),
     );
+    const sounds = Array.from(
+      new Set(
+        sourceShots.flatMap((shot) => inferPromptSoundNames(shot.sound)),
+      ),
+    );
     const scenes = Array.from(
       new Set(
         sourceShots
@@ -1237,6 +1251,7 @@ function normalizePromptOutput(
         characterNames: resolvedCharacters,
         propNames: props,
         sceneNames: resolvedScenes,
+        soundNames: sounds,
       });
     };
     const normalizedSeedanceCard =
@@ -2012,8 +2027,8 @@ function buildStudioCanvasV25RuntimeRules(sourceStoryboard: StoryboardOutput | n
     PROMPT_CARD_V23_SECTION_HEADINGS.map((heading) => `${heading}：`).join('\n'),
     '生成前在内部按 HARD / SOFT / AUTO 处理约束：人物身份、真实资产ID、关键道具状态、剧情结果和用户明确要求属于 HARD，不得被系统建议覆盖。',
     '精确数字只能继承用户输入、Project Bible、场景数据或结构化参数；系统建议使用定性表述、合理范围或带“约”的软锁数字，禁止伪造厘米、米、占比、色温、BPM和光比事实。',
-    '挂载只允许来自“资产引用”中已独立登记、当前镜头实际出现的执行资产。内部结构、地面、灯具、材质、尘埃和仅作参考的图片不得拆成虚构资产。',
-    '挂载必须使用 `|@=实体名| |@=实体名|`，每个标记之间只保留一个空格；实体名保持原名。无可挂载实体时填写“无”。',
+    '源分镜表是当前镜头的最小资产清单：characters、props、sceneRef、sound 以及 description/action 中明确命名且实际出现或触发的关键物体、机械装置、空间结构和声音，均可进入挂载；不得因为独立资产 ID 为空而丢弃。',
+    PROMPT_MOUNT_TOKEN_RULE,
     '先建立可见性矩阵：只有进入画幅且达到可辨识尺寸的部位、道具、环境和表演才能进入提示词。肢体特写、背影、俯拍和极远景不得强写不可见的正脸微表情。',
     '先计算动作与运镜执行预算：一张卡只承担一个明确镜头任务；超过三个主要动作单元、两个独立叙事目标或明显时空变化时应拆镜，不得硬塞进15秒。',
     '若输入给出 BPM 或重拍，先按 60/BPM 换算单拍秒数，再明确“拍点→秒数→动作”；音乐名称不能替代可执行时间轴。',
@@ -2038,7 +2053,7 @@ function buildPromptUserMessageV25(
     sourceStoryboard?.shots?.length
       ? `【源镜头编号】${sourceStoryboard.shots.map((shot) => shot.id).join(', ')}`
       : '',
-    '【资产引用】以下清单是挂载实体的唯一候选来源。只有真实匹配且当前镜头出现的独立资产才能挂载；清单内没有的结构与细节只能写入提示词。',
+    '【独立资产引用】这是附加候选，不是唯一来源；还必须读取下方源分镜的 characters、props、sceneRef、sound 及正文中明确命名的执行实体。',
     JSON.stringify(assetRefs, null, 2),
     '--- Input ---',
     brief.trim() || '（空）',
@@ -2463,9 +2478,20 @@ export async function runPromptEmployee(
   const useStudioCanvasV23 = isStudioCanvasV23Style(styleMode);
   const useStudioCanvasV231Segments = isStudioCanvasV231SegmentsStyle(styleMode);
   const useStudioCanvasV25 = isStudioCanvasV25Style(styleMode);
+  const effectiveExecutionSystemPrompt = useStudioCanvasV25
+    ? [executionSystemPrompt?.trim(), PROMPT_DETAILED_MOUNT_SYSTEM_AMENDMENT]
+        .filter(Boolean)
+        .join('\n\n')
+    : executionSystemPrompt;
 
   return runPromptGenerationPipeline(
-    { brief, approvedAssets, executionSystemPrompt, onDelta, signal },
+    {
+      brief,
+      approvedAssets,
+      executionSystemPrompt: effectiveExecutionSystemPrompt,
+      onDelta,
+      signal,
+    },
     {
       defaultNegative: DEFAULT_NEG,
       departmentSystemPrompt: PROMPT_DEPT_AGENT_SYSTEM,

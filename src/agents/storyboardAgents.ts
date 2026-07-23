@@ -118,6 +118,23 @@ function normalizeStoryboardApiShot(row: unknown, idx: number): StoryboardShot {
         ? r.dialogue
         : '';
   const sceneRef = typeof r.sceneRef === 'string' && r.sceneRef.trim() ? r.sceneRef.trim() : undefined;
+  const normalizeEntityList = (value: unknown): string[] | undefined => {
+    const items = Array.isArray(value)
+      ? value
+      : typeof value === 'string'
+        ? value.split(/[、,，;；|/]+/)
+        : [];
+    const normalized = Array.from(
+      new Set(items.map((item) => String(item).trim()).filter(Boolean)),
+    );
+    return normalized.length > 0 ? normalized : undefined;
+  };
+  const characters = normalizeEntityList(
+    r.characters ?? r.character ?? r.roles ?? r.role ?? r.角色 ?? r.人物,
+  );
+  const props = normalizeEntityList(
+    r.props ?? r.prop ?? r.keyProps ?? r.key_props ?? r.道具 ?? r.关键道具,
+  );
   const actionRaw = String(r.action ?? r.动作 ?? r.blocking ?? '').trim();
   const action = actionRaw || undefined;
   const soundRaw = String(r.sound ?? '').trim();
@@ -141,6 +158,8 @@ function normalizeStoryboardApiShot(row: unknown, idx: number): StoryboardShot {
     description,
     content,
     sceneRef,
+    characters,
+    props,
     action,
     sound,
     durationSec,

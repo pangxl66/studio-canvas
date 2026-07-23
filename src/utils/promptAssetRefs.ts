@@ -13,6 +13,7 @@ export type PromptAssetNameRefs = {
   characterNames?: string[];
   propNames?: string[];
   sceneNames?: string[];
+  soundNames?: string[];
 };
 
 function uniquePromptAssetNames(values: Array<string | undefined>): string[] {
@@ -59,6 +60,31 @@ export function inferPromptSceneNames(value: unknown): string[] {
   return uniquePromptAssetNames([scene]);
 }
 
+/** 从分镜 sound 字段恢复可执行声音实体，保留具体环境声/机械声，过滤禁用说明。 */
+export function inferPromptSoundNames(value: unknown): string[] {
+  const normalized = String(value ?? '')
+    .replace(/^(?:声音|音效|环境音|同期声|SFX)\s*[:：]\s*/i, '')
+    .trim();
+  if (!normalized || /^(无|无声音|静音)$/.test(normalized)) return [];
+  return uniquePromptAssetNames(
+    normalized
+      .split(/[、,，；;|/\n]|\s+和\s+|和(?=[\u4e00-\u9fff]{2,})/)
+      .map((item) =>
+        item
+          .trim()
+          .replace(/^(?:声音|音效|环境音|同期声|SFX)\s*[:：]\s*/i, '')
+          .replace(/^(?:仅有|保留|画内|可听见|听见)\s*/, '')
+          .trim(),
+      )
+      .filter(
+        (item) =>
+          item.length > 1 &&
+          item.length <= 24 &&
+          !/背景音乐|BGM|字幕|UI|HUD|水印|禁止|不得|不要/i.test(item),
+      ),
+  );
+}
+
 export function isInternalPromptAssetPlaceholder(value: unknown): boolean {
   return INTERNAL_PROMPT_ASSET_ID_RE.test(String(value ?? '').trim());
 }
@@ -76,10 +102,12 @@ export function resolvePromptAssetPlaceholders(
   const characterNames = sanitizePromptAssetIds(refs?.characterNames);
   const propNames = sanitizePromptAssetIds(refs?.propNames);
   const sceneNames = sanitizePromptAssetIds(refs?.sceneNames);
+  const soundNames = sanitizePromptAssetIds(refs?.soundNames);
   const fallbackMountNames = uniquePromptAssetNames([
     ...characterNames,
     ...propNames,
     ...sceneNames,
+    ...soundNames,
   ]);
   const resolved = String(text ?? '')
     .replace(

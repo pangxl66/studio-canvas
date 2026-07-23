@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   inferPromptCharacterNames,
   inferPromptSceneNames,
+  inferPromptSoundNames,
   promptAssetRefsFromApproved,
   resolvePromptAssetPlaceholders,
   sanitizePromptAssetIds,
@@ -56,6 +57,29 @@ test('known storyboard entities repair a legacy empty mount line and include pro
       },
     ),
     '【分镜1-6 | 15秒】\n挂载：|@=苟天| |@=扳手| |@=制服布条| |@=动力舱|\n相机位置：高处俯拍。',
+  );
+});
+
+test('detailed mount keeps scene structures and executable sounds in production order', () => {
+  assert.deepEqual(
+    inferPromptSoundNames('低频机械余震；金属刮擦声；禁止背景音乐/BGM'),
+    ['低频机械余震', '金属刮擦声'],
+  );
+  assert.equal(
+    resolvePromptAssetPlaceholders('挂载：无', {
+      characterNames: ['苟天'],
+      propNames: [
+        '巨型环形金属装置',
+        '层叠控制台',
+        '铁质楼梯',
+        '黄黑护栏',
+        '油污扳手',
+        '悬垂线束',
+      ],
+      sceneNames: ['WGZR_动力舱_XL_v001-夜内'],
+      soundNames: ['低频机械余震', '金属刮擦声'],
+    }),
+    '挂载：|@=苟天| |@=巨型环形金属装置| |@=层叠控制台| |@=铁质楼梯| |@=黄黑护栏| |@=油污扳手| |@=悬垂线束| |@=WGZR_动力舱_XL_v001-夜内| |@=低频机械余震| |@=金属刮擦声|',
   );
 });
 

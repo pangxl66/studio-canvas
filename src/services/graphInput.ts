@@ -10,6 +10,7 @@ import { formatPrompt, formatSeedanceCards } from '@/utils/promptFormat';
 import {
   inferPromptCharacterNames,
   inferPromptSceneNames,
+  inferPromptSoundNames,
   resolvePromptAssetPlaceholders,
   sanitizePromptAssetPlaceholders,
 } from '@/utils/promptAssetRefs';
@@ -146,6 +147,9 @@ export function departmentAssetAsInputText(
               .filter(Boolean),
           ),
         );
+        const soundNames = Array.from(
+          new Set(sourceShots.flatMap((shot) => inferPromptSoundNames(shot.sound))),
+        );
         return {
           ...pack,
           seedanceCard: resolvePromptAssetPlaceholders(pack.seedanceCard ?? '', {
@@ -158,6 +162,7 @@ export function departmentAssetAsInputText(
               sceneNames.length > 0
                 ? sceneNames
                 : inferPromptSceneNames(pack.dimensions?.场景),
+            soundNames,
           }),
         };
       });
