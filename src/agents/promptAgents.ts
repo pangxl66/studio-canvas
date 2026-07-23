@@ -33,7 +33,10 @@ import {
   looksLikeStructuredPromptInput,
 } from '@/utils/promptInputMode';
 import {
+  inferPromptCharacterNames,
+  inferPromptSceneNames,
   promptAssetRefsFromApproved,
+  resolvePromptAssetPlaceholders,
   sanitizePromptAssetIds,
   sanitizePromptAssetPlaceholders,
 } from '@/utils/promptAssetRefs';
@@ -1204,28 +1207,37 @@ function normalizePromptOutput(
           .filter(Boolean),
       ),
     );
+    const props = Array.from(
+      new Set(
+        sourceShots
+          .flatMap((shot) => shot.props ?? [])
+          .map((value) => value.trim())
+          .filter(Boolean),
+      ),
+    );
     const scenes = Array.from(
       new Set(
-        [
-          pack.dimensions?.场景,
-          ...sourceShots.map((shot) => shot.sceneRef),
-        ]
+        sourceShots
+          .map((shot) => shot.sceneRef)
           .flatMap((value) => String(value ?? '').split(/[、,，；;|/]+/))
           .map((value) => value.trim())
           .filter(Boolean),
       ),
     );
+    const resolvedCharacters =
+      characters.length > 0
+        ? characters
+        : inferPromptCharacterNames(pack.dimensions?.角色);
+    const resolvedScenes =
+      scenes.length > 0
+        ? scenes
+        : inferPromptSceneNames(pack.dimensions?.场景);
     const replaceInternalMountTokens = (value: string): string => {
-      const withEntities = value
-        .replace(
-          /\|@=PENDING_CHAR_FROM_ASSET_SYSTEM\|/gi,
-          characters.map((name) => `|@=${name}|`).join(' '),
-        )
-        .replace(
-          /\|@=PENDING_SCENE_FROM_ASSET_SYSTEM\|/gi,
-          scenes.map((name) => `|@=${name}|`).join(' '),
-        );
-      return sanitizePromptAssetPlaceholders(withEntities);
+      return resolvePromptAssetPlaceholders(value, {
+        characterNames: resolvedCharacters,
+        propNames: props,
+        sceneNames: resolvedScenes,
+      });
     };
     const normalizedSeedanceCard =
       typeof pack.seedanceCard === 'string'

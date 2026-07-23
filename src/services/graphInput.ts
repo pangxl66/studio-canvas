@@ -8,6 +8,8 @@ import type { StudioRFNode } from '@/types/reactFlow';
 import type { NodeKind, PromptOutput, StoryboardOutput, StudioNodeData, WritingOutput } from '@/types/studio';
 import { formatPrompt, formatSeedanceCards } from '@/utils/promptFormat';
 import {
+  inferPromptCharacterNames,
+  inferPromptSceneNames,
   resolvePromptAssetPlaceholders,
   sanitizePromptAssetPlaceholders,
 } from '@/utils/promptAssetRefs';
@@ -112,23 +114,6 @@ export function departmentAssetAsInputText(
     if (typeof o.userTemplate !== 'string') return null;
     if (consumer === 'prompt_review_node') {
       const sourceStoryboard = tryParseStoryboardOutput(o.userTemplate);
-      const fallbackCharacterNames = (value: unknown): string[] => {
-        const subject = String(value ?? '')
-          .split(/[，,；;。]/, 1)[0]
-          .replace(/(可见|身份|人数|保持|稳定|相对|位置|画面|镜头|角色).*$/, '')
-          .trim();
-        return subject
-          .split(/、|与|及|\//)
-          .map((item) => item.trim().replace(/[（(：:].*$/, '').trim())
-          .filter((item) => item.length > 0 && item.length <= 12);
-      };
-      const fallbackSceneNames = (value: unknown): string[] => {
-        const scene = String(value ?? '')
-          .split(/[，,；;。]/, 1)[0]
-          .replace(/[（(：:].*$/, '')
-          .trim();
-        return scene.length > 0 && scene.length <= 16 ? [scene] : [];
-      };
       const reviewShotPrompts = (o.shotPrompts ?? []).map((pack, index) => {
         const sourceShot =
           sourceStoryboard?.shots.find((shot) => String(shot.id) === String(pack.shot_id)) ??
@@ -146,6 +131,14 @@ export function departmentAssetAsInputText(
               .filter(Boolean),
           ),
         );
+        const propNames = Array.from(
+          new Set(
+            sourceShots
+              .flatMap((shot) => shot.props ?? [])
+              .map((item) => item.trim())
+              .filter(Boolean),
+          ),
+        );
         const sceneNames = Array.from(
           new Set(
             sourceShots
@@ -159,11 +152,12 @@ export function departmentAssetAsInputText(
             characterNames:
               characterNames.length > 0
                 ? characterNames
-                : fallbackCharacterNames(pack.dimensions?.角色),
+                : inferPromptCharacterNames(pack.dimensions?.角色),
+            propNames,
             sceneNames:
               sceneNames.length > 0
                 ? sceneNames
-                : fallbackSceneNames(pack.dimensions?.场景),
+                : inferPromptSceneNames(pack.dimensions?.场景),
           }),
         };
       });
