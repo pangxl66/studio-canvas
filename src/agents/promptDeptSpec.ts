@@ -255,6 +255,22 @@ export const PROMPT_DEPT_OUTPUT_SHAPE_V25 = PROMPT_DEPT_OUTPUT_SHAPE_V23
   .replace('"Studio Canvas 2.3"', '"Studio Canvas 2.5"')
   .replace('"studio_canvas_v2_3"', '"studio_canvas_v2_5"');
 
+export const PROMPT_DEPT_OUTPUT_SHAPE_V26 = PROMPT_DEPT_OUTPUT_SHAPE_V25
+  .replace('"Studio Canvas 2.5"', '"Studio Canvas 2.6"')
+  .replace('"studio_canvas_v2_5"', '"studio_canvas_v2_6"')
+  .replace(
+    '挂载：|@=角色|\n',
+    '挂载：|@=角色A||@=交互道具||@=主场景||@=关键结构||@=固定光源|\n',
+  );
+
+export const PROMPT_DEPT_OUTPUT_SHAPE_V27 = PROMPT_DEPT_OUTPUT_SHAPE_V26
+  .replace('"Studio Canvas 2.6"', '"Studio Canvas 2.7"')
+  .replace('"studio_canvas_v2_6"', '"studio_canvas_v2_7"')
+  .replace(
+    '镜头参数：16:9，中景，50mm，中浅景深，双眼承担最终焦点。',
+    '镜头参数：16:9，中景；【摄影机·镜头】ARRI Alexa LF机型+Cooke S8/i球面电影定焦镜头+50mm焦段+T2.8光圈+浅景深（人物双眼与面部实焦，前景门框轻度失焦，背景灯光柔化为散景，焦点始终锁定双眼）。',
+  );
+
 /** Studio Canvas 2.3.1 keeps the V2.3 card and adds machine-readable combined-shot slices. */
 export const PROMPT_DEPT_OUTPUT_SHAPE_V231_SEGMENTS = `{
   "system": "Studio Canvas 2.3.1 Segments",

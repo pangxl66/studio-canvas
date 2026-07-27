@@ -5,6 +5,7 @@ const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim() ?? '';
 const saasMock = import.meta.env.VITE_SAAS_MOCK?.trim().toLowerCase() ?? '';
 const MOCK_AUTH_KEY = 'studio_canvas_saas_mock_auth_v1';
 const ACTIVATED_TEST_INVITE_AUTH_KEY = 'studio_canvas_saas_test_invite_activations_v1';
+const REMEMBERED_LOGIN_EMAIL_KEY = 'studio_canvas_remembered_login_email_v1';
 
 export const STUDIO_AUTH_MOCK_EVENT = 'studio-auth-mock-change';
 
@@ -91,6 +92,26 @@ function normalizeEmail(value: string): string {
   return value.trim().toLowerCase();
 }
 
+export function getRememberedLoginEmail(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    return normalizeEmail(window.localStorage.getItem(REMEMBERED_LOGIN_EMAIL_KEY) ?? '');
+  } catch {
+    return '';
+  }
+}
+
+export function rememberLoginEmail(email: string): void {
+  if (typeof window === 'undefined') return;
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) return;
+  try {
+    window.localStorage.setItem(REMEMBERED_LOGIN_EMAIL_KEY, normalizedEmail);
+  } catch {
+    // Remembering the label is optional; the auth provider still owns the session.
+  }
+}
+
 function normalizeInviteCode(value: string): string {
   return value.trim().replace(/\s+/g, '').toUpperCase();
 }
@@ -129,7 +150,9 @@ function writeActivatedTestInviteAuth(email: string, accessToken?: string, refre
 }
 
 function writeStoredLocalAuth(email: string, accessToken?: string, refreshToken?: string): void {
-  window.localStorage.setItem(MOCK_AUTH_KEY, JSON.stringify({ email, accessToken, refreshToken }));
+  const normalizedEmail = normalizeEmail(email);
+  window.localStorage.setItem(MOCK_AUTH_KEY, JSON.stringify({ email: normalizedEmail, accessToken, refreshToken }));
+  rememberLoginEmail(normalizedEmail);
   window.dispatchEvent(new Event(STUDIO_AUTH_MOCK_EVENT));
 }
 
@@ -167,14 +190,22 @@ function buildMockAuthSnapshot(
   return { session, user };
 }
 
-function getMockAuthSnapshot(): AuthSnapshot {
+export function getLocalAuthSnapshot(): AuthSnapshot {
   const stored = readStoredLocalAuth();
-  return stored ? buildMockAuthSnapshot(stored.email, stored.accessToken, stored.refreshToken) : { session: null, user: null };
+  const isTrustedLocalSession =
+    Boolean(stored) &&
+    (isSaasMockEnabled() || Boolean(stored?.accessToken?.startsWith('test-invite.')));
+  return stored && isTrustedLocalSession
+    ? buildMockAuthSnapshot(stored.email, stored.accessToken, stored.refreshToken)
+    : { session: null, user: null };
 }
 
 export async function getAuthSnapshot(): Promise<AuthSnapshot> {
-  const localSnapshot = getMockAuthSnapshot();
-  if (localSnapshot.session) return localSnapshot;
+  const localSnapshot = getLocalAuthSnapshot();
+  if (localSnapshot.session) {
+    rememberLoginEmail(localSnapshot.user?.email ?? '');
+    return localSnapshot;
+  }
 
   if (isSaasMockEnabled()) return localSnapshot;
 
@@ -183,6 +214,7 @@ export async function getAuthSnapshot(): Promise<AuthSnapshot> {
 
   const { data, error } = await client.auth.getSession();
   if (error) throw error;
+  rememberLoginEmail(data.session?.user?.email ?? '');
   return { session: data.session, user: data.session?.user ?? null };
 }
 
@@ -223,13 +255,13 @@ export async function signInWithTestInvite(email: string, inviteCode: string): P
   const normalizedCode = normalizeInviteCode(inviteCode);
 
   const activatedAuth = readActivatedTestInviteAuth(normalizedEmail);
-  if (normalizedEmail && !normalizedCode && activatedAuth) {
+  if (normalizedEmail && activatedAuth) {
     writeStoredLocalAuth(
       activatedAuth.email || normalizedEmail,
       activatedAuth.accessToken,
       activatedAuth.refreshToken || `test-invite-refresh-${Date.now()}`,
     );
-    return getMockAuthSnapshot().session;
+    return getLocalAuthSnapshot().session;
   }
 
   if (!normalizedEmail) throw new Error('请输入邮箱。');
@@ -248,7 +280,7 @@ export async function signInWithTestInvite(email: string, inviteCode: string): P
   const nextRefreshToken = `test-invite-refresh-${Date.now()}`;
   writeStoredLocalAuth(nextEmail, data?.accessToken, nextRefreshToken);
   writeActivatedTestInviteAuth(nextEmail, data?.accessToken, nextRefreshToken);
-  return getMockAuthSnapshot().session;
+  return getLocalAuthSnapshot().session;
 }
 
 export async function sendLoginCode(email: string): Promise<void> {
@@ -277,7 +309,7 @@ export async function verifyLoginCode(email: string, token: string): Promise<Ses
   if (isSaasMockEnabled()) {
     if (!normalizedEmail || !normalizedToken) throw new Error('请输入邮箱和验证码。');
     writeStoredLocalAuth(normalizedEmail);
-    return getMockAuthSnapshot().session;
+    return getLocalAuthSnapshot().session;
   }
 
   const client = getSupabaseClient();
@@ -290,6 +322,7 @@ export async function verifyLoginCode(email: string, token: string): Promise<Ses
   });
 
   if (error) throw error;
+  rememberLoginEmail(data.session?.user?.email ?? normalizedEmail);
   return data.session;
 }
 

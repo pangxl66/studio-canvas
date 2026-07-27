@@ -51,7 +51,6 @@ import {
   departmentAssetAsInputText,
   mergedTextInputForDepartment,
   mergedUpstreamForPromptReviewNode,
-  mergedUpstreamForTextNode,
   resolveDepartmentExecutionInput,
 } from '@/services/graphInput';
 import {
@@ -429,6 +428,7 @@ function makeTextNodeData(id: string, text = '', positionLabel?: string): Studio
     review_result: null,
     version: 0,
     label: positionLabel ?? '文本卡片',
+    text_node_role: 'auto',
     assistant_preferences: '',
     assistant_task_instruction: '',
   };
@@ -1012,12 +1012,6 @@ function resyncConsumersAfterEdgeMutation(get: () => StudioState) {
         get().patchNodeData(n.id, { input: merged, inputSource: 'graph' }, false);
       }
     }
-    if (n.type === 'textNode') {
-      const m = mergedUpstreamForTextNode(n.id, nodes, edges);
-      if (m !== null) {
-        get().patchNodeData(n.id, { raw_text: m, input: m }, false);
-      }
-    }
   }
 }
 
@@ -1049,13 +1043,9 @@ function refreshDownstreamAfterDepartmentOutputChange(
       if (merged !== null) {
         get().patchNodeData(e.target, { input: merged, inputSource: 'graph' }, false);
       }
-    } else if (tn?.type === 'textNode') {
-      const m = mergedUpstreamForTextNode(e.target, nodes, edges);
-      if (m !== null) {
-        get().patchNodeData(e.target, { raw_text: m, input: m }, false);
-      }
     }
   }
+  resyncConsumersAfterEdgeMutation(get);
 }
 
 function edgeIdentity(edge: Pick<Edge, 'source' | 'target' | 'sourceHandle' | 'targetHandle'>): string {
@@ -1443,10 +1433,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       }
     }
     if (targetNode?.type === 'textNode') {
-      const m = mergedUpstreamForTextNode(tgt, nodes, edges);
-      if (m !== null) {
-        get().patchNodeData(tgt, { raw_text: m, input: m }, false);
-      }
+      resyncConsumersAfterEdgeMutation(get);
     }
     if (targetNode?.type === 'promptReview') {
       const m = mergedUpstreamForPromptReviewNode(tgt, nodes, edges);
@@ -2098,16 +2085,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
     const updated = get().nodes.find((n) => n.id === id);
     if (updated?.type === 'textNode') {
-      const { nodes, edges } = get();
-      const targets = [...new Set(edges.filter((e) => e.source === id).map((e) => e.target))];
-      for (const tid of targets) {
-        const t = nodes.find((n) => n.id === tid);
-        if (t?.type === 'department' && shouldPreferManualInput(t.data)) continue;
-        const merged = mergedTextInputForDepartment(tid, nodes, edges);
-        if (merged !== null) {
-          get().patchNodeData(tid, { input: merged, inputSource: 'graph' }, false);
-        }
-      }
+      resyncConsumersAfterEdgeMutation(get);
     }
     // 娴犲懎缍?output 閸欐ê瀵查弮璺哄煕閺?Output 鏉╃偟鍤庢稉瀣畱閸氬牆鑻熸潏鎾冲弳閿涙稓鍑?input 閺囧瓨鏌婇懟銉ょ瘍閸掗攱鏌婃导姘遍獓閼?patchNodeTask閳壊eact 閹?Maximum update depth
     const outputTouched = 'output' in patchEff;
@@ -2562,11 +2540,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     };
 
     const syncTextIn = (textId: string) => {
-      const { nodes, edges } = get();
-      const m = mergedUpstreamForTextNode(textId, nodes, edges);
-      if (m !== null) {
-        get().patchNodeData(textId, { raw_text: m, input: m }, false);
-      }
+      void textId;
+      resyncConsumersAfterEdgeMutation(get);
     };
 
     const isAiFilmPick = (

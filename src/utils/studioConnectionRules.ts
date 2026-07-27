@@ -1,4 +1,4 @@
-import type { Connection } from '@xyflow/react';
+import type { Connection, Edge } from '@xyflow/react';
 import type { ConnectionDragStart, NodePickerState } from '@/components/ConnectEndBinder';
 import {
   DEPT_INPUT_HANDLE_ID,
@@ -94,7 +94,7 @@ function upstreamConnectionPicksForNode(node: StudioRFNode): ConnectionMenuPick[
 
 function downstreamConnectionPicksForNode(node: StudioRFNode): ConnectionMenuPick[] {
   if (node.type === 'textNode') {
-    return ['storyboard', 'prompt'];
+    return ['text_node', 'storyboard', 'prompt'];
   }
 
   if (node.type === 'imageNode') {
@@ -170,7 +170,42 @@ export function connectionMenuPicksForPicker(
   return [];
 }
 
-export function isStudioConnectionAllowed(edge: ConnectionCandidate, nodes: StudioRFNode[]): boolean {
+function wouldCreateTextChainCycle(
+  sourceId: string,
+  targetId: string,
+  nodes: StudioRFNode[],
+  edges: Edge[],
+): boolean {
+  const textNodeIds = new Set(
+    nodes.filter((node) => node.type === 'textNode').map((node) => node.id),
+  );
+  if (!textNodeIds.has(sourceId) || !textNodeIds.has(targetId)) return false;
+
+  const outgoing = new Map<string, string[]>();
+  for (const current of edges) {
+    if (!textNodeIds.has(current.source) || !textNodeIds.has(current.target)) continue;
+    const targets = outgoing.get(current.source) ?? [];
+    targets.push(current.target);
+    outgoing.set(current.source, targets);
+  }
+
+  const pending = [targetId];
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (!current || visited.has(current)) continue;
+    if (current === sourceId) return true;
+    visited.add(current);
+    pending.push(...(outgoing.get(current) ?? []));
+  }
+  return false;
+}
+
+export function isStudioConnectionAllowed(
+  edge: ConnectionCandidate,
+  nodes: StudioRFNode[],
+  edges: Edge[] = [],
+): boolean {
   const src = edge.source;
   const tgt = edge.target;
   if (!src || !tgt || src === tgt) return false;
@@ -189,6 +224,7 @@ export function isStudioConnectionAllowed(edge: ConnectionCandidate, nodes: Stud
   if (a.type === 'textNode' && b.type === 'textNode') {
     if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
     if (edge.sourceHandle != null && edge.sourceHandle !== TEXT_NODE_OUTPUT_HANDLE_ID) return false;
+    if (wouldCreateTextChainCycle(src, tgt, nodes, edges)) return false;
     return true;
   }
 

@@ -28,14 +28,14 @@ const canonicalHeadings = [
   '结果钉子',
 ];
 
-test('Studio Canvas 2.5 is installed as the default without removing older versions', () => {
+test('Studio Canvas 2.5 remains installed after the default advances', () => {
   const v25 = JSON.parse(read('src/skills/prompt/studio_canvas_prompt_spec_v2_5_validation.json'));
   const loader = read('src/services/skillLoader.ts');
 
   assert.equal(v25.version, '2.5.0');
   assert.equal(v25.slot, 'style');
   assert.match(loader, /STUDIO_CANVAS_PROMPT_V25_SKILL_ID/);
-  assert.match(loader, /DEFAULT_PROMPT_STYLE_SKILL_ID = STUDIO_CANVAS_PROMPT_V25_SKILL_ID/);
+  assert.doesNotMatch(loader, /DEFAULT_PROMPT_STYLE_SKILL_ID = STUDIO_CANVAS_PROMPT_V25_SKILL_ID/);
   assert.match(loader, /STUDIO_CANVAS_PROMPT_V1_SKILL_ID/);
   assert.match(loader, /STUDIO_CANVAS_PROMPT_V23_SKILL_ID/);
   assert.match(loader, /STUDIO_CANVAS_PROMPT_V231_SEGMENTS_SKILL_ID/);

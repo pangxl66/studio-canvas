@@ -6,6 +6,10 @@ import {
 } from '@/agents/storyboardDeptSpec';
 import { invokeLlmJsonObjectStream, invokeLlmLeaderReview } from '@/services/llmJsonClient';
 import { createStoryboardShotWireId } from '@/utils/shotListWire';
+import {
+  applyProjectConstraintsToStoryboardOutput,
+  extractProjectConstraintsFromTaggedText,
+} from '@/utils/textNodeContext';
 
 export {
   STORYBOARD_DEPT_AGENT_SYSTEM,
@@ -70,19 +74,35 @@ function deriveNarrativeBeatsFromShots(shots: StoryboardShot[]): string[] {
   ];
 }
 
-function extractShotsPayload(parsed: unknown): { shotsRaw: unknown[]; narrativeBeatsRaw: unknown } | null {
+function extractShotsPayload(parsed: unknown): {
+  shotsRaw: unknown[];
+  narrativeBeatsRaw: unknown;
+  projectConstraintsRaw: unknown;
+} | null {
   if (Array.isArray(parsed)) {
     if (parsed.length === 0) {
-      return { shotsRaw: [], narrativeBeatsRaw: undefined };
+      return {
+        shotsRaw: [],
+        narrativeBeatsRaw: undefined,
+        projectConstraintsRaw: undefined,
+      };
     }
     const allObjects = parsed.every((x) => x != null && typeof x === 'object' && !Array.isArray(x));
     if (!allObjects) return null;
-    return { shotsRaw: parsed, narrativeBeatsRaw: undefined };
+    return {
+      shotsRaw: parsed,
+      narrativeBeatsRaw: undefined,
+      projectConstraintsRaw: undefined,
+    };
   }
   if (!parsed || typeof parsed !== 'object') return null;
   const o = parsed as Record<string, unknown>;
   if (!Array.isArray(o.shots)) return null;
-  return { shotsRaw: o.shots, narrativeBeatsRaw: o.narrativeBeats };
+  return {
+    shotsRaw: o.shots,
+    narrativeBeatsRaw: o.narrativeBeats,
+    projectConstraintsRaw: o.projectConstraints ?? o.project_constraints,
+  };
 }
 
 function coerceShotId(r: Record<string, unknown>, idx: number): number {
@@ -191,7 +211,20 @@ function parseStoryboardPayload(
     Array.isArray(extracted.narrativeBeatsRaw) && extracted.narrativeBeatsRaw.length > 0
       ? extracted.narrativeBeatsRaw.map((b, i) => (typeof b === 'string' ? b : String(b ?? `节拍 ${i + 1}`)))
       : deriveNarrativeBeatsFromShots(shots);
-  return { narrativeBeats, shots };
+  const projectConstraints = Array.isArray(extracted.projectConstraintsRaw)
+    ? Array.from(
+        new Set(
+          extracted.projectConstraintsRaw
+            .map((item) => String(item ?? '').trim())
+            .filter(Boolean),
+        ),
+      )
+    : undefined;
+  return {
+    narrativeBeats,
+    shots,
+    ...(projectConstraints?.length ? { projectConstraints } : {}),
+  };
 }
 
 export function assertStoryboardOutput(x: unknown): StoryboardOutput {
@@ -235,8 +268,10 @@ function buildStoryboardUserPromptFromRawText(t: string): string {
 6. 只有在同场连续镜头明确适合 15 秒内合并时，才使用 mergedMembers。
 7. 若输入包含“视觉场景参考图 / 图片场景分析”，必须把图片当作场景设定硬约束：所有镜头的地点、时代、空间方向、光影色彩、美术质感、可见道具/建筑/环境元素和氛围都必须与图片一致，并在 sceneRef、description 或 note 中落地，不得生成与参考图冲突的场景设定。
 8. shots 中每条镜头都必须输出 durationSec，单位为秒；请根据动作复杂度、对白长度、情绪停顿、景别变化和信息密度合理分配镜头时间，不要平均分配，也不要为了凑时长硬拉长。
+9. 若输入包含“【项目约束｜名称】”，它是跨镜 HARD 约束，不是剧情正文。必须把与当前镜头有关的画幅、时段、场景、摄影、镜头光学、flare、色彩和灯光要求落实到 description 或 note；不得把约束文字误当成台词或新剧情。
+10. “【分镜正文｜名称】”才是人物、事件、动作和对白的主要来源；“【参考资料｜名称】”只能补充，不得覆盖项目约束和分镜正文。
 
-只输出形如 { "shots": [ ... ], "narrativeBeats": [ ... ] } 的 JSON。
+只输出形如 { "shots": [ ... ], "narrativeBeats": [ ... ], "projectConstraints": [ ... ] } 的 JSON。projectConstraints 只保留输入中的项目约束，不得混入剧情摘要。
 
 ${t}`;
 }
@@ -255,7 +290,7 @@ export async function runStoryboardDesigner(
     onDelta,
     signal,
   });
-  return assertStoryboardOutput(parsed);
+  return applyProjectConstraintsToStoryboardOutput(assertStoryboardOutput(parsed));
 }
 
 function tryParseWritingOutput(raw: string): WritingOutput | null {
@@ -294,7 +329,9 @@ export async function runStoryboardDesignerFromScriptText(
     onDelta,
     signal,
   });
-  return assertStoryboardOutput(parsed);
+  const output = assertStoryboardOutput(parsed);
+  const inputConstraints = extractProjectConstraintsFromTaggedText(t);
+  return applyProjectConstraintsToStoryboardOutput(output, inputConstraints);
 }
 
 export type LeaderDecision = { approved: true } | { approved: false; feedback: string };

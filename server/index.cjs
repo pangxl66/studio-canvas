@@ -1629,12 +1629,6 @@ async function handleTestInvite(req, res, url) {
     return;
   }
 
-  const inviteCodes = getTestInviteCodes();
-  if (!inviteCodes.length) {
-    sendJson(res, 404, { error: { message: '测试邀请码登录未启用。' } });
-    return;
-  }
-
   let body;
   try {
     body = await readJsonBody(req);
@@ -1645,12 +1639,17 @@ async function handleTestInvite(req, res, url) {
 
   const email = normalizeEmail(body?.email) || normalizeEmail(env('TEST_INVITE_EMAIL')) || 'tester@studio-canvas.local';
   const isActivatedEmail = hasActivatedTestInviteEmail(email);
+  const inviteCodes = getTestInviteCodes();
+  if (!isActivatedEmail && !inviteCodes.length) {
+    sendJson(res, 404, { error: { message: '测试邀请码登录未启用。' } });
+    return;
+  }
   const inviteCode = normalizeInviteCode(body?.inviteCode || body?.code || '');
   if (!inviteCode && !isActivatedEmail) {
     sendJson(res, 400, { error: { message: '请输入测试邀请码。' } });
     return;
   }
-  if (inviteCode && !inviteCodes.includes(inviteCode)) {
+  if (!isActivatedEmail && inviteCode && !inviteCodes.includes(inviteCode)) {
     console.warn(
       'Invalid test invite code',
       JSON.stringify({
@@ -1663,7 +1662,7 @@ async function handleTestInvite(req, res, url) {
     return;
   }
 
-  if (inviteCode) {
+  if (!isActivatedEmail && inviteCode) {
     rememberActivatedTestInviteEmail(email);
   }
   const accessToken = createTestInviteToken(email);

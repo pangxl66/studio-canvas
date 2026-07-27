@@ -98,7 +98,9 @@ export function sanitizePromptAssetIds(values: string[] | undefined): string[] {
 export function resolvePromptAssetPlaceholders(
   text: string,
   refs?: PromptAssetNameRefs,
+  options?: { mountSeparator?: string },
 ): string {
+  const mountSeparator = options?.mountSeparator ?? ' ';
   const characterNames = sanitizePromptAssetIds(refs?.characterNames);
   const propNames = sanitizePromptAssetIds(refs?.propNames);
   const sceneNames = sanitizePromptAssetIds(refs?.sceneNames);
@@ -112,11 +114,11 @@ export function resolvePromptAssetPlaceholders(
   const resolved = String(text ?? '')
     .replace(
       /\|@=PENDING_CHAR_FROM_ASSET_SYSTEM\|/gi,
-      characterNames.map((name) => `|@=${name}|`).join(' '),
+      characterNames.map((name) => `|@=${name}|`).join(mountSeparator),
     )
     .replace(
       /\|@=PENDING_SCENE_FROM_ASSET_SYSTEM\|/gi,
-      sceneNames.map((name) => `|@=${name}|`).join(' '),
+      sceneNames.map((name) => `|@=${name}|`).join(mountSeparator),
     )
     .split(/\r?\n/)
     .map((line) => {
@@ -130,7 +132,7 @@ export function resolvePromptAssetPlaceholders(
         ...fallbackMountNames,
       ]);
       return mountNames.length > 0
-        ? `${match[1]}${mountNames.map((name) => `|@=${name}|`).join(' ')}`
+        ? `${match[1]}${mountNames.map((name) => `|@=${name}|`).join(mountSeparator)}`
         : line;
     })
     .join('\n');

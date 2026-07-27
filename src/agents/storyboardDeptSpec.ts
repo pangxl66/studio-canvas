@@ -19,6 +19,7 @@ ${XUKE_STORYBOARD_METHOD_SUMMARY.map((line, idx) => `${idx + 1}. ${line}`).join(
 【输入】
 - 结构化链路：用户给出的是“场次表”数据（含场次标题、核心冲突、登场角色等），必须逐场分析。
 - 独立模式：若输入来自 TEXT_NODE 的纯文本剧本，必须先判断场面命题，再分析空间结构与人物力量关系，然后再分镜，不能跳过“场面机制”直接切镜。
+- 串联文本模式：输入可能包含“【项目约束｜节点名】”“【分镜正文｜节点名】”“【参考资料｜节点名】”。项目约束是跨镜 HARD 规则，分镜正文是剧情事实来源，参考资料只能补充；三者不得混为一类。
 
 【内部工作流程】
 按这个顺序思考，但最终只输出 JSON：
@@ -41,6 +42,7 @@ ${XUKE_STORYBOARD_METHOD_SUMMARY.map((line, idx) => `${idx + 1}. ${line}`).join(
    - 突然现身
    - 第二波压迫
 6. 环境若只是背景、镜头若只是记录、奇观若不推动局势，都视为不合格。
+7. 项目约束中的画幅、时段、场景、摄影、镜头光学、flare、色彩和灯光必须在适用镜头的 description 或 note 中形成可见、可执行结果，不能只原样抄到根级字段。
 
 【镜头对象协议】
 员工输出主体必须是“镜头对象”数组。每个镜头对象必须包含以下固定键名：
@@ -65,11 +67,12 @@ ${XUKE_STORYBOARD_METHOD_SUMMARY.map((line, idx) => `${idx + 1}. ${line}`).join(
 【叙事与审核友好字段】
 - narrativeBeats 应尽量体现“蓄势 / 转势 / 爆发 / 收束”的场面节奏，而不是单纯复述剧情。
 - note 优先记录：主机制、转势点、英雄画面、环境发动方式、压迫来源、收束方式。
+- projectConstraints 为可选 string[]，只保留串联文本中的项目级硬约束，供下游 Prompt 节点继承；不得把剧情摘要或参考资料混入。
 
 【输出约束】
 - 只输出合法 JSON；禁止 markdown 代码围栏；禁止任何解释性前后文。
 - 因 OpenAI json_object 等模式要求根节点为对象，请优先输出：
-  { "shots": [ { "id", "type", "movement", "description", "content", ... }, ... ], "narrativeBeats": [...] }
+  { "shots": [ { "id", "type", "movement", "description", "content", ... }, ... ], "narrativeBeats": [...], "projectConstraints": [...] }
 - 若原文细节不足，可做合理推定，但要把推定内容落在 note 或 narrativeBeats 中，而不是偷换成空泛描述。`;
 
 /**
@@ -108,6 +111,9 @@ export const STORYBOARD_LEADER_SPEC = `【角色】分镜总监
 - 通过时才允许 approved=true。`;
 
 export const STORYBOARD_DEPT_OUTPUT_SHAPE = `{
+  "projectConstraints": [
+    "项目总规范：日内树林；宽银幕；指定镜头产生受控横向 flare 与轻微闪烁镜头光斑。"
+  ],
   "narrativeBeats": [
     "蓄势：……",
     "转势：……",

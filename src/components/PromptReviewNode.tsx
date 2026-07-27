@@ -7,11 +7,9 @@ import {
   type NodeProps,
 } from '@xyflow/react';
 import { memo, useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react';
-import { mergedUpstreamForPromptReviewNode } from '@/services/graphInput';
 import { useStudioStore } from '@/store/useStudioStore';
 import type { PromptReviewHistoryEntry, StudioNodeData } from '@/types/studio';
 import { DEPT_OUTPUT_HANDLE_ID } from '@/utils/departmentInputWire';
-import { sanitizePromptAssetPlaceholders } from '@/utils/promptAssetRefs';
 
 type PromptReviewRF = Node<StudioNodeData, 'promptReview'>;
 
@@ -40,38 +38,6 @@ function historyPreview(text: string): string {
   return normalized.length > 72 ? `${normalized.slice(0, 72)}...` : normalized;
 }
 
-function restoreResolvedMountLines(currentText: string, upstreamText: string): string {
-  const upstreamMounts = upstreamText
-    .split(/\r?\n/)
-    .filter((line) => /^\s*挂载[:：]/.test(line) && !/^\s*挂载[:：]\s*无\s*$/.test(line));
-  if (upstreamMounts.length === 0) return currentText;
-  let index = 0;
-  return currentText
-    .split(/\r?\n/)
-    .map((line) => {
-      const tokens = Array.from(line.matchAll(/\|@=([^|]+)\|/g)).map((match) =>
-        String(match[1] ?? '').trim(),
-      );
-      const needsRepair =
-        /^\s*挂载[:：]\s*无\s*$/.test(line) ||
-        (tokens.length > 0 &&
-          (tokens.length > 8 ||
-            tokens.some(
-              (token) =>
-                token.length <= 1 ||
-                token.length > 20 ||
-                /[。！？!?]/.test(token) ||
-                /^(身份|人数)$/.test(token) ||
-                /(可见|保持稳定|相对座次|形成入口边界|中央为)/.test(token),
-            )));
-      if (!needsRepair) return line;
-      const replacement = upstreamMounts[index];
-      index += 1;
-      return replacement ?? line;
-    })
-    .join('\n');
-}
-
 function PromptReviewNodeInner({ id, data, selected }: NodeProps<PromptReviewRF>) {
   const [instruction, setInstruction] = useState('');
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -85,22 +51,11 @@ function PromptReviewNodeInner({ id, data, selected }: NodeProps<PromptReviewRF>
   const focusNode = useStudioStore((s) => s.focusNode);
   const pushMessage = useStudioStore((s) => s.pushMessage);
   const activeNodeId = useStudioStore((s) => s.activeNodeId);
-  const upstreamReviewText = useStudioStore(
-    useCallback(
-      (state) => mergedUpstreamForPromptReviewNode(id, state.nodes, state.edges) ?? '',
-      [id],
-    ),
-  );
   const updateNodeInternals = useUpdateNodeInternals();
   const rawText = data.raw_text ?? data.input ?? '';
-  const text = restoreResolvedMountLines(
-    sanitizePromptAssetPlaceholders(rawText),
-    sanitizePromptAssetPlaceholders(upstreamReviewText),
-  );
+  const text = rawText;
   const busy = data.status === 'IN_PROGRESS';
-  const displayText = sanitizePromptAssetPlaceholders(
-    busy ? (data.streaming_preview ?? text) : text,
-  );
+  const displayText = busy ? (data.streaming_preview ?? text) : text;
   const totalChars = displayText.replace(/\s+/g, '').length;
   const history = (Array.isArray(data.prompt_review_history)
     ? data.prompt_review_history
@@ -329,7 +284,7 @@ function PromptReviewNodeInner({ id, data, selected }: NodeProps<PromptReviewRF>
           <div className="prompt-review-node__title">{data.label || '提示词审核节点'}</div>
         </div>
         <span className={`prompt-review-node__status prompt-review-node__status--${data.status}`}>
-          {busy ? '调整中' : '可编辑'}
+          {busy ? '调整中' : '原始输出'}
         </span>
       </header>
 

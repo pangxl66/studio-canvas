@@ -167,7 +167,15 @@ export interface StoryboardOutput {
   shots: StoryboardShot[];
   /** 场次节拍摘要；若模型未返回则由解析器根据镜头推导，供总监对齐与侧栏展示 */
   narrativeBeats: string[];
+  /** 从串联文本节点继承的项目级硬约束，供后续 Prompt 节点继续读取。 */
+  projectConstraints?: string[];
 }
+
+export type TextNodeSemanticRole =
+  | 'auto'
+  | 'project_constraints'
+  | 'story_content'
+  | 'reference_notes';
 
 /** 单镜头视频提示词的十维结构化（与主 prompt 字符串互补） */
 export interface PromptShotDimensions {
@@ -299,6 +307,8 @@ export type StudioNodeData = {
   /** TEXT_NODE：展示模式。plain=常规文本节点；未设置时使用 AI 工作区模式 */
   text_view_mode?: 'plain';
   text_polish_mode?: 'simple' | 'deep';
+  /** TEXT_NODE：在串联链路中的语义用途；auto 会结合节点名称和正文自动判断。 */
+  text_node_role?: TextNodeSemanticRole;
   /** AI Filmmaking 影视分镜节点：当前选用的分镜 Skill id */
   film_storyboard_skill_id?: string;
   /** AI Filmmaking storyboard grid canvas ratio. */

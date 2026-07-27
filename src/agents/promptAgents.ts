@@ -10,6 +10,8 @@ import {
   PROMPT_DEPT_OUTPUT_SHAPE_V23,
   PROMPT_DEPT_OUTPUT_SHAPE_V231_SEGMENTS,
   PROMPT_DEPT_OUTPUT_SHAPE_V25,
+  PROMPT_DEPT_OUTPUT_SHAPE_V26,
+  PROMPT_DEPT_OUTPUT_SHAPE_V27,
   PROMPT_LOCAL_COMPRESSION_RULE,
   PROMPT_LEADER_SPEC,
   PROMPT_MOUNT_TOKEN_RULE,
@@ -41,6 +43,10 @@ import {
   sanitizePromptAssetIds,
   sanitizePromptAssetPlaceholders,
 } from '@/utils/promptAssetRefs';
+import {
+  parseStudioCanvasTimelineIntervals,
+  repairStudioCanvasV25Timeline,
+} from '@/utils/studioCanvasTimeline';
 export {
   PROMPT_DEPT_AGENT_SYSTEM,
   PROMPT_DEPT_OUTPUT_SHAPE,
@@ -87,6 +93,8 @@ const SEEDANCE2_SEGMENTED_HEADINGS = [
 const SEEDANCE_PROMPT_SECTION_INDEX = 9;
 const SEEDANCE_OPTIONAL_SECTION_INDICES = new Set<number>();
 const MOUNT_TOKEN_RE = /\|@=([^|\n]+)\|/g;
+const MAX_STUDIO_CANVAS_V26_MOUNT_ITEMS = 15;
+const MAX_STUDIO_CANVAS_V27_MOUNT_ITEMS = 30;
 const STRUCTURED_FIELD_NOISE_RE = /文字生成版|无素材|角色资产|场景资产|半空中袖|口一翻/;
 const ACTION_FRAGMENT_TOKEN_RE =
   /^(?:探头|探身|回头|转身|抬手|收枪|落锁|关门|开口|低声|沉声|冷声|停在|停住|看见|看向|望向|闪身|逼近|后撤|甩袖|翻腕)$/;
@@ -97,11 +105,15 @@ type PromptStyleMode =
   | 'studioCanvasV23'
   | 'studioCanvasV231Segments'
   | 'studioCanvasV25'
+  | 'studioCanvasV26'
+  | 'studioCanvasV27'
   | 'seedance2Segmented';
 
 const STUDIO_CANVAS_V23_MARKER = 'Studio Canvas 默认提示词规范·生产优化版';
 const STUDIO_CANVAS_V231_SEGMENTS_MARKER = 'Studio Canvas 2.3.1 组合镜头结构化版';
 const STUDIO_CANVAS_V25_MARKER = 'Studio Canvas 默认提示词规范·生产校验版';
+const STUDIO_CANVAS_V26_MARKER = 'Studio Canvas 默认提示词规范·详细挂载版';
+const STUDIO_CANVAS_V27_MARKER = 'Studio Canvas 默认提示词规范·摄影机参数匹配版';
 
 function inferPromptStyleMode(executionSystemPrompt?: string): PromptStyleMode {
   if (executionSystemPrompt?.includes(SEEDANCE2_SEGMENTED_PROMPT_MARKER)) {
@@ -109,6 +121,12 @@ function inferPromptStyleMode(executionSystemPrompt?: string): PromptStyleMode {
   }
   if (executionSystemPrompt?.includes(STUDIO_CANVAS_V231_SEGMENTS_MARKER)) {
     return 'studioCanvasV231Segments';
+  }
+  if (executionSystemPrompt?.includes(STUDIO_CANVAS_V27_MARKER)) {
+    return 'studioCanvasV27';
+  }
+  if (executionSystemPrompt?.includes(STUDIO_CANVAS_V26_MARKER)) {
+    return 'studioCanvasV26';
   }
   if (executionSystemPrompt?.includes(STUDIO_CANVAS_V25_MARKER)) {
     return 'studioCanvasV25';
@@ -127,7 +145,9 @@ function isStudioCanvasV23Style(styleMode: PromptStyleMode): boolean {
   return (
     styleMode === 'studioCanvasV23' ||
     styleMode === 'studioCanvasV231Segments' ||
-    styleMode === 'studioCanvasV25'
+    styleMode === 'studioCanvasV25' ||
+    styleMode === 'studioCanvasV26' ||
+    styleMode === 'studioCanvasV27'
   );
 }
 
@@ -137,6 +157,22 @@ function isStudioCanvasV231SegmentsStyle(styleMode: PromptStyleMode): boolean {
 
 function isStudioCanvasV25Style(styleMode: PromptStyleMode): boolean {
   return styleMode === 'studioCanvasV25';
+}
+
+function isStudioCanvasV26Style(styleMode: PromptStyleMode): boolean {
+  return styleMode === 'studioCanvasV26';
+}
+
+function isStudioCanvasV27Style(styleMode: PromptStyleMode): boolean {
+  return styleMode === 'studioCanvasV27';
+}
+
+function isStudioCanvasValidationStyle(styleMode: PromptStyleMode): boolean {
+  return (
+    isStudioCanvasV25Style(styleMode) ||
+    isStudioCanvasV26Style(styleMode) ||
+    isStudioCanvasV27Style(styleMode)
+  );
 }
 
 function getMaxSeedanceCardChars(styleMode: PromptStyleMode): number {
@@ -771,32 +807,20 @@ function assertStudioCanvasV23Card(shotId: string, seedanceCard: string): string
   return card;
 }
 
-function assertStudioCanvasV25Card(shotId: string, seedanceCard: string): string {
-  const card = assertStudioCanvasV23Card(shotId, seedanceCard);
+function assertStudioCanvasValidationTimeline(
+  shotId: string,
+  card: string,
+  versionLabel: string,
+): void {
   const { header, sections } = parseStudioCanvasV23Sections(card);
   const sectionMap = new Map(sections.map((section) => [section.heading, section.body.trim()]));
 
-  const mountBody = sectionMap.get('挂载') ?? '';
-  if (mountBody !== '无') {
-    const mountTokens = Array.from(mountBody.matchAll(MOUNT_TOKEN_RE))
-      .map((match) => String(match[1] ?? '').trim())
-      .filter(Boolean);
-    const canonicalMountBody = mountTokens.map((token) => `|@=${token}|`).join(' ');
-    if (!mountTokens.length || mountBody !== canonicalMountBody) {
-      throw new Error(
-        `Prompt 模型返回：镜头 ${shotId} 的 Studio Canvas 2.5 挂载必须只含独立资产标记，并以单个空格分隔，例如“|@=角色| |@=场景|”。`,
-      );
-    }
-  }
-
   const duration = Number(header.match(/^【分镜[^|]+\s*\|\s*(\d+(?:\.\d+)?)秒】$/)?.[1]);
   const timeline = sectionMap.get('摄影机动态参数') ?? '';
-  const intervals = Array.from(
-    timeline.matchAll(/(\d+(?:\.\d+)?)\s*(?:至|到|-|—|~|～)\s*(\d+(?:\.\d+)?)\s*秒/g),
-  ).map((match) => ({ start: Number(match[1]), end: Number(match[2]) }));
+  const intervals = parseStudioCanvasTimelineIntervals(timeline);
   if (!intervals.length) {
     throw new Error(
-      `Prompt 模型返回：镜头 ${shotId} 的 Studio Canvas 2.5 “摄影机动态参数”缺少连续时间段。`,
+      `Prompt 模型返回：镜头 ${shotId} 的 Studio Canvas ${versionLabel} “摄影机动态参数”缺少连续时间段。`,
     );
   }
   const tolerance = 0.01;
@@ -809,17 +833,130 @@ function assertStudioCanvasV25Card(shotId: string, seedanceCard: string): string
       Math.abs(interval.start - cursor) > tolerance
     ) {
       throw new Error(
-        `Prompt 模型返回：镜头 ${shotId} 的 Studio Canvas 2.5 时间轴存在空洞、重叠或无效区间。`,
+        `Prompt 模型返回：镜头 ${shotId} 的 Studio Canvas ${versionLabel} 时间轴存在空洞、重叠或无效区间。`,
       );
     }
     cursor = interval.end;
   }
   if (!Number.isFinite(duration) || Math.abs(cursor - duration) > tolerance) {
     throw new Error(
-      `Prompt 模型返回：镜头 ${shotId} 的 Studio Canvas 2.5 时间轴总和必须等于首行总时长。`,
+      `Prompt 模型返回：镜头 ${shotId} 的 Studio Canvas ${versionLabel} 时间轴总和必须等于首行总时长。`,
+    );
+  }
+}
+
+function assertStudioCanvasV25Card(shotId: string, seedanceCard: string): string {
+  const card = assertStudioCanvasV23Card(shotId, seedanceCard);
+  const { sections } = parseStudioCanvasV23Sections(card);
+  const sectionMap = new Map(sections.map((section) => [section.heading, section.body.trim()]));
+  const mountBody = sectionMap.get('挂载') ?? '';
+  if (mountBody !== '无') {
+    const mountTokens = Array.from(mountBody.matchAll(MOUNT_TOKEN_RE))
+      .map((match) => String(match[1] ?? '').trim())
+      .filter(Boolean);
+    const canonicalMountBody = mountTokens.map((token) => `|@=${token}|`).join(' ');
+    if (!mountTokens.length || mountBody !== canonicalMountBody) {
+      throw new Error(
+        `Prompt 模型返回：镜头 ${shotId} 的 Studio Canvas 2.5 挂载必须只含独立资产标记，并以单个空格分隔，例如“|@=角色| |@=场景|”。`,
+      );
+    }
+  }
+  assertStudioCanvasValidationTimeline(shotId, card, '2.5');
+  return card;
+}
+
+function assertStudioCanvasV26Card(
+  shotId: string,
+  seedanceCard: string,
+  versionLabel = '2.6',
+): string {
+  const card = assertStudioCanvasV23Card(shotId, seedanceCard);
+  const { sections } = parseStudioCanvasV23Sections(card);
+  const sectionMap = new Map(sections.map((section) => [section.heading, section.body.trim()]));
+  const mountBody = sectionMap.get('挂载') ?? '';
+  if (mountBody !== '无') {
+    const mountTokens = Array.from(mountBody.matchAll(MOUNT_TOKEN_RE))
+      .map((match) => String(match[1] ?? '').trim())
+      .filter(Boolean);
+    const canonicalMountBody = mountTokens.map((token) => `|@=${token}|`).join('');
+    if (!mountTokens.length || mountBody !== canonicalMountBody) {
+      throw new Error(
+        `Prompt 模型返回：镜头 ${shotId} 的 Studio Canvas ${versionLabel} 挂载必须使用无空格连续格式，例如“|@=角色||@=道具||@=场景|”。`,
+      );
+    }
+    const maxMountItems =
+      versionLabel === '2.7'
+        ? MAX_STUDIO_CANVAS_V27_MOUNT_ITEMS
+        : MAX_STUDIO_CANVAS_V26_MOUNT_ITEMS;
+    if (mountTokens.length > maxMountItems) {
+      throw new Error(
+        `Prompt 模型返回：镜头 ${shotId} 的 Studio Canvas ${versionLabel} 挂载超过${maxMountItems}项，请删除不影响执行的装饰元素。`,
+      );
+    }
+    if (
+      new Set(mountTokens).size !== mountTokens.length ||
+      mountTokens.some((token) => looksNoisyStructuredToken(token))
+    ) {
+      throw new Error(
+        `Prompt 模型返回：镜头 ${shotId} 的 Studio Canvas ${versionLabel} 挂载含重复项、动作残片、占位符或无效实体。`,
+      );
+    }
+  }
+  assertStudioCanvasValidationTimeline(shotId, card, versionLabel);
+
+  return card;
+}
+
+function assertStudioCanvasV27CameraParams(shotId: string, lensParams: string): void {
+  const blocks = Array.from(lensParams.matchAll(/【摄影机·镜头】([^【\n]+)/g))
+    .map((match) => String(match[1] ?? '').trim().replace(/[；;。]\s*$/, ''))
+    .filter(Boolean);
+  if (!blocks.length) {
+    throw new Error(
+      `Prompt 模型返回：镜头 ${shotId} 的 Studio Canvas 2.7 “镜头参数”缺少【摄影机·镜头】统一参数句式。`,
     );
   }
 
+  for (const block of blocks) {
+    const parts = block.split('+').map((part) => part.trim()).filter(Boolean);
+    const [camera, optics, focalLength, aperture, ...depthParts] = parts;
+    const depthAndFocus = depthParts.join('+');
+    const validCamera = Boolean(camera && /(?:机型|摄影机)$/.test(camera));
+    const validOptics = Boolean(
+      optics && /(?:镜头|光学|Anamorphic|Prime|Macro|Probe)/i.test(optics),
+    );
+    const validFocalLength = Boolean(
+      focalLength && /\d+(?:\.\d+)?(?:\s*[–—~-]\s*\d+(?:\.\d+)?)?\s*mm焦段/i.test(focalLength),
+    );
+    const validAperture = Boolean(
+      aperture && /(?:T|F)\s*\d+(?:\.\d+)?(?:\s*[–—~-]\s*(?:T|F)?\s*\d+(?:\.\d+)?)?光圈/i.test(aperture),
+    );
+    const validDepth = /(?:极浅|浅|中等|中深|深|全深)景深/.test(depthAndFocus);
+    const validFocusDuty =
+      /（[^）]*实焦[^）]*）/.test(depthAndFocus) &&
+      /(?:失焦|清晰|可读|拉焦|跟焦|焦点)/.test(depthAndFocus);
+
+    if (
+      parts.length < 5 ||
+      !validCamera ||
+      !validOptics ||
+      !validFocalLength ||
+      !validAperture ||
+      !validDepth ||
+      !validFocusDuty
+    ) {
+      throw new Error(
+        `Prompt 模型返回：镜头 ${shotId} 的 Studio Canvas 2.7 摄影机参数必须完整写为“【摄影机·镜头】摄影机机型+镜头体系或光学类型+焦段+光圈+景深（实焦主体、失焦层级与焦点变化）”。`,
+      );
+    }
+  }
+}
+
+function assertStudioCanvasV27Card(shotId: string, seedanceCard: string): string {
+  const card = assertStudioCanvasV26Card(shotId, seedanceCard, '2.7');
+  const { sections } = parseStudioCanvasV23Sections(card);
+  const sectionMap = new Map(sections.map((section) => [section.heading, section.body.trim()]));
+  assertStudioCanvasV27CameraParams(shotId, sectionMap.get('镜头参数') ?? '');
   return card;
 }
 
@@ -835,6 +972,24 @@ function hasStudioCanvasV23Structure(seedanceCard: string): boolean {
 function hasStudioCanvasV25Structure(seedanceCard: string): boolean {
   try {
     assertStudioCanvasV25Card('structure-check', seedanceCard);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasStudioCanvasV26Structure(seedanceCard: string): boolean {
+  try {
+    assertStudioCanvasV26Card('structure-check', seedanceCard);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasStudioCanvasV27Structure(seedanceCard: string): boolean {
+  try {
+    assertStudioCanvasV27Card('structure-check', seedanceCard);
     return true;
   } catch {
     return false;
@@ -1252,12 +1407,19 @@ function normalizePromptOutput(
         propNames: props,
         sceneNames: resolvedScenes,
         soundNames: sounds,
+      }, {
+        mountSeparator:
+          isStudioCanvasV26Style(styleMode) || isStudioCanvasV27Style(styleMode)
+            ? ''
+            : ' ',
       });
     };
     const normalizedSeedanceCard =
       typeof pack.seedanceCard === 'string'
         ? isSeedance2SegmentedStyle(styleMode)
           ? normalizeSeedance2CardText(pack.seedanceCard)
+          : isStudioCanvasValidationStyle(styleMode)
+            ? repairStudioCanvasV25Timeline(pack.seedanceCard)
           : isStudioCanvasV23Style(styleMode)
             ? pack.seedanceCard.replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim()
             : tightenSeedanceCard(pack.seedanceCard)
@@ -1289,7 +1451,11 @@ function normalizePromptOutput(
       format: isSeedance2SegmentedStyle(styleMode)
         ? SEEDANCE2_SEGMENTED_FORMAT
         : isStudioCanvasV231SegmentsStyle(styleMode)
-          ? 'studio_canvas_v2_3_1_segments'
+        ? 'studio_canvas_v2_3_1_segments'
+        : isStudioCanvasV27Style(styleMode)
+          ? 'studio_canvas_v2_7'
+        : isStudioCanvasV26Style(styleMode)
+          ? 'studio_canvas_v2_6'
         : isStudioCanvasV25Style(styleMode)
           ? 'studio_canvas_v2_5'
         : isStudioCanvasV23Style(styleMode)
@@ -1309,9 +1475,11 @@ function outputNeedsCompressionRepair(output: PromptOutput, styleMode: PromptSty
     if (seedanceCard && seedanceCardLength < getMinSeedanceCardChars(styleMode)) return true;
     if (seedanceCard && seedanceCardLength > getMaxSeedanceCardChars(styleMode)) return true;
     if (isStudioCanvasV25Style(styleMode) && !hasStudioCanvasV25Structure(seedanceCard)) return true;
+    if (isStudioCanvasV26Style(styleMode) && !hasStudioCanvasV26Structure(seedanceCard)) return true;
+    if (isStudioCanvasV27Style(styleMode) && !hasStudioCanvasV27Structure(seedanceCard)) return true;
     if (
       isStudioCanvasV23Style(styleMode) &&
-      !isStudioCanvasV25Style(styleMode) &&
+      !isStudioCanvasValidationStyle(styleMode) &&
       !hasStudioCanvasV23Structure(seedanceCard)
     ) return true;
     if (
@@ -1367,7 +1535,11 @@ function validatePromptPackContent(pack: PromptShotPack, styleMode: PromptStyleM
     return;
   }
   if (isStudioCanvasV23Style(styleMode)) {
-    if (isStudioCanvasV25Style(styleMode)) {
+    if (isStudioCanvasV27Style(styleMode)) {
+      assertStudioCanvasV27Card(pack.shot_id, seedanceCard);
+    } else if (isStudioCanvasV26Style(styleMode)) {
+      assertStudioCanvasV26Card(pack.shot_id, seedanceCard);
+    } else if (isStudioCanvasV25Style(styleMode)) {
       assertStudioCanvasV25Card(pack.shot_id, seedanceCard);
     } else {
       assertStudioCanvasV23Card(pack.shot_id, seedanceCard);
@@ -2118,6 +2290,219 @@ function buildCoverageRepairUserMessageV25(
   ].filter(Boolean).join('\n\n');
 }
 
+function buildStudioCanvasV26RuntimeRules(sourceStoryboard: StoryboardOutput | null): string {
+  return [
+    `【当前主规范】${STUDIO_CANVAS_V26_MARKER}（v2.6.0）。`,
+    'Studio Canvas 2.6 使用与2.3兼容的18字段 Studio Card；全部字段使用全角冒号并严格保持既定顺序，无适用内容填写“无”。',
+    PROMPT_CARD_V23_SECTION_HEADINGS.map((heading) => `${heading}：`).join('\n'),
+    '生成前在内部按 HARD / SOFT / AUTO 处理约束：人物身份、真实资产ID、关键道具状态、剧情结果和用户明确要求属于 HARD，不得被系统建议覆盖。',
+    '精确数字只能继承用户输入、Project Bible、场景数据或结构化参数；系统建议使用定性表述、合理范围或带“约”的软锁数字，禁止伪造厘米、米、占比、色温、BPM和光比事实。',
+    '源分镜表是当前镜头的最小执行清单：characters、props、sceneRef、sound，以及 description/action 中明确命名并直接影响动作、构图、光线、空间路径、状态变化或连续性的实体，均可进入详细挂载。',
+    '挂载必须使用无空格连续格式：|@=实体名||@=实体名|；禁止在标记之间添加空格、逗号或解释文字。',
+    '挂载顺序固定为：主体角色 → 关键角色或群像 → 交互道具 → 主场景 → 关键结构 → 地面/门窗/设备/载具 → 固定实景光源或发光体 → 环境物或体积介质 → 动作相关声音。',
+    '场景子结构只有在影响接触、遮挡、空间比例、构图边界、运动路径、光源、状态变化或跨镜连续性时才进入挂载；纯装饰背景零件不得挂载。',
+    '普通镜头建议挂载5至12项，复杂群像、载具或大型场景最多15项；数量是建议，不得为凑数虚构实体。',
+    '参考图、布局图、色彩表和灯光示意图本身不得挂载；只有已由输入或 Project Bible 确认并命名的执行实体或执行锚点可以挂载。',
+    '先建立可见性矩阵：只有进入画幅且达到可辨识尺寸的部位、道具、环境和表演才能进入提示词。肢体特写、背影、俯拍和极远景不得强写不可见的正脸微表情。',
+    '先计算动作与运镜执行预算：一张卡只承担一个明确镜头任务；超过三个主要动作单元、两个独立叙事目标或明显时空变化时应拆镜，不得硬塞进15秒。',
+    '若输入给出 BPM 或重拍，先按 60/BPM 换算单拍秒数，再明确“拍点→秒数→动作”；音乐名称不能替代可执行时间轴。',
+    'Studio Card 只写 Project Bible 的本镜差量，不重复整套设备、摄影品牌、固定光源 Rig、调色圣经和全局负向。',
+    '“提示词”是可独立发送给视频引擎的 Engine Prompt，按主体初态→动作变化→摄影机→环境光线→材质物理→落幅→专项负向编译，常规不超过900字。',
+    'Engine Prompt 超长时按安全顺序压缩：先删重复项目继承、品牌与解释，再压缩次要环境和修辞；必须保留主体身份、动作因果、镜头路径、起落幅结果、关键光向、专项负向和有效钉子。',
+    '首行与摄影机动态参数的总时长必须一致；时间段从0开始、连续无重叠无空洞，最后结束时间等于首行总时长，单卡不得超过15秒。',
+    PROMPT_COLOR_TABLE_RULE,
+    PROMPT_CARD_LENGTH_BUDGET_RULE,
+    buildPromptModeHints(sourceStoryboard),
+  ].filter(Boolean).join('\n');
+}
+
+function buildPromptUserMessageV26(
+  brief: string,
+  assetRefs: unknown,
+  sourceStoryboard: StoryboardOutput | null,
+): string {
+  return [
+    '请按 Studio Canvas 2.6 详细挂载规范，将输入转换为完整 PromptOutput JSON。只输出合法 JSON。',
+    buildStudioCanvasV26RuntimeRules(sourceStoryboard),
+    sourceStoryboard?.shots?.length
+      ? `【源镜头编号】${sourceStoryboard.shots.map((shot) => shot.id).join(', ')}`
+      : '',
+    '【独立资产引用】这是附加候选，不是唯一来源；还必须读取下方源分镜中的角色、交互道具、主场景、关键结构、设备、固定光源、环境介质和动作相关声音。',
+    JSON.stringify(assetRefs, null, 2),
+    '--- Input ---',
+    brief.trim() || '（空）',
+  ].filter(Boolean).join('\n\n');
+}
+
+function buildStructureRepairUserMessageV26(
+  brief: string,
+  assetRefs: unknown,
+  sourceStoryboard: StoryboardOutput | null,
+  invalidOutput: unknown,
+  failureReason?: string,
+): string {
+  return [
+    failureReason ? `【上次失败原因】${failureReason}` : '',
+    '上一次输出未通过 Studio Canvas 2.6 校验。请重新输出完整 PromptOutput JSON，不要解释。',
+    buildStudioCanvasV26RuntimeRules(sourceStoryboard),
+    'shotPrompts 每项必须包含 shot_id、prompt、negative_prompt、dimensions、character_asset_ids、scene_asset_ids、seedanceCard。',
+    '重点修复无空格连续详细挂载、挂载来源、可见性、动作预算、连续时间轴和 Engine Prompt 去重。',
+    `【资产引用】\n${JSON.stringify(assetRefs, null, 2)}`,
+    sourceStoryboard ? `【源镜头表】\n${JSON.stringify(sourceStoryboard, null, 2)}` : '',
+    `【上一次错误输出】\n${JSON.stringify(invalidOutput, null, 2)}`,
+    `【原始 Input】\n${brief.trim() || '（空）'}`,
+  ].filter(Boolean).join('\n\n');
+}
+
+function buildCompressionRepairUserMessageV26(
+  brief: string,
+  assetRefs: unknown,
+  sourceStoryboard: StoryboardOutput | null,
+  draftOutput: PromptOutput,
+): string {
+  return [
+    '当前 PromptOutput 语义可用，但长度或 Studio Canvas 2.6 校验不合格。请完成一次安全修订，只输出完整 JSON。',
+    buildStudioCanvasV26RuntimeRules(sourceStoryboard),
+    '低于下限时补充可见且有控制价值的空间、光线、动作、表演和连续性；高于上限时先删除重复 Project Bible、品牌、修辞和次要环境。',
+    '详细挂载只删除纯装饰项，不得丢失影响动作、构图、光线、路径、状态和连续性的关键实体；不得添加空格分隔符。',
+    '不得删改主体身份、真实资产、动作因果、镜头路径、起落幅结果、关键光向、连续性和有效钉子；不得用省略号或截断句。',
+    `【资产引用】\n${JSON.stringify(assetRefs, null, 2)}`,
+    sourceStoryboard ? `【源镜头表】\n${JSON.stringify(sourceStoryboard, null, 2)}` : '',
+    `【待修订输出】\n${JSON.stringify(draftOutput, null, 2)}`,
+    `【原始 Input】\n${brief.trim() || '（空）'}`,
+  ].filter(Boolean).join('\n\n');
+}
+
+function buildCoverageRepairUserMessageV26(
+  brief: string,
+  assetRefs: unknown,
+  sourceStoryboard: StoryboardOutput,
+  invalidOutput: PromptOutput,
+  failureReason?: string,
+): string {
+  return [
+    failureReason ? `【上次失败原因】${failureReason}` : '',
+    '当前输出没有完整覆盖输入镜头或未通过 Studio Canvas 2.6 校验。请重新输出完整 PromptOutput JSON。',
+    buildStudioCanvasV26RuntimeRules(sourceStoryboard),
+    `【必须覆盖的镜头编号】${sourceStoryboard.shots.map((shot) => shot.id).join(', ')}`,
+    '默认每条源镜头对应一条 shotPrompt；仅对源数据明确标记的 mergedMembers 输出一张合并卡，禁止擅自合并或漏镜。',
+    `【资产引用】\n${JSON.stringify(assetRefs, null, 2)}`,
+    `【源镜头表】\n${JSON.stringify(sourceStoryboard, null, 2)}`,
+    `【上一次输出】\n${JSON.stringify(invalidOutput, null, 2)}`,
+    `【原始 Input】\n${brief.trim() || '（空）'}`,
+  ].filter(Boolean).join('\n\n');
+}
+
+function buildStudioCanvasV27RuntimeRules(sourceStoryboard: StoryboardOutput | null): string {
+  const inheritedV26Rules = buildStudioCanvasV26RuntimeRules(sourceStoryboard)
+    .replace(/Studio Canvas 2\.6/g, 'Studio Canvas 2.7')
+    .replace(/v2\.6\.0/g, 'v2.7.0')
+    .replace(STUDIO_CANVAS_V26_MARKER, STUDIO_CANVAS_V27_MARKER)
+    .replace(
+      '普通镜头建议挂载5至12项，复杂群像、载具或大型场景最多15项',
+      '普通镜头建议挂载5至15项，复杂群像、载具或大型场景最多30项',
+    );
+  return [
+    inheritedV26Rules,
+    '【Studio Canvas 2.7 挂载容量修订】单镜挂载硬上限为30项，覆盖旧版15项限制；不得仅因超过15项删除有明确来源并影响执行、构图、光线、路径、状态或连续性的实体。',
+    '【Studio Canvas 2.7 摄影机参数匹配】',
+    '每个镜头先依次判断六项：主体任务、景别、空间任务、摄影机运动、光线环境、焦点职责；完成判断后再选择摄影机机型、主镜头体系、焦段、光圈、景深和焦点变化。',
+    '若 Project Bible 或用户已指定摄影机与镜头体系，必须优先继承；未指定时才可自动匹配。自动选择属于 SOFT 技术建议，不得伪装成用户提供的项目事实。',
+    '摄影机匹配：人物、自然肤色、火光、窗光和高反差优先 ARRI Alexa LF / Mini LF；大型空间与史诗建筑可用 Alexa 65；夜景、霓虹、复杂色光与暗部优先 Sony VENICE 2；高速动作、车辆、爆炸与粒子可用 RED V-RAPTOR XL；微距、高速、监控、手机和无人机仅在镜头任务明确需要时启用特殊摄影机。',
+    '镜头体系匹配：人物情绪与受控变形可用 Cooke Anamorphic SF；稳定低畸变变形宽银幕可用 ARRI Master Anamorphic；工业科幻、纵深与强逆光可用 Panavision T-Series；人物对白与自然焦外可用 Cooke S8/i；现代通透与VFX可用 ARRI Signature Prime；冷峻清晰和几何稳定可用 Zeiss Supreme Prime；手部、眼睛、念珠和机械接触点才使用 Macro / Probe。',
+    '焦段按任务匹配：14–21mm用于极端或狭小空间，24–28mm用于环境建立和大全景，32–40mm用于人物环境平衡与中景跟拍，45–55mm用于自然视角和人物表演，65–85mm用于近景情绪，100–135mm用于紧特写或远距离压缩，90–120mm Macro用于微距接触点。人物靠近广角边缘时必须控制面部和肢体拉伸。',
+    '光圈必须服从主体数量、运动速度和跟焦难度：T1.4–T2.0仅适合单一焦点和极浅景深；T2.0–T2.8适合人物近景；T2.8–T4适合人物与环境共同可读或跟拍；T4–T5.6适合大全景、建筑、群像和动作路径。禁止用极浅景深同时要求多人、多距离和多层环境全部清晰。',
+    '“镜头参数”必须至少包含一条统一句式：【摄影机·镜头】摄影机机型+镜头系列或光学类型+焦段+光圈+景深（实焦主体、失焦层级与焦点变化）。加号、单位、光圈和括号内焦点职责不得省略。',
+    '焦点职责必须具体写出实焦主体以及前景、中景、背景的失焦或清晰层级；动态镜头还必须写明焦点锁定、持续跟焦或拉焦发生的时间与目标。',
+    '同一连续场景原则上保持摄影机机型、画幅、主镜头系列、色彩与焦外特征一致；单镜只按叙事任务调整焦段、光圈、对焦距离和炫光开关。球面与变形镜头或摄影机品牌切换必须有明确视觉动机。',
+    '炫光使用“开启 ON”“关闭 OFF”或“自动 AUTO”；ON必须写明直射光源、入射方向与出现阶段，OFF禁止随机拉丝，AUTO仅在真实入射光条件成立时出现。',
+    '镜头参数必须与相机位置、相机朝向、构图锚点、摄影机动态参数、光线条件和可见性矩阵一致；发生冲突时先修正参数，再编译 Engine Prompt。',
+    sourceStoryboard?.projectConstraints?.length
+      ? `【上游项目约束｜必须继承】\n${sourceStoryboard.projectConstraints
+          .map((constraint, index) => `${index + 1}. ${constraint}`)
+          .join('\n')}\n这些约束来自分镜前的串联文本节点。必须按适用性落实到画幅、场景、灯光布置与基调、镜头参数和 Engine Prompt；不得改写为剧情或台词。`
+      : '',
+  ].filter(Boolean).join('\n');
+}
+
+function buildPromptUserMessageV27(
+  brief: string,
+  assetRefs: unknown,
+  sourceStoryboard: StoryboardOutput | null,
+): string {
+  return [
+    '请按 Studio Canvas 2.7 摄影机参数匹配规范，将输入转换为完整 PromptOutput JSON。只输出合法 JSON。',
+    buildStudioCanvasV27RuntimeRules(sourceStoryboard),
+    sourceStoryboard?.shots?.length
+      ? `【源镜头编号】${sourceStoryboard.shots.map((shot) => shot.id).join(', ')}`
+      : '',
+    '【独立资产引用】这是附加候选，不是唯一来源；还必须读取下方源分镜中的角色、交互道具、主场景、关键结构、设备、固定光源、环境介质和动作相关声音。',
+    JSON.stringify(assetRefs, null, 2),
+    '--- Input ---',
+    brief.trim() || '（空）',
+  ].filter(Boolean).join('\n\n');
+}
+
+function buildStructureRepairUserMessageV27(
+  brief: string,
+  assetRefs: unknown,
+  sourceStoryboard: StoryboardOutput | null,
+  invalidOutput: unknown,
+  failureReason?: string,
+): string {
+  return [
+    failureReason ? `【上次失败原因】${failureReason}` : '',
+    '上一次输出未通过 Studio Canvas 2.7 校验。请重新输出完整 PromptOutput JSON，不要解释。',
+    buildStudioCanvasV27RuntimeRules(sourceStoryboard),
+    'shotPrompts 每项必须包含 shot_id、prompt、negative_prompt、dimensions、character_asset_ids、scene_asset_ids、seedanceCard。',
+    '重点修复无空格连续详细挂载、连续时间轴，以及“镜头参数”中的【摄影机·镜头】完整句式、参数任务匹配、焦点职责和同场景器材连续性。',
+    `【资产引用】\n${JSON.stringify(assetRefs, null, 2)}`,
+    sourceStoryboard ? `【源镜头表】\n${JSON.stringify(sourceStoryboard, null, 2)}` : '',
+    `【上一次错误输出】\n${JSON.stringify(invalidOutput, null, 2)}`,
+    `【原始 Input】\n${brief.trim() || '（空）'}`,
+  ].filter(Boolean).join('\n\n');
+}
+
+function buildCompressionRepairUserMessageV27(
+  brief: string,
+  assetRefs: unknown,
+  sourceStoryboard: StoryboardOutput | null,
+  draftOutput: PromptOutput,
+): string {
+  return [
+    '当前 PromptOutput 语义可用，但长度或 Studio Canvas 2.7 校验不合格。请完成一次安全修订，只输出完整 JSON。',
+    buildStudioCanvasV27RuntimeRules(sourceStoryboard),
+    '低于下限时补充可见且有控制价值的空间、光线、动作、表演、连续性与摄影参数；高于上限时先删除重复 Project Bible、修辞和次要环境。',
+    '不得压缩掉【摄影机·镜头】统一句式中的机型、镜头体系、焦段、光圈、景深、实焦主体、失焦层级和焦点变化。',
+    '详细挂载只删除纯装饰项，不得丢失影响动作、构图、光线、路径、状态和连续性的关键实体；不得添加空格分隔符。',
+    `【资产引用】\n${JSON.stringify(assetRefs, null, 2)}`,
+    sourceStoryboard ? `【源镜头表】\n${JSON.stringify(sourceStoryboard, null, 2)}` : '',
+    `【待修订输出】\n${JSON.stringify(draftOutput, null, 2)}`,
+    `【原始 Input】\n${brief.trim() || '（空）'}`,
+  ].filter(Boolean).join('\n\n');
+}
+
+function buildCoverageRepairUserMessageV27(
+  brief: string,
+  assetRefs: unknown,
+  sourceStoryboard: StoryboardOutput,
+  invalidOutput: PromptOutput,
+  failureReason?: string,
+): string {
+  return [
+    failureReason ? `【上次失败原因】${failureReason}` : '',
+    '当前输出没有完整覆盖输入镜头或未通过 Studio Canvas 2.7 校验。请重新输出完整 PromptOutput JSON。',
+    buildStudioCanvasV27RuntimeRules(sourceStoryboard),
+    `【必须覆盖的镜头编号】${sourceStoryboard.shots.map((shot) => shot.id).join(', ')}`,
+    '默认每条源镜头对应一条 shotPrompt；仅对源数据明确标记的 mergedMembers 输出一张合并卡，禁止擅自合并或漏镜。',
+    '每张卡的镜头参数都必须根据该镜头任务独立判断，但同一连续场景必须继承摄影机、主镜头体系、画幅、色彩与焦外特征。',
+    `【资产引用】\n${JSON.stringify(assetRefs, null, 2)}`,
+    `【源镜头表】\n${JSON.stringify(sourceStoryboard, null, 2)}`,
+    `【上一次输出】\n${JSON.stringify(invalidOutput, null, 2)}`,
+    `【原始 Input】\n${brief.trim() || '（空）'}`,
+  ].filter(Boolean).join('\n\n');
+}
+
 function buildStudioCanvasV231SegmentsRuntimeRules(
   sourceStoryboard: StoryboardOutput | null,
 ): string {
@@ -2478,6 +2863,8 @@ export async function runPromptEmployee(
   const useStudioCanvasV23 = isStudioCanvasV23Style(styleMode);
   const useStudioCanvasV231Segments = isStudioCanvasV231SegmentsStyle(styleMode);
   const useStudioCanvasV25 = isStudioCanvasV25Style(styleMode);
+  const useStudioCanvasV26 = isStudioCanvasV26Style(styleMode);
+  const useStudioCanvasV27 = isStudioCanvasV27Style(styleMode);
   const effectiveExecutionSystemPrompt = useStudioCanvasV25
     ? [executionSystemPrompt?.trim(), PROMPT_DETAILED_MOUNT_SYSTEM_AMENDMENT]
         .filter(Boolean)
@@ -2497,6 +2884,10 @@ export async function runPromptEmployee(
       departmentSystemPrompt: PROMPT_DEPT_AGENT_SYSTEM,
       departmentOutputShape: useStudioCanvasV231Segments
         ? PROMPT_DEPT_OUTPUT_SHAPE_V231_SEGMENTS
+        : useStudioCanvasV27
+          ? PROMPT_DEPT_OUTPUT_SHAPE_V27
+        : useStudioCanvasV26
+          ? PROMPT_DEPT_OUTPUT_SHAPE_V26
         : useStudioCanvasV25
           ? PROMPT_DEPT_OUTPUT_SHAPE_V25
         : useStudioCanvasV23
@@ -2507,6 +2898,10 @@ export async function runPromptEmployee(
       parseSourceStoryboard: tryParseStoryboardFromInputText,
       buildGenerationUserMessage: useStudioCanvasV231Segments
         ? buildPromptUserMessageV231Segments
+        : useStudioCanvasV27
+          ? buildPromptUserMessageV27
+        : useStudioCanvasV26
+          ? buildPromptUserMessageV26
         : useStudioCanvasV25
           ? buildPromptUserMessageV25
         : useStudioCanvasV23
@@ -2514,6 +2909,10 @@ export async function runPromptEmployee(
         : buildPromptUserMessageV3,
       buildStructureRepairUserMessage: useStudioCanvasV231Segments
         ? buildStructureRepairUserMessageV231Segments
+        : useStudioCanvasV27
+          ? buildStructureRepairUserMessageV27
+        : useStudioCanvasV26
+          ? buildStructureRepairUserMessageV26
         : useStudioCanvasV25
           ? buildStructureRepairUserMessageV25
         : useStudioCanvasV23
@@ -2521,6 +2920,10 @@ export async function runPromptEmployee(
         : buildStructureRepairUserMessageV3,
       buildCompressionRepairUserMessage: useStudioCanvasV231Segments
         ? buildCompressionRepairUserMessageV231Segments
+        : useStudioCanvasV27
+          ? buildCompressionRepairUserMessageV27
+        : useStudioCanvasV26
+          ? buildCompressionRepairUserMessageV26
         : useStudioCanvasV25
           ? buildCompressionRepairUserMessageV25
         : useStudioCanvasV23
@@ -2528,6 +2931,10 @@ export async function runPromptEmployee(
         : buildCompressionRepairUserMessageV3,
       buildCoverageRepairUserMessage: useStudioCanvasV231Segments
         ? buildCoverageRepairUserMessageV231Segments
+        : useStudioCanvasV27
+          ? buildCoverageRepairUserMessageV27
+        : useStudioCanvasV26
+          ? buildCoverageRepairUserMessageV26
         : useStudioCanvasV25
           ? buildCoverageRepairUserMessageV25
         : useStudioCanvasV23

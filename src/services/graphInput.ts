@@ -7,25 +7,29 @@ import type { Edge } from '@xyflow/react';
 import type { StudioRFNode } from '@/types/reactFlow';
 import type { NodeKind, PromptOutput, StoryboardOutput, StudioNodeData, WritingOutput } from '@/types/studio';
 import { formatPrompt, formatSeedanceCards } from '@/utils/promptFormat';
-import {
-  inferPromptCharacterNames,
-  inferPromptSceneNames,
-  inferPromptSoundNames,
-  resolvePromptAssetPlaceholders,
-  sanitizePromptAssetPlaceholders,
-} from '@/utils/promptAssetRefs';
 import { parseShotListItemOutputHandleId } from '@/utils/shotListWire';
 import { mergeStoryboardShotSlice } from '@/utils/storyboardSeedance';
+import {
+  collectTextNodeContextForDepartment,
+  collectTextNodeContextForNode,
+  serializeTextNodeContext,
+} from '@/utils/textNodeContext';
 
 export const DEPT_OUTPUT_HANDLE_ID = 'out' as const;
 
 function stringifyPromptShotListPayload(
   shots: StoryboardOutput['shots'],
   narrativeBeats?: string[],
+  projectConstraints?: string[],
 ): string | null {
   try {
-    const payload: { shots: StoryboardOutput['shots']; narrativeBeats?: string[] } = { shots };
+    const payload: {
+      shots: StoryboardOutput['shots'];
+      narrativeBeats?: string[];
+      projectConstraints?: string[];
+    } = { shots };
     if (narrativeBeats != null) payload.narrativeBeats = narrativeBeats;
+    if (projectConstraints?.length) payload.projectConstraints = projectConstraints;
     return JSON.stringify(payload);
   } catch {
     return null;
@@ -41,11 +45,17 @@ function buildPromptSelectionFromShotList(
   if (!canonical?.shots?.length) return null;
   const picked = canonical.shots.filter((shot) => selectedWireIds.includes(shot.wireId ?? ''));
   if (picked.length === 0) return null;
-  if (picked.length === 1) return stringifyPromptShotListPayload([picked[0]]);
+  if (picked.length === 1) {
+    return stringifyPromptShotListPayload(
+      [picked[0]],
+      undefined,
+      canonical.projectConstraints,
+    );
+  }
   const merged = mergeStoryboardShotSlice(picked);
   return stringifyPromptShotListPayload([merged], [
     `多镜头组合：${picked.map((shot) => `#${shot.id}`).join(' + ')}`,
-  ]);
+  ], canonical.projectConstraints);
 }
 
 /** 将上游部门节点的 `output` 转为可写入下游 `input` 的纯文本 */
@@ -97,9 +107,14 @@ export function departmentAssetAsInputText(
           return JSON.stringify({
             shots: canonical.shots,
             narrativeBeats: canonical.narrativeBeats ?? [],
+            projectConstraints: canonical.projectConstraints ?? [],
           });
         }
-        return JSON.stringify({ shots: o.shots, narrativeBeats: o.narrativeBeats ?? [] });
+        return JSON.stringify({
+          shots: o.shots,
+          narrativeBeats: o.narrativeBeats ?? [],
+          projectConstraints: o.projectConstraints ?? [],
+        });
       } catch {
         return null;
       }
@@ -114,64 +129,14 @@ export function departmentAssetAsInputText(
     const o = data.output as PromptOutput;
     if (typeof o.userTemplate !== 'string') return null;
     if (consumer === 'prompt_review_node') {
-      const sourceStoryboard = tryParseStoryboardOutput(o.userTemplate);
-      const reviewShotPrompts = (o.shotPrompts ?? []).map((pack, index) => {
-        const sourceShot =
-          sourceStoryboard?.shots.find((shot) => String(shot.id) === String(pack.shot_id)) ??
-          sourceStoryboard?.shots[index];
-        const sourceShots = sourceShot?.mergedMembers?.length
-          ? sourceShot.mergedMembers
-          : sourceShot
-            ? [sourceShot]
-            : [];
-        const characterNames = Array.from(
-          new Set(
-            sourceShots
-              .flatMap((shot) => shot.characters ?? [])
-              .map((item) => item.trim())
-              .filter(Boolean),
-          ),
-        );
-        const propNames = Array.from(
-          new Set(
-            sourceShots
-              .flatMap((shot) => shot.props ?? [])
-              .map((item) => item.trim())
-              .filter(Boolean),
-          ),
-        );
-        const sceneNames = Array.from(
-          new Set(
-            sourceShots
-              .map((shot) => shot.sceneRef?.trim() ?? '')
-              .filter(Boolean),
-          ),
-        );
-        const soundNames = Array.from(
-          new Set(sourceShots.flatMap((shot) => inferPromptSoundNames(shot.sound))),
-        );
-        return {
-          ...pack,
-          seedanceCard: resolvePromptAssetPlaceholders(pack.seedanceCard ?? '', {
-            characterNames:
-              characterNames.length > 0
-                ? characterNames
-                : inferPromptCharacterNames(pack.dimensions?.角色),
-            propNames,
-            sceneNames:
-              sceneNames.length > 0
-                ? sceneNames
-                : inferPromptSceneNames(pack.dimensions?.场景),
-            soundNames,
-          }),
-        };
-      });
       const seedanceCards =
-        reviewShotPrompts.length > 0
-          ? formatSeedanceCards(reviewShotPrompts, null).trim()
+        Array.isArray(o.shotPrompts) && o.shotPrompts.length > 0
+          ? formatSeedanceCards(o.shotPrompts, null).trim()
           : '';
       const reviewText = seedanceCards || formatPrompt(o).trim();
-      return reviewText ? sanitizePromptAssetPlaceholders(reviewText) : null;
+      // 审核节点只承接并呈现 Prompt 节点已经生成、校验和解析完成的结果。
+      // 不在连线阶段重新补挂载、重排 token 或清洗正文，避免破坏当前 Skill 的格式。
+      return reviewText || null;
     }
     const shotBlock =
       Array.isArray(o.shotPrompts) && o.shotPrompts.length > 0
@@ -199,6 +164,7 @@ export function departmentAssetAsInputText(
         return JSON.stringify({
           shots: canonical.shots,
           narrativeBeats: canonical.narrativeBeats ?? [],
+          projectConstraints: canonical.projectConstraints ?? [],
         });
       } catch {
         return null;
@@ -210,7 +176,11 @@ export function departmentAssetAsInputText(
     if (consumer !== 'prompt') return null;
     const canonical = tryParseStoryboardOutput(data.output);
     if (!canonical?.shots?.length) return null;
-    return stringifyPromptShotListPayload(canonical.shots);
+    return stringifyPromptShotListPayload(
+      canonical.shots,
+      canonical.narrativeBeats,
+      canonical.projectConstraints,
+    );
   }
   if (data.type === 'prompt_review_node') {
     const text =
@@ -301,11 +271,22 @@ export function mergedTextInputForDepartment(
 
   const promptShotSelections = new Map<string, string[]>();
   const parts: string[] = [];
+  const textContext = serializeTextNodeContext(
+    collectTextNodeContextForDepartment(deptId, nodes, edges),
+  );
+  if (textContext) {
+    parts.push(
+      [
+        '【串联文本输入协议】“项目约束”是跨镜硬约束；“分镜正文”提供剧情、人物与动作；“参考资料”仅作补充，不得覆盖前两者。',
+        textContext,
+      ].join('\n'),
+    );
+  }
   for (const e of sorted) {
     const src = nodes.find((n) => n.id === e.source);
     if (!src) continue;
     if (src.type === 'textNode') {
-      parts.push(src.data.raw_text ?? src.data.input ?? '');
+      continue;
     } else if (src.type === 'imageNode') {
       if (e.sourceHandle != null && e.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) continue;
       const imageRefs = connectedImageNodesForDepartment(deptId, nodes, edges);
@@ -358,18 +339,10 @@ export function mergedTextNodeSourcesForDepartment(
   nodes: StudioRFNode[],
   edges: Edge[],
 ): string | null {
-  const incoming = edges.filter(
-    (e) => e.target === deptId && (e.targetHandle === 'in' || e.targetHandle == null),
+  const serialized = serializeTextNodeContext(
+    collectTextNodeContextForDepartment(deptId, nodes, edges),
   );
-  const sorted = [...incoming].sort((x, y) => x.source.localeCompare(y.source));
-  const parts: string[] = [];
-  for (const e of sorted) {
-    const src = nodes.find((n) => n.id === e.source);
-    if (!src || src.type !== 'textNode') continue;
-    parts.push(src.data.raw_text ?? src.data.input ?? '');
-  }
-  if (parts.length === 0) return null;
-  return parts.join('\n\n');
+  return serialized || null;
 }
 
 export function mergedUpstreamForTextNode(
@@ -382,11 +355,15 @@ export function mergedUpstreamForTextNode(
   );
   const sorted = [...incoming].sort((a, b) => a.source.localeCompare(b.source));
   const parts: string[] = [];
+  const textContext = serializeTextNodeContext(
+    collectTextNodeContextForNode(textId, nodes, edges, { includeSelf: false }),
+  );
+  if (textContext) parts.push(textContext);
   for (const e of sorted) {
     const src = nodes.find((n) => n.id === e.source);
     if (!src) continue;
     if (src.type === 'textNode') {
-      parts.push(src.data.raw_text ?? src.data.input ?? '');
+      continue;
     } else if (src.type === 'storyboardFile') {
       if (e.sourceHandle != null && e.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) continue;
       const block = departmentAssetAsInputText(src.data, 'text_node');
@@ -415,12 +392,15 @@ export function mergedUpstreamForPromptReviewNode(
   );
   const sorted = [...incoming].sort((a, b) => a.source.localeCompare(b.source));
   const parts: string[] = [];
+  const textContext = serializeTextNodeContext(
+    collectTextNodeContextForDepartment(reviewNodeId, nodes, edges),
+  );
+  if (textContext) parts.push(textContext);
   for (const e of sorted) {
     const src = nodes.find((n) => n.id === e.source);
     if (!src) continue;
     if (src.type === 'textNode') {
-      const text = src.data.raw_text ?? src.data.input ?? '';
-      if (text.trim()) parts.push(text);
+      continue;
     } else if (src.type === 'department') {
       if (e.sourceHandle != null && e.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) continue;
       const block = departmentAssetAsInputText(src.data, 'prompt_review_node');

@@ -459,7 +459,7 @@ export function StudioCanvas() {
               targetHandle: null,
             };
 
-      if (!isStudioConnectionAllowed(connection, currentNodes)) return;
+      if (!isStudioConnectionAllowed(connection, currentNodes, useStudioStore.getState().edges)) return;
 
       const distance = distanceToRect(point, element.getBoundingClientRect());
       if (distance > CONNECTION_MAGNET_HOVER_PX) return;
@@ -481,7 +481,14 @@ export function StudioCanvas() {
       if (cs.isValid !== true && hoverNodeId != null) {
         const currentNodes = useStudioStore.getState().nodes;
         const magnetConnection = buildMagnetConnection(started, hoverNodeId, currentNodes);
-        if (magnetConnection && isStudioConnectionAllowed(magnetConnection, currentNodes)) {
+        if (
+          magnetConnection &&
+          isStudioConnectionAllowed(
+            magnetConnection,
+            currentNodes,
+            useStudioStore.getState().edges,
+          )
+        ) {
           connectionDragRef.current = null;
           setConnectionDragActive(false);
           setConnectionHoverNodeId(null);
@@ -1010,7 +1017,10 @@ export function StudioCanvas() {
         onConnectEnd={onConnectEndOuter}
         connectionMode={ConnectionMode.Loose}
         connectionDragThreshold={0}
-        isValidConnection={(edge) => isStudioConnectionAllowed(edge, useStudioStore.getState().nodes)}
+        isValidConnection={(edge) => {
+          const state = useStudioStore.getState();
+          return isStudioConnectionAllowed(edge, state.nodes, state.edges);
+        }}
         nodeTypes={nodeTypes}
         onNodeClick={onNodeClick}
         onNodeContextMenu={onNodeContextMenu}

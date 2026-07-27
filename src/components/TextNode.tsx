@@ -14,6 +14,10 @@ import {
 } from 'react';
 import { useStudioStore } from '@/store/useStudioStore';
 import type { StudioNodeData } from '@/types/studio';
+import {
+  collectTextNodeContextForNode,
+  inferTextNodeSemanticRole,
+} from '@/utils/textNodeContext';
 
 type TextRF = Node<StudioNodeData, 'textNode'>;
 
@@ -86,6 +90,8 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
   const raw = data.raw_text ?? data.input ?? '';
   const [instruction, setInstruction] = useState('');
   const [isEditing, setIsEditing] = useState(false);
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [labelDraft, setLabelDraft] = useState(data.label ?? '');
   const [draft, setDraft] = useState(raw);
   const areaRef = useRef<HTMLTextAreaElement | null>(null);
   const draftRef = useRef(raw);
@@ -95,6 +101,12 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
   const busy = data.status === 'IN_PROGRESS';
   const displayText = busy ? (data.streaming_preview ?? raw) : draft;
   const displayLabel = displayTextNodeLabel(data.label);
+  const textRole = data.text_node_role ?? 'auto';
+  const resolvedTextRole = inferTextNodeSemanticRole(data);
+  const upstreamTextCount = useMemo(
+    () => collectTextNodeContextForNode(id, nodes, edges, { includeSelf: false }).length,
+    [edges, id, nodes],
+  );
   const plainMode = data.text_view_mode === 'plain';
   const polishMode = data.text_polish_mode === 'simple' ? 'simple' : 'deep';
   const hasText = Boolean(displayText.trim());
@@ -110,6 +122,10 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
     draftRef.current = raw;
     lastLocalCommitRef.current = raw;
   }, [raw]);
+
+  useEffect(() => {
+    if (!isRenaming) setLabelDraft(data.label ?? '');
+  }, [data.label, isRenaming]);
 
   const clearDraftCommitTimer = useCallback(() => {
     if (draftCommitTimerRef.current == null) return;
@@ -221,6 +237,41 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
     [id, patchNodeData],
   );
 
+  const commitLabel = useCallback(
+    (value = labelDraft) => {
+      const normalized = value.replace(/[\r\n]+/g, ' ').trim().slice(0, 80) || '文本卡片';
+      setLabelDraft(normalized);
+      setIsRenaming(false);
+      if (normalized !== data.label) patchNodeData(id, { label: normalized }, true);
+    },
+    [data.label, id, labelDraft, patchNodeData],
+  );
+
+  const onLabelKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLInputElement>) => {
+      event.stopPropagation();
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        commitLabel(event.currentTarget.value);
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        setLabelDraft(data.label ?? '');
+        setIsRenaming(false);
+      }
+    },
+    [commitLabel, data.label],
+  );
+
+  const startRenaming = useCallback(
+    (event: MouseEvent<HTMLElement>) => {
+      event.stopPropagation();
+      if (busy) return;
+      setLabelDraft(data.label ?? '');
+      setIsRenaming(true);
+    },
+    [busy, data.label],
+  );
+
   const onStop = useCallback(() => {
     stopNodeTask(id);
   }, [id, stopNodeTask]);
@@ -271,9 +322,34 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
         title="Input：接入上游文本或部门资产；拖向空白可创建节点并连线"
       />
       <header className="text-node__head">
-        <span className="text-node__title">
+        <span
+          className="text-node__title nodrag nopan"
+          onDoubleClick={startRenaming}
+          title="双击修改文本节点名称"
+        >
           <span className="text-node__title-icon" aria-hidden />
-          <span className="text-node__title-label">{displayLabel}</span>
+          {isRenaming ? (
+            <input
+              className="text-node__title-input nodrag nopan"
+              value={labelDraft}
+              onChange={(event) => setLabelDraft(event.target.value)}
+              onBlur={(event) => commitLabel(event.currentTarget.value)}
+              onKeyDown={onLabelKeyDown}
+              autoFocus
+              maxLength={80}
+              aria-label="文本节点名称"
+            />
+          ) : (
+            <span className="text-node__title-label">{displayLabel}</span>
+          )}
+          {upstreamTextCount > 0 ? (
+            <span
+              className="text-node__chain-badge"
+              title={`已串联 ${upstreamTextCount} 个上游文本节点`}
+            >
+              串联 {upstreamTextCount}
+            </span>
+          ) : null}
         </span>
       </header>
       <section
@@ -329,6 +405,43 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
       ) : null}
       {selected ? (
         <div className="text-node__workspace nodrag nopan nowheel">
+          <div className="text-node__role-row">
+            <span>文本用途</span>
+            <select
+              value={textRole}
+              onChange={(event) =>
+                patchNodeData(
+                  id,
+                  {
+                    text_node_role: event.target.value as NonNullable<
+                      StudioNodeData['text_node_role']
+                    >,
+                  },
+                  true,
+                )
+              }
+              disabled={busy}
+              aria-label="文本节点用途"
+            >
+              <option value="auto">自动识别</option>
+              <option value="project_constraints">项目约束</option>
+              <option value="story_content">分镜正文</option>
+              <option value="reference_notes">参考资料</option>
+            </select>
+            <small>
+              {textRole === 'auto'
+                ? `当前识别：${
+                    resolvedTextRole === 'project_constraints'
+                      ? '项目约束'
+                      : resolvedTextRole === 'story_content'
+                        ? '分镜正文'
+                        : '参考资料'
+                  }`
+                : upstreamTextCount > 0
+                  ? `已继承 ${upstreamTextCount} 个上游文本`
+                  : '将随连线传递到下游'}
+            </small>
+          </div>
           {visualReferences.length > 0 ? (
             <div className="text-node__workspace-images">
               {visualReferences.slice(0, 4).map((visual, index) => (

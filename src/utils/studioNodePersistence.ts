@@ -97,6 +97,9 @@ export function normalizeStoryboardOutputValue(raw: unknown): StoryboardOutput |
   return {
     shots: Array.isArray(parsed.shots) ? parsed.shots : [],
     narrativeBeats: Array.isArray(parsed.narrativeBeats) ? parsed.narrativeBeats : [],
+    ...(parsed.projectConstraints?.length
+      ? { projectConstraints: parsed.projectConstraints }
+      : {}),
   };
 }
 

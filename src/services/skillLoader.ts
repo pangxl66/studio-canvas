@@ -120,11 +120,23 @@ function parseFolderAndBase(pathKey: string): { folder: SkillFolder; base: strin
   return { folder, base };
 }
 
+function applyRuntimeSkillCompatibility(instruction: string, id: string): string {
+  if (id !== 'prompt/studio_canvas_prompt_spec_v2_7_camera_matching') return instruction;
+  return instruction
+    .replace(
+      '一般单镜建议挂载5至12项；复杂群像、载具或大型场景可增加至15项',
+      '一般单镜建议挂载5至15项；复杂群像、载具或大型场景可增加至30项',
+    )
+    .concat(
+      '\n\n【本地运行时容量修订】Studio Canvas 2.7 单镜挂载硬上限为30项；本条覆盖技能正文中的旧版15项限制。',
+    );
+}
+
 function normalizeSkill(mod: SkillJson, id: string, folder: SkillFolder, fileName: string): SkillFileRecord | null {
   const name = typeof mod.name === 'string' ? mod.name.trim() : '';
   const description = typeof mod.description === 'string' ? mod.description.trim() : '';
   const version = typeof mod.version === 'string' ? mod.version.trim() : '';
-  const system_instruction = buildStructuredInstruction(mod);
+  const system_instruction = applyRuntimeSkillCompatibility(buildStructuredInstruction(mod), id);
   if (!name || !system_instruction) return null;
   const export_extensions = parseExportExtensions(mod.export_extensions);
   const slot = parseSkillSlot(mod, folder);
@@ -149,18 +161,28 @@ export const STUDIO_CANVAS_PROMPT_V231_SEGMENTS_SKILL_ID =
   'prompt/studio_canvas_prompt_spec_v2_3_1_segments';
 export const STUDIO_CANVAS_PROMPT_V25_SKILL_ID =
   'prompt/studio_canvas_prompt_spec_v2_5_validation';
-export const DEFAULT_PROMPT_STYLE_SKILL_ID = STUDIO_CANVAS_PROMPT_V25_SKILL_ID;
+export const STUDIO_CANVAS_PROMPT_V26_SKILL_ID =
+  'prompt/studio_canvas_prompt_spec_v2_6_detailed_mount';
+export const STUDIO_CANVAS_PROMPT_V27_SKILL_ID =
+  'prompt/studio_canvas_prompt_spec_v2_7_camera_matching';
+export const DEFAULT_PROMPT_STYLE_SKILL_ID = STUDIO_CANVAS_PROMPT_V27_SKILL_ID;
 export const DEFAULT_STORYBOARD_SKILL_ID = 'storyboard/xuke_storyboard_v1';
 
 const registry = new Map<string, SkillFileRecord>();
 const allSkills: SkillFileRecord[] = [];
 const HIDDEN_SKILL_IDS = new Set<string>([
+  STUDIO_CANVAS_PROMPT_V25_SKILL_ID,
+  STUDIO_CANVAS_PROMPT_V26_SKILL_ID,
   'prompt/storyboard-to-sd20-prompt',
   'prompt/storyboard_prompt_translator_v1',
   'prompt/jimeng_prompt_generator_v1',
   'prompt/seedance2_segmented_prompt_v1',
 ]);
 const SKILL_ID_ALIASES = new Map<string, string>([
+  // Previous defaults remain on disk for rollback. Existing Prompt nodes
+  // transparently advance to the current Studio Canvas specification.
+  [STUDIO_CANVAS_PROMPT_V25_SKILL_ID, DEFAULT_PROMPT_STYLE_SKILL_ID],
+  [STUDIO_CANVAS_PROMPT_V26_SKILL_ID, DEFAULT_PROMPT_STYLE_SKILL_ID],
   ['prompt/jimeng_prompt_generator_v1', DEFAULT_PROMPT_STYLE_SKILL_ID],
   ['prompt/storyboard-to-sd20-prompt', DEFAULT_PROMPT_STYLE_SKILL_ID],
   ['prompt/storyboard_prompt_translator_v1', DEFAULT_PROMPT_STYLE_SKILL_ID],

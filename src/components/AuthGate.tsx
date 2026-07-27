@@ -4,6 +4,8 @@ import { CreditStatusPill } from '@/components/CreditStatusPill';
 import {
   checkActivatedTestInviteEmail,
   getAuthSnapshot,
+  getLocalAuthSnapshot,
+  getRememberedLoginEmail,
   getSupabaseClient,
   hasActivatedTestInviteEmail,
   isSaasAuthEnabled,
@@ -46,7 +48,7 @@ function getLoginErrorMessage(error: unknown, fallback: string): string {
 export function AuthGate({ children }: AuthGateProps) {
   const [session, setSession] = useState<Session | null>(null);
   const [isLoading, setIsLoading] = useState(isSaasAuthEnabled());
-  const [email, setEmail] = useState('');
+  const [email, setEmail] = useState(() => getRememberedLoginEmail());
   const [verificationCode, setVerificationCode] = useState('');
   const [inviteCode, setInviteCode] = useState('');
   const [authMode, setAuthMode] = useState<'email' | 'invite'>('email');
@@ -71,10 +73,14 @@ export function AuthGate({ children }: AuthGateProps) {
     const client = getSupabaseClient();
     let isMounted = true;
 
-    const syncAuthSnapshot = () => {
-      void getAuthSnapshot().then((snapshot) => {
-        if (isMounted) setSession(snapshot.session);
-      });
+    const syncLocalAuthSnapshot = () => {
+      void getAuthSnapshot()
+        .then((snapshot) => {
+          if (isMounted) setSession(snapshot.session);
+        })
+        .catch((error) => {
+          if (isMounted) setMessage(getLoginErrorMessage(error, '读取登录状态失败。'));
+        });
     };
 
     getAuthSnapshot()
@@ -90,25 +96,23 @@ export function AuthGate({ children }: AuthGateProps) {
 
     const { data } =
       client?.auth.onAuthStateChange((_event, nextSession) => {
-        if (nextSession) {
-          setSession(nextSession);
-        } else {
-          syncAuthSnapshot();
-        }
+        if (!isMounted) return;
+        setSession(nextSession ?? getLocalAuthSnapshot().session);
+        setIsLoading(false);
       }) ?? {};
 
-    window.addEventListener(STUDIO_AUTH_MOCK_EVENT, syncAuthSnapshot);
+    window.addEventListener(STUDIO_AUTH_MOCK_EVENT, syncLocalAuthSnapshot);
 
     return () => {
       isMounted = false;
       data?.subscription?.unsubscribe();
-      window.removeEventListener(STUDIO_AUTH_MOCK_EVENT, syncAuthSnapshot);
+      window.removeEventListener(STUDIO_AUTH_MOCK_EVENT, syncLocalAuthSnapshot);
     };
   }, []);
 
   useEffect(() => {
     const normalizedEmail = email.trim().toLowerCase();
-    if (authMode !== 'invite' || !normalizedEmail || !normalizedEmail.includes('@')) {
+    if (!normalizedEmail || !normalizedEmail.includes('@')) {
       setServerActivatedInviteEmail('');
       setIsCheckingInviteActivation(false);
       return;
@@ -136,7 +140,7 @@ export function AuthGate({ children }: AuthGateProps) {
       isCancelled = true;
       window.clearTimeout(timer);
     };
-  }, [authMode, email]);
+  }, [email]);
 
   if (!isSaasAuthEnabled()) {
     return <>{children}</>;
@@ -146,7 +150,7 @@ export function AuthGate({ children }: AuthGateProps) {
 
   const handleSendCode = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (isSubmitting || sendCooldown > 0) return;
+    if (isSubmitting) return;
 
     setIsSubmitting(true);
     setMessage('');
@@ -160,6 +164,7 @@ export function AuthGate({ children }: AuthGateProps) {
         setMessage('');
         return;
       }
+      if (sendCooldown > 0) return;
       await sendLoginCode(email);
       setCodeSentTo(email.trim());
       setVerificationCode('');
@@ -243,15 +248,15 @@ export function AuthGate({ children }: AuthGateProps) {
   }
 
   if (!currentUser) {
-    const canSendCode = !isSubmitting && sendCooldown <= 0;
     const hasSentCode = Boolean(codeSentTo);
     const normalizedInviteEmail = email.trim().toLowerCase();
-    const inviteAlreadyActivated =
-      authMode === 'invite' &&
-      Boolean(
-        normalizedInviteEmail &&
-          (hasActivatedTestInviteEmail(normalizedInviteEmail) || serverActivatedInviteEmail === normalizedInviteEmail),
-      );
+    const activatedAccount = Boolean(
+      normalizedInviteEmail &&
+        (hasActivatedTestInviteEmail(normalizedInviteEmail) || serverActivatedInviteEmail === normalizedInviteEmail),
+    );
+    const emailAlreadyActivated = authMode === 'email' && activatedAccount;
+    const inviteAlreadyActivated = authMode === 'invite' && activatedAccount;
+    const canSendCode = !isSubmitting && (emailAlreadyActivated || sendCooldown <= 0);
 
     return (
       <main className="auth-gate">
@@ -304,8 +309,20 @@ export function AuthGate({ children }: AuthGateProps) {
                   type="email"
                   value={email}
                 />
+                {isCheckingInviteActivation ? <p className="auth-card__inline-note">正在检查账户状态...</p> : null}
+                {emailAlreadyActivated ? <p className="auth-card__inline-note">该账户已激活，可直接登录，不需要验证码或激活码。</p> : null}
                 <button className="auth-card__button" disabled={!canSendCode} type="submit">
-                  {isSubmitting ? '正在发送...' : sendCooldown > 0 ? `${sendCooldown} 秒后可重发` : hasSentCode ? '重新发送验证码' : '发送验证码'}
+                  {isSubmitting
+                    ? emailAlreadyActivated
+                      ? '正在登录...'
+                      : '正在发送...'
+                    : emailAlreadyActivated
+                      ? '进入已激活账户'
+                      : sendCooldown > 0
+                        ? `${sendCooldown} 秒后可重发`
+                        : hasSentCode
+                          ? '重新发送验证码'
+                          : '发送验证码'}
                 </button>
               </form>
 

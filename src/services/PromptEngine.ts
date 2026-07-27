@@ -4,6 +4,8 @@ import {
   PROMPT_DEPT_OUTPUT_SHAPE,
   PROMPT_DEPT_OUTPUT_SHAPE_V23,
   PROMPT_DEPT_OUTPUT_SHAPE_V231_SEGMENTS,
+  PROMPT_DEPT_OUTPUT_SHAPE_V26,
+  PROMPT_DEPT_OUTPUT_SHAPE_V27,
 } from '@/agents/promptDeptSpec';
 import {
   STORYBOARD_DEPT_AGENT_SYSTEM,
@@ -16,6 +18,8 @@ import {
   resolveAndComposeMountedSkills,
   STUDIO_CANVAS_PROMPT_V23_SKILL_ID,
   STUDIO_CANVAS_PROMPT_V231_SEGMENTS_SKILL_ID,
+  STUDIO_CANVAS_PROMPT_V26_SKILL_ID,
+  STUDIO_CANVAS_PROMPT_V27_SKILL_ID,
 } from '@/services/skillLoader';
 
 export type PromptEngineGraphContext = {
@@ -122,6 +126,10 @@ export function buildFinalPromptsForNode(
   const schema =
     kind === 'prompt' && resolvedIds.includes(STUDIO_CANVAS_PROMPT_V231_SEGMENTS_SKILL_ID)
       ? PROMPT_DEPT_OUTPUT_SHAPE_V231_SEGMENTS
+      : kind === 'prompt' && resolvedIds.includes(STUDIO_CANVAS_PROMPT_V27_SKILL_ID)
+        ? PROMPT_DEPT_OUTPUT_SHAPE_V27
+      : kind === 'prompt' && resolvedIds.includes(STUDIO_CANVAS_PROMPT_V26_SKILL_ID)
+        ? PROMPT_DEPT_OUTPUT_SHAPE_V26
       : kind === 'prompt' && resolvedIds.includes(STUDIO_CANVAS_PROMPT_V23_SKILL_ID)
         ? PROMPT_DEPT_OUTPUT_SHAPE_V23
         : departmentOutputSchema(kind);

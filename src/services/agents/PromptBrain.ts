@@ -7,6 +7,8 @@ import {
   STUDIO_CANVAS_PROMPT_V23_SKILL_ID,
   STUDIO_CANVAS_PROMPT_V231_SEGMENTS_SKILL_ID,
   STUDIO_CANVAS_PROMPT_V25_SKILL_ID,
+  STUDIO_CANVAS_PROMPT_V26_SKILL_ID,
+  STUDIO_CANVAS_PROMPT_V27_SKILL_ID,
 } from '@/services/skillLoader';
 import type { StudioRFNode } from '@/types/reactFlow';
 import type { ApprovedAsset, PromptOutput } from '@/types/studio';
@@ -37,6 +39,18 @@ export class PromptBrain {
 1. seedanceCard 保持18字段 Studio Card；“提示词”是去重后的 Engine Prompt，不重复 Project Bible。
 2. 挂载只允许真实独立资产，标记之间使用一个空格；禁止把场景内部结构、材质、灯具或参考图虚构成资产。
 3. 内部按 HARD / SOFT / AUTO 消解冲突，检查伪精确数字、景别可见性、动作预算、连续时间轴、节拍映射和引擎适配。`;
+
+  static readonly V26_FOCUS_INSTRUCTION = `【PromptBrain · Studio Canvas 2.6 详细挂载重点】
+1. seedanceCard 保持18字段 Studio Card；“提示词”是去重后的 Engine Prompt。
+2. 挂载使用无空格连续格式 |@=实体名||@=实体名|，按角色、交互道具、主场景、关键结构、设备、固定光源、环境介质、动作相关声音排列。
+3. 普通镜头建议5至12项，复杂镜头最多15项；只挂载来自输入、Project Bible 或当前分镜且直接影响执行的具体实体，禁止装饰性膨胀。`;
+
+  static readonly V27_FOCUS_INSTRUCTION = `【PromptBrain · Studio Canvas 2.7 摄影机参数匹配重点】
+1. 完整继承2.6的18字段 Studio Card、无空格详细挂载和连续时间轴。
+2. 每个镜头先判断主体任务、景别、空间任务、摄影机运动、光线环境和焦点职责，再匹配摄影机、主镜头体系、焦段、光圈与景深。
+3. “镜头参数”必须使用【摄影机·镜头】机型+镜头体系或光学类型+焦段+光圈+景深（实焦主体、失焦层级与焦点变化）的完整句式；同一连续场景不得无理由切换摄影机和镜头品牌。
+4. 若上游 StoryboardOutput 含 projectConstraints，必须继续继承到画幅、场景、灯光、镜头参数与 Engine Prompt，不得把它误写成剧情或台词。
+5. V2.7 单镜挂载硬上限放宽为30项；15项以上仍须逐项来自输入或项目设定并具有执行价值，不得虚构或堆叠装饰项。`;
 
   /**
    * 要求：非空输入；若以 JSON 传入，须含非空 shots（分镜镜头表）。编剧-only 的 scenes JSON 会明确报错引导接线。
@@ -106,6 +120,10 @@ export class PromptBrain {
     const composed = appendProjectContextForConsumer(systemPrompt, 'prompt');
     const focusInstruction = resolvedIds.includes(STUDIO_CANVAS_PROMPT_V231_SEGMENTS_SKILL_ID)
       ? this.V231_SEGMENTS_FOCUS_INSTRUCTION
+      : resolvedIds.includes(STUDIO_CANVAS_PROMPT_V27_SKILL_ID)
+        ? this.V27_FOCUS_INSTRUCTION
+      : resolvedIds.includes(STUDIO_CANVAS_PROMPT_V26_SKILL_ID)
+        ? this.V26_FOCUS_INSTRUCTION
       : resolvedIds.includes(STUDIO_CANVAS_PROMPT_V25_SKILL_ID)
         ? this.V25_FOCUS_INSTRUCTION
       : resolvedIds.includes(STUDIO_CANVAS_PROMPT_V23_SKILL_ID)
