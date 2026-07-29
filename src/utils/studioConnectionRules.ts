@@ -4,12 +4,18 @@ import {
   DEPT_INPUT_HANDLE_ID,
   DEPT_INPUT_PULL_HANDLE_ID,
   DEPT_OUTPUT_HANDLE_ID,
-} from '@/components/DepartmentNode';
-import { IMAGE_NODE_INPUT_HANDLE_ID, IMAGE_NODE_OUTPUT_HANDLE_ID } from '@/components/ImageTableNode';
-import { TEXT_NODE_INPUT_HANDLE_ID, TEXT_NODE_OUTPUT_HANDLE_ID } from '@/components/TextNode';
-import { VIDEO_NODE_OUTPUT_HANDLE_ID } from '@/components/VideoNode';
+} from '@/utils/departmentInputWire';
 import { FILM_INPUT_HANDLE_ID, FILM_OUTPUT_HANDLE_ID } from '@/store/slices/aiFilmmakingStore';
 import type { StudioRFNode } from '@/types/reactFlow';
+import {
+  IMAGE_NODE_INPUT_HANDLE_ID,
+  IMAGE_NODE_OUTPUT_HANDLE_ID,
+  VIDEO_NODE_OUTPUT_HANDLE_ID,
+} from '@/utils/mediaNodeHandles';
+import {
+  TEXT_NODE_INPUT_HANDLE_ID,
+  TEXT_NODE_OUTPUT_HANDLE_ID,
+} from '@/utils/textNodeHandles';
 import {
   SHOT_LIST_LINK_HANDLE_ID,
   SHOT_LIST_PARENT_HANDLE_ID,
@@ -61,6 +67,19 @@ function uniqueConnectionMenuPicks(kinds: ConnectionMenuPick[]): ConnectionMenuP
   return Array.from(new Set(kinds));
 }
 
+function shotListParentIsReady(node: StudioRFNode, nodes: StudioRFNode[]): boolean {
+  if (node.type !== 'shotList' || node.data.type !== 'shot_list_node') return false;
+  const parentId = node.data.sourceStoryboardNodeId;
+  if (!parentId) return true;
+  const parent = nodes.find(
+    (candidate) =>
+      candidate.id === parentId &&
+      candidate.type === 'department' &&
+      candidate.data.type === 'storyboard',
+  );
+  return parent?.data.status === 'APPROVED';
+}
+
 function upstreamConnectionPicksForNode(node: StudioRFNode): ConnectionMenuPick[] {
   if (node.type === 'textNode') {
     return ['image_node', 'video_node', 'text_node'];
@@ -82,7 +101,7 @@ function upstreamConnectionPicksForNode(node: StudioRFNode): ConnectionMenuPick[
   }
 
   if (node.type === 'aiFilmStoryboard') {
-    return ['prompt', 'image_node', 'text_node'];
+    return ['prompt', 'image_node', 'text_node', 'storyboard_file_node', 'storyboard'];
   }
 
   if (node.type === 'aiFilmVideoPrompt') {
@@ -274,6 +293,10 @@ export function isStudioConnectionAllowed(
     return true;
   }
 
+  if (a.type === 'imageNode' && b.type === 'imageNode') {
+    return false;
+  }
+
   if (a.type === 'imageNode' && b.type === 'department' && b.data.type === 'storyboard') {
     if (edge.sourceHandle != null && edge.sourceHandle !== IMAGE_NODE_OUTPUT_HANDLE_ID) return false;
     if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
@@ -374,6 +397,7 @@ export function isStudioConnectionAllowed(
     if (!isShotListItemOutputHandleId(edge.sourceHandle)) return false;
     if (edge.targetHandle != null && edge.targetHandle !== DEPT_INPUT_HANDLE_ID) return false;
     if (a.data.type !== 'shot_list_node') return false;
+    if (!shotListParentIsReady(a, nodes)) return false;
     return true;
   }
 
@@ -381,6 +405,7 @@ export function isStudioConnectionAllowed(
     if (!isShotListItemOutputHandleId(edge.sourceHandle)) return false;
     if (edge.targetHandle != null && edge.targetHandle !== FILM_INPUT_HANDLE_ID) return false;
     if (a.data.type !== 'shot_list_node') return false;
+    if (!shotListParentIsReady(a, nodes)) return false;
     return true;
   }
 
@@ -388,6 +413,7 @@ export function isStudioConnectionAllowed(
     if (!isShotListItemOutputHandleId(edge.sourceHandle)) return false;
     if (edge.targetHandle != null && edge.targetHandle !== IMAGE_NODE_INPUT_HANDLE_ID) return false;
     if (a.data.type !== 'shot_list_node') return false;
+    if (!shotListParentIsReady(a, nodes)) return false;
     return true;
   }
 

@@ -13,16 +13,19 @@ import {
   type PointerEvent,
 } from 'react';
 import { useStudioStore } from '@/store/useStudioStore';
+import { useStudioGraphContentNodes } from '@/hooks/useStudioGraphContent';
 import type { StudioNodeData } from '@/types/studio';
 import {
   collectTextNodeContextForNode,
   inferTextNodeSemanticRole,
 } from '@/utils/textNodeContext';
+import {
+  TEXT_NODE_INPUT_HANDLE_ID,
+  TEXT_NODE_OUTPUT_HANDLE_ID,
+} from '@/utils/textNodeHandles';
+import { recoverInterruptedTextPolish } from '@/services/textPolishLifecycle';
 
 type TextRF = Node<StudioNodeData, 'textNode'>;
-
-export const TEXT_NODE_OUTPUT_HANDLE_ID = 'out';
-export const TEXT_NODE_INPUT_HANDLE_ID = 'in';
 
 function displayTextNodeLabel(label: string | undefined): string {
   if (!label) return '文本卡片';
@@ -55,7 +58,7 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
   const patchNodeData = useStudioStore((s) => s.patchNodeData);
   const runTextPolish = useStudioStore((s) => s.runTextPolish);
   const stopNodeTask = useStudioStore((s) => s.stopNodeTask);
-  const nodes = useStudioStore((s) => s.nodes);
+  const nodes = useStudioGraphContentNodes();
   const edges = useStudioStore((s) => s.edges);
   const imageReferences = useMemo(() => {
     const incoming = edges.filter((edge) => {
@@ -180,6 +183,11 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
       areaRef.current?.focus();
     }
   }, [busy, editable, selected]);
+
+  useEffect(() => {
+    if (!busy || typeof data.text_polish_started_at === 'number') return;
+    patchNodeData(id, recoverInterruptedTextPolish(data), true);
+  }, [busy, data, id, patchNodeData]);
 
   const onChange = useCallback(
     (event: ChangeEvent<HTMLTextAreaElement>) => {

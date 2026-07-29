@@ -54,3 +54,24 @@ test('empty records do not produce a restore candidate', () => {
   });
   assert.equal(restored, null);
 });
+
+test('newer disk snapshot wins and an older disk snapshot never rolls the project back', () => {
+  const newerDisk = chooseStudioProjectRestoreCandidate({
+    activeRef: { projectId: 'project-a', projectName: 'Project A' },
+    activeRecord: record({ updatedAt: 200 }),
+    autosave: payload({ savedAt: 201 }),
+    diskSnapshot: payload({ savedAt: 250 }),
+    fallbackProjectName: 'Untitled',
+  });
+  assert.equal(newerDisk?.source, 'disk');
+  assert.match(newerDisk?.broadcastText ?? '', /磁盘工程库/);
+
+  const olderDisk = chooseStudioProjectRestoreCandidate({
+    activeRef: { projectId: 'project-a', projectName: 'Project A' },
+    activeRecord: record({ updatedAt: 300 }),
+    autosave: null,
+    diskSnapshot: payload({ savedAt: 250 }),
+    fallbackProjectName: 'Untitled',
+  });
+  assert.equal(olderDisk?.source, 'workspace');
+});

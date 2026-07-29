@@ -1,4 +1,5 @@
 import type { Department } from '@/types/studio';
+import { recoverInterruptedTextPolish } from '@/services/textPolishLifecycle';
 import type { StudioState } from '../useStudioStore';
 
 type StudioSet = (
@@ -114,7 +115,17 @@ export function createPipelineStoreSlice(
         return;
       }
       const controller = deps.activeTaskAbortControllers.get(id);
+      const node = get().nodes.find((item) => item.id === id);
       if (!controller) {
+        if (node?.type === 'textNode' && node.data.status === 'IN_PROGRESS') {
+          get().patchNodeData(id, recoverInterruptedTextPolish(node.data), true);
+          get().pushMessage({
+            role: 'system',
+            text: '已清理失去请求连接的文本润色任务，原文已恢复为可编辑状态。',
+            nodeId: id,
+          });
+          return;
+        }
         get().pushMessage({
           role: 'system',
           text: '当前节点没有正在执行的任务。',
@@ -123,6 +134,18 @@ export function createPipelineStoreSlice(
         return;
       }
       controller.abort();
+      if (node?.type === 'textNode' && node.data.status === 'IN_PROGRESS') {
+        get().patchNodeData(
+          id,
+          {
+            status: (node.data.raw_text ?? node.data.input ?? '').trim() ? 'APPROVED' : 'NOT_STARTED',
+            generation_error: undefined,
+            streaming_preview: undefined,
+            text_polish_started_at: undefined,
+          },
+          true,
+        );
+      }
       get().pushMessage({
         role: 'system',
         text: deps.stopTaskMessage,
@@ -169,6 +192,42 @@ export function createPipelineStoreSlice(
       if (node.data.status === 'REJECTED') {
         get().retryPipeline(id);
         return;
+      }
+      if (node.data.type === 'storyboard') {
+        const child = get().nodes.find(
+          (candidate) =>
+            candidate.type === 'shotList' &&
+            candidate.data.type === 'shot_list_node' &&
+            candidate.data.sourceStoryboardNodeId === id,
+        );
+        const current = child?.data.output;
+        const aiSnapshot = child?.data.storyboard_ai_snapshot;
+        const hasManualChanges =
+          Boolean(current) &&
+          (!aiSnapshot || JSON.stringify(current) !== JSON.stringify(aiSnapshot));
+        if (child && hasManualChanges) {
+          const confirmed = window.confirm(
+            '当前分镜表包含手工修改。继续后会先创建一份独立备份，再用新生成结果更新当前分镜表。是否继续？',
+          );
+          if (!confirmed) return;
+          const [backupId] = get().duplicateNodesByIds([child.id]);
+          if (backupId) {
+            get().patchNodeData(
+              backupId,
+              {
+                label: `${child.data.label} · 重生成备份`,
+                sourceStoryboardNodeId: undefined,
+                sourceStoryboardFileNodeId: undefined,
+              },
+              false,
+            );
+            get().pushMessage({
+              role: 'system',
+              text: '已创建当前手工分镜表的独立备份，新生成结果不会覆盖该备份。',
+              nodeId: backupId,
+            });
+          }
+        }
       }
       get().pushMessage({
         role: 'broadcast',

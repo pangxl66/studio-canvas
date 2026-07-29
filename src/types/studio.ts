@@ -254,7 +254,10 @@ export interface StoryboardGridPanelMapping {
 
 export interface StoryboardGridImagePage {
   id: string;
-  imageDataUrl: string;
+  /** Present on image-owning nodes; storyboard source nodes may persist metadata only. */
+  imageDataUrl?: string;
+  imageAssetId?: string;
+  imageAssetMimeType?: string;
   model: string;
   size: string;
   width?: number;
@@ -307,6 +310,8 @@ export type StudioNodeData = {
   /** TEXT_NODE：展示模式。plain=常规文本节点；未设置时使用 AI 工作区模式 */
   text_view_mode?: 'plain';
   text_polish_mode?: 'simple' | 'deep';
+  /** TEXT_NODE：当前润色任务启动时间；用于识别刷新/HMR 后遗留的僵尸运行态。 */
+  text_polish_started_at?: number;
   /** TEXT_NODE：在串联链路中的语义用途；auto 会结合节点名称和正文自动判断。 */
   text_node_role?: TextNodeSemanticRole;
   /** AI Filmmaking 影视分镜节点：当前选用的分镜 Skill id */
@@ -360,6 +365,9 @@ export type StudioNodeData = {
   importedSheetName?: string;
   importedRowCount?: number;
   imageDataUrl?: string;
+  /** 持久化时替代大型 Base64；恢复工程后会从 IndexedDB / 磁盘资产库补回 imageDataUrl。 */
+  imageAssetId?: string;
+  imageAssetMimeType?: string;
   imageMimeType?: string;
   imageFileName?: string;
   /** 图片节点当前预览图的原始像素尺寸，用于按导入比例渲染节点。 */
@@ -373,6 +381,35 @@ export type StudioNodeData = {
   imageColorAnalysisSummary?: string;
   /** 图片节点：由上游分镜信息生成动态宫格时附加的用户风格要求。 */
   imageGenerationPrompt?: string;
+  /** 图片节点或影视分镜节点下一次生成/编辑图片时使用的模型；与最近一次实际返回的模型分开保存。 */
+  imageGenerationSelectedModel?: 'gemini-3.1-flash-image' | 'image2';
+  /** 图片节点当前承担的主要用途；已有图片被选中时 UI 可进入原地编辑。 */
+  imageNodeMode?: 'asset' | 'storyboard-grid' | 'edit' | 'palette';
+  /** 当前运行中的图片任务，用于让同一节点正确显示停止与禁用状态。 */
+  imageGenerationTask?: 'grid' | 'edit' | 'palette';
+  /** 图片编辑模式中的自然语言修改要求，与分镜宫格补充提示词分开保存。 */
+  imageEditPrompt?: string;
+  /** 图片编辑输出画幅；source 会根据当前图片像素比例选择最接近的模型尺寸。 */
+  imageEditAspectRatio?: 'source' | '16:9' | '9:16' | '1:1';
+  /** 单节点原地编辑：第一次覆盖前保留的原图基线。 */
+  imageEditBaseDataUrl?: string;
+  imageEditBaseMimeType?: string;
+  imageEditBaseFileName?: string;
+  imageEditBaseWidth?: number;
+  imageEditBaseHeight?: number;
+  /** 最近一次图片编辑使用的图片节点；原地编辑时等于当前节点 id。 */
+  imageEditSourceNodeId?: string;
+  /** 最近一次图片编辑提交时的当前图片签名。 */
+  imageEditSourceSignature?: string;
+  imageEditCompletedAt?: number;
+  /** 色表输出覆盖当前节点前保留的直接来源图，用于重新生成和恢复。 */
+  imagePaletteSourceDataUrl?: string;
+  imagePaletteSourceMimeType?: string;
+  imagePaletteSourceFileName?: string;
+  imagePaletteSourceWidth?: number;
+  imagePaletteSourceHeight?: number;
+  imagePaletteSourceSignature?: string;
+  imagePaletteCompletedAt?: number;
   /** 图片节点：最近一次分镜宫格生成所用模型与来源信息。 */
   imageGenerationModel?: string;
   imageGenerationSourceShotIds?: number[];
@@ -380,9 +417,11 @@ export type StudioNodeData = {
   imageGenerationReferenceSignature?: string;
   /** Signature of connected shot prompts plus matched storyboard content used by the last image generation. */
   imageGenerationPromptSignature?: string;
+  /** Signature of the selected storyboard Skill and editable/generated storyboard prompt used for the last image generation. */
+  imageGenerationInstructionSignature?: string;
   imageGenerationPromptSourceNodeIds?: string[];
   imageGenerationPromptMatchedCount?: number;
-  /** 实际传给 image2 编辑请求的参考图数量；用于避免“界面已绑定但请求未携带”。 */
+  /** 实际传给图片模型的业务参考图数量；用于避免“界面已绑定但请求未携带”。 */
   imageGenerationReferenceCount?: number;
   /** Last request's real reference order, e.g. 角色:老和尚 → 场景:禅房. */
   imageGenerationReferenceLabels?: string[];

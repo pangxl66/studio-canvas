@@ -34,26 +34,14 @@ import {
   type ConnectionDragStart,
   type NodePickerState,
 } from '@/components/ConnectEndBinder';
-import { DepartmentNode, DEPT_OUTPUT_HANDLE_ID } from '@/components/DepartmentNode';
-import { ImageTableNode } from '@/components/ImageTableNode';
-import { VideoNode } from '@/components/VideoNode';
-import { PromptReviewNode } from '@/components/PromptReviewNode';
-import { StoryboardFileNode } from '@/components/StoryboardFileNode';
-import { TextNode } from '@/components/TextNode';
 import type { ContextMenuState } from '@/components/NodeContextMenu';
 import { ScissorCutLayer } from '@/components/ScissorCutLayer';
 import { StudioErrorBoundary } from '@/components/StudioErrorBoundary';
-import {
-  createStudioProjectId,
-  parseStudioProjectJsonFile,
-  pushStudioRecentProject,
-  putStudioProjectRecord,
-  setActiveStudioProjectRef,
-} from '@/services/studioProjectPersistence';
+import { useStudioGraphContentNodes } from '@/hooks/useStudioGraphContent';
 import { useStudioStore } from '@/store/useStudioStore';
 import type { StudioRFNode } from '@/types/reactFlow';
-import { isDeprecatedScriptFlowNode, removeDeprecatedScriptNodes } from '@/utils/deprecatedScriptNodes';
-import { parseStoryboardWorkbookFile } from '@/utils/storyboardWorkbook';
+import { isDeprecatedScriptFlowNode } from '@/utils/deprecatedScriptNodes';
+import { DEPT_OUTPUT_HANDLE_ID } from '@/utils/departmentInputWire';
 import { isShotListItemOutputHandleId } from '@/utils/shotListWire';
 import {
   buildMagnetConnection,
@@ -87,6 +75,36 @@ const LazyShotListNode = lazy(() =>
     default: module.ShotListNode as ComponentType<LazyStudioNodeProps>,
   })),
 );
+const LazyDepartmentNode = lazy(() =>
+  import('@/components/DepartmentNode').then((module) => ({
+    default: module.DepartmentNode as ComponentType<LazyStudioNodeProps>,
+  })),
+);
+const LazyTextNode = lazy(() =>
+  import('@/components/TextNode').then((module) => ({
+    default: module.TextNode as ComponentType<LazyStudioNodeProps>,
+  })),
+);
+const LazyImageTableNode = lazy(() =>
+  import('@/components/ImageTableNode').then((module) => ({
+    default: module.ImageTableNode as ComponentType<LazyStudioNodeProps>,
+  })),
+);
+const LazyVideoNode = lazy(() =>
+  import('@/components/VideoNode').then((module) => ({
+    default: module.VideoNode as ComponentType<LazyStudioNodeProps>,
+  })),
+);
+const LazyPromptReviewNode = lazy(() =>
+  import('@/components/PromptReviewNode').then((module) => ({
+    default: module.PromptReviewNode as ComponentType<LazyStudioNodeProps>,
+  })),
+);
+const LazyStoryboardFileNode = lazy(() =>
+  import('@/components/StoryboardFileNode').then((module) => ({
+    default: module.StoryboardFileNode as ComponentType<LazyStudioNodeProps>,
+  })),
+);
 
 function LazyNodeFallback({ wide = false }: { wide?: boolean }) {
   return (
@@ -100,6 +118,54 @@ function ShotListNodeShell(props: LazyStudioNodeProps) {
   return (
     <Suspense fallback={<LazyNodeFallback wide />}>
       <LazyShotListNode {...props} />
+    </Suspense>
+  );
+}
+
+function DepartmentNodeShell(props: LazyStudioNodeProps) {
+  return (
+    <Suspense fallback={<LazyNodeFallback />}>
+      <LazyDepartmentNode {...props} />
+    </Suspense>
+  );
+}
+
+function TextNodeShell(props: LazyStudioNodeProps) {
+  return (
+    <Suspense fallback={<LazyNodeFallback />}>
+      <LazyTextNode {...props} />
+    </Suspense>
+  );
+}
+
+function ImageTableNodeShell(props: LazyStudioNodeProps) {
+  return (
+    <Suspense fallback={<LazyNodeFallback wide />}>
+      <LazyImageTableNode {...props} />
+    </Suspense>
+  );
+}
+
+function VideoNodeShell(props: LazyStudioNodeProps) {
+  return (
+    <Suspense fallback={<LazyNodeFallback wide />}>
+      <LazyVideoNode {...props} />
+    </Suspense>
+  );
+}
+
+function PromptReviewNodeShell(props: LazyStudioNodeProps) {
+  return (
+    <Suspense fallback={<LazyNodeFallback />}>
+      <LazyPromptReviewNode {...props} />
+    </Suspense>
+  );
+}
+
+function StoryboardFileNodeShell(props: LazyStudioNodeProps) {
+  return (
+    <Suspense fallback={<LazyNodeFallback />}>
+      <LazyStoryboardFileNode {...props} />
     </Suspense>
   );
 }
@@ -129,16 +195,16 @@ function AiFilmVideoPromptNodeShell(props: LazyStudioNodeProps) {
 }
 
 const nodeTypes: NodeTypes = {
-  department: DepartmentNode,
-  textNode: TextNode,
+  department: DepartmentNodeShell,
+  textNode: TextNodeShell,
   shotList: ShotListNodeShell,
-  storyboardFile: StoryboardFileNode,
-  imageNode: ImageTableNode,
-  videoNode: VideoNode,
+  storyboardFile: StoryboardFileNodeShell,
+  imageNode: ImageTableNodeShell,
+  videoNode: VideoNodeShell,
   aiFilmCharacter: AiFilmCharacterNodeShell,
   aiFilmStoryboard: AiFilmStoryboardNodeShell,
   aiFilmVideoPrompt: AiFilmVideoPromptNodeShell,
-  promptReview: PromptReviewNode,
+  promptReview: PromptReviewNodeShell,
 };
 
 const ChatDock = lazy(() => import('@/components/ChatDock').then((module) => ({ default: module.ChatDock })));
@@ -285,6 +351,7 @@ const PANE_CREATE_MENU_KINDS: CreateNodeKind[] = [
   'storyboard_file_node',
   'prompt',
   'storyboard',
+  'image_node',
   'film_storyboard_node',
   'film_character_node',
 ];
@@ -300,17 +367,29 @@ function getConnectionPoint(event: PointerEvent | MouseEvent | TouchEvent) {
   return touch ? { x: touch.clientX, y: touch.clientY } : null;
 }
 
-function distanceToRect(point: { x: number; y: number }, rect: DOMRect): number {
+type ConnectionTargetBounds = {
+  nodeId: string;
+  bottom: number;
+  left: number;
+  right: number;
+  top: number;
+};
+
+function distanceToRect(
+  point: { x: number; y: number },
+  rect: Pick<DOMRect, 'bottom' | 'left' | 'right' | 'top'>,
+): number {
   const dx = Math.max(rect.left - point.x, 0, point.x - rect.right);
   const dy = Math.max(rect.top - point.y, 0, point.y - rect.bottom);
   return Math.hypot(dx, dy);
 }
 
-function isDisabledShotListTableOutputEdge(edge: Edge, nodes: StudioRFNode[]): boolean {
-  const source = nodes.find((node) => node.id === edge.source);
+function isDisabledShotListTableOutputEdge(
+  edge: Edge,
+  disabledShotListSourceIds: ReadonlySet<string>,
+): boolean {
   return (
-    source?.type === 'shotList' &&
-    source.data.type === 'shot_list_node' &&
+    disabledShotListSourceIds.has(edge.source) &&
     (edge.sourceHandle == null || edge.sourceHandle === DEPT_OUTPUT_HANDLE_ID)
   );
 }
@@ -323,6 +402,7 @@ const INFINITE_EXTENT: CoordinateExtent = [
 
 export function StudioCanvas() {
   const nodes = useStudioStore((s) => s.nodes);
+  const graphContentNodes = useStudioGraphContentNodes();
   const nodeCount = nodes.length;
   const removeNodesByIds = useStudioStore((s) => s.removeNodesByIds);
 
@@ -331,20 +411,44 @@ export function StudioCanvas() {
     useStudioStore.getState().ensureRuntimeBindingsOnNodes();
   }, [nodeCount]);
   const edges = useStudioStore((s) => s.edges);
-  const visibleGraph = useMemo(() => removeDeprecatedScriptNodes(nodes, edges), [edges, nodes]);
-  const visibleNodes = visibleGraph.nodes;
-  const visibleEdges = useMemo(
-    () => visibleGraph.edges.filter((edge) => !isDisabledShotListTableOutputEdge(edge, visibleGraph.nodes)),
-    [visibleGraph.edges, visibleGraph.nodes],
+  const deprecatedNodeIds = useMemo(
+    () => new Set(graphContentNodes.filter(isDeprecatedScriptFlowNode).map((node) => node.id)),
+    [graphContentNodes],
   );
-  const visibleNodesRef = useRef<StudioRFNode[]>(visibleNodes);
+  const disabledShotListSourceIds = useMemo(
+    () =>
+      new Set(
+        graphContentNodes
+          .filter(
+            (node) => node.type === 'shotList' && node.data.type === 'shot_list_node',
+          )
+          .map((node) => node.id),
+      ),
+    [graphContentNodes],
+  );
+  const visibleNodes = useMemo(
+    () =>
+      deprecatedNodeIds.size === 0
+        ? nodes
+        : nodes.filter((node) => !deprecatedNodeIds.has(node.id)),
+    [deprecatedNodeIds, nodes],
+  );
+  const visibleEdges = useMemo(
+    () =>
+      edges.filter(
+        (edge) =>
+          !deprecatedNodeIds.has(edge.source) &&
+          !deprecatedNodeIds.has(edge.target) &&
+          !isDisabledShotListTableOutputEdge(edge, disabledShotListSourceIds),
+      ),
+    [deprecatedNodeIds, disabledShotListSourceIds, edges],
+  );
 
   useEffect(() => {
-    const removedIds = nodes.filter(isDeprecatedScriptFlowNode).map((node) => node.id);
-    if (removedIds.length > 0) {
-      removeNodesByIds(removedIds);
+    if (deprecatedNodeIds.size > 0) {
+      removeNodesByIds(Array.from(deprecatedNodeIds));
     }
-  }, [nodes, removeNodesByIds]);
+  }, [deprecatedNodeIds, removeNodesByIds]);
 
   const onNodesChange = useStudioStore((s) => s.onNodesChange);
   const onConnect = useStudioStore((s) => s.onConnect);
@@ -381,10 +485,14 @@ export function StudioCanvas() {
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
   const [selectedEdgeIds, setSelectedEdgeIds] = useState<string[]>([]);
   const [draggingCanvasFile, setDraggingCanvasFile] = useState(false);
+  const [nodeDragActive, setNodeDragActive] = useState(false);
   const [connectionDragActive, setConnectionDragActive] = useState(false);
   const [connectionHoverNodeId, setConnectionHoverNodeId] = useState<string | null>(null);
   const connectEndImplRef = useRef<OnConnectEnd>(() => {});
   const connectionDragRef = useRef<ConnectionDragStart | null>(null);
+  const connectionTargetBoundsRef = useRef<ConnectionTargetBounds[]>([]);
+  const connectionHoverFrameRef = useRef<number | null>(null);
+  const connectionHoverPointRef = useRef<{ x: number; y: number } | null>(null);
   const altDragStateRef = useRef<{
     dragNodeId: string;
     sourceIds: string[];
@@ -392,10 +500,6 @@ export function StudioCanvas() {
   } | null>(null);
   const lastPaneClickRef = useRef<{ ts: number; x: number; y: number } | null>(null);
   const screenToFlowRef = useRef<((pos: { x: number; y: number }) => { x: number; y: number }) | null>(null);
-
-  useEffect(() => {
-    visibleNodesRef.current = visibleNodes;
-  }, [visibleNodes]);
 
   const flowNodes = useMemo(() => {
     if (!connectionHoverNodeId) return visibleNodes;
@@ -422,49 +526,56 @@ export function StudioCanvas() {
     [nodePicker, nodes],
   );
   const onConnectStart = useCallback<OnConnectStart>((_e, p) => {
-    connectionDragRef.current = {
+    const started: ConnectionDragStart = {
       nodeId: p.nodeId,
       handleId: p.handleId,
       handleType: p.handleType,
     };
+    connectionDragRef.current = started;
+    const state = useStudioStore.getState();
+    connectionTargetBoundsRef.current = Array.from(
+      document.querySelectorAll<HTMLElement>('.react-flow__node[data-id]'),
+    ).flatMap((element) => {
+      const nodeId = element.dataset.id ?? element.getAttribute('data-id');
+      if (!nodeId || nodeId === started.nodeId) return [];
+      const connection: ConnectionCandidate =
+        started.handleType === 'target'
+          ? {
+              source: nodeId,
+              target: started.nodeId ?? '',
+              sourceHandle: null,
+              targetHandle: started.handleId,
+            }
+          : {
+              source: started.nodeId ?? '',
+              target: nodeId,
+              sourceHandle: started.handleId,
+              targetHandle: null,
+            };
+      if (!isStudioConnectionAllowed(connection, state.nodes, state.edges)) return [];
+      const rect = element.getBoundingClientRect();
+      return [
+        {
+          nodeId,
+          bottom: rect.bottom,
+          left: rect.left,
+          right: rect.right,
+          top: rect.top,
+        },
+      ];
+    });
     setConnectionDragActive(true);
     setConnectionHoverNodeId(null);
   }, []);
 
   const findConnectionHoverNode = useCallback((point: { x: number; y: number }) => {
-    const started = connectionDragRef.current;
-    if (!started?.nodeId) return null;
-
     let bestId: string | null = null;
     let bestDistance = Number.POSITIVE_INFINITY;
-    const currentNodes = visibleNodesRef.current;
-    const elements = document.querySelectorAll<HTMLElement>('.react-flow__node[data-id]');
-
-    elements.forEach((element) => {
-      const nodeId = element.dataset.id ?? element.getAttribute('data-id');
-      if (!nodeId || nodeId === started.nodeId) return;
-
-      const connection: ConnectionCandidate =
-        started.handleType === 'target'
-          ? {
-              source: nodeId,
-              target: started.nodeId,
-              sourceHandle: null,
-              targetHandle: started.handleId,
-            }
-          : {
-              source: started.nodeId,
-              target: nodeId,
-              sourceHandle: started.handleId,
-              targetHandle: null,
-            };
-
-      if (!isStudioConnectionAllowed(connection, currentNodes, useStudioStore.getState().edges)) return;
-
-      const distance = distanceToRect(point, element.getBoundingClientRect());
+    connectionTargetBoundsRef.current.forEach((bounds) => {
+      const distance = distanceToRect(point, bounds);
       if (distance > CONNECTION_MAGNET_HOVER_PX) return;
       if (distance < bestDistance) {
-        bestId = nodeId;
+        bestId = bounds.nodeId;
         bestDistance = distance;
       }
     });
@@ -477,6 +588,12 @@ export function StudioCanvas() {
       const started = connectionDragRef.current;
       const point = getConnectionPoint(event);
       const hoverNodeId = (point ? findConnectionHoverNode(point) : null) ?? connectionHoverNodeId;
+      if (connectionHoverFrameRef.current != null) {
+        window.cancelAnimationFrame(connectionHoverFrameRef.current);
+        connectionHoverFrameRef.current = null;
+      }
+      connectionHoverPointRef.current = null;
+      connectionTargetBoundsRef.current = [];
 
       if (cs.isValid !== true && hoverNodeId != null) {
         const currentNodes = useStudioStore.getState().nodes;
@@ -507,29 +624,42 @@ export function StudioCanvas() {
   useEffect(() => {
     if (!connectionDragActive) return;
 
-    const onMove = (event: PointerEvent | MouseEvent | TouchEvent) => {
+    const onMove = (event: PointerEvent) => {
       const point = getConnectionPoint(event);
       if (!point) return;
-      const nextId = findConnectionHoverNode(point);
-      setConnectionHoverNodeId((current) => (current === nextId ? current : nextId));
+      connectionHoverPointRef.current = point;
+      if (connectionHoverFrameRef.current != null) return;
+      connectionHoverFrameRef.current = window.requestAnimationFrame(() => {
+        connectionHoverFrameRef.current = null;
+        const pendingPoint = connectionHoverPointRef.current;
+        if (!pendingPoint) return;
+        const nextId = findConnectionHoverNode(pendingPoint);
+        setConnectionHoverNodeId((current) => (current === nextId ? current : nextId));
+      });
     };
     const clearHover = () => {
+      if (connectionHoverFrameRef.current != null) {
+        window.cancelAnimationFrame(connectionHoverFrameRef.current);
+        connectionHoverFrameRef.current = null;
+      }
+      connectionHoverPointRef.current = null;
+      connectionTargetBoundsRef.current = [];
       setConnectionDragActive(false);
       setConnectionHoverNodeId(null);
     };
 
     window.addEventListener('pointermove', onMove, { passive: true });
-    window.addEventListener('mousemove', onMove, { passive: true });
-    window.addEventListener('touchmove', onMove, { passive: true });
     window.addEventListener('pointercancel', clearHover);
     window.addEventListener('blur', clearHover);
 
     return () => {
       window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('touchmove', onMove);
       window.removeEventListener('pointercancel', clearHover);
       window.removeEventListener('blur', clearHover);
+      if (connectionHoverFrameRef.current != null) {
+        window.cancelAnimationFrame(connectionHoverFrameRef.current);
+        connectionHoverFrameRef.current = null;
+      }
     };
   }, [connectionDragActive, findConnectionHoverNode]);
 
@@ -562,6 +692,7 @@ export function StudioCanvas() {
   );
 
   const onNodeDragStart = useCallback((event: MouseEvent | ReactMouseEvent, node: StudioRFNode) => {
+    setNodeDragActive(true);
     if (!('altKey' in event) || !event.altKey) {
       altDragStateRef.current = null;
       return;
@@ -583,6 +714,7 @@ export function StudioCanvas() {
 
   const onNodeDragStop = useCallback(
     (_event: MouseEvent | ReactMouseEvent, node: StudioRFNode) => {
+      setNodeDragActive(false);
       const dragState = altDragStateRef.current;
       altDragStateRef.current = null;
       if (!dragState) return;
@@ -815,29 +947,49 @@ export function StudioCanvas() {
         screenToFlowRef.current?.({ x: event.clientX, y: event.clientY }) ?? { x: 360, y: 260 };
 
       if (/\.json$/i.test(file.name)) {
+        const {
+          createStudioProjectPayload,
+          createStudioProjectId,
+          parseStudioProjectJsonFile,
+          pushStudioRecentProject,
+          queueStudioProjectSnapshot,
+        } = await import('@/services/studioProjectPersistence');
         const text = await file.text();
         const payload = parseStudioProjectJsonFile(text);
         if (!payload) {
           pushMessage({ role: 'system', text: '拖入失败：项目文件格式无效。' });
           return;
         }
-        const { nodes: existingNodes } = useStudioStore.getState();
-        if (existingNodes.length > 0) {
+        const currentProject = useStudioStore.getState();
+        if (currentProject.nodes.length > 0) {
           const ok = window.confirm('拖入项目文件将替换当前画布，是否继续？');
           if (!ok) return;
         }
         const nextProjectId = payload.projectId ?? createStudioProjectId();
         const nextProjectName = payload.projectName ?? file.name.replace(/\.json$/i, '');
-        hydrateProject(payload.nodes, payload.edges, {
-          projectId: nextProjectId,
-          projectName: nextProjectName,
-          broadcastText: `已从拖入文件打开项目“${nextProjectName}”。`,
-        });
         try {
-          await putStudioProjectRecord(nextProjectId, nextProjectName, payload.nodes, payload.edges);
-          await setActiveStudioProjectRef({
+          if (
+            currentProject.nodes.length > 0
+            || currentProject.edges.length > 0
+            || currentProject.currentProjectId
+          ) {
+            await queueStudioProjectSnapshot(
+              createStudioProjectPayload(currentProject.nodes, currentProject.edges, {
+                projectId: currentProject.currentProjectId ?? undefined,
+                projectName: currentProject.currentProjectName,
+              }),
+            );
+          }
+          await queueStudioProjectSnapshot(
+            createStudioProjectPayload(payload.nodes, payload.edges, {
+              projectId: nextProjectId,
+              projectName: nextProjectName,
+            }),
+          );
+          hydrateProject(payload.nodes, payload.edges, {
             projectId: nextProjectId,
             projectName: nextProjectName,
+            broadcastText: `已从拖入文件打开项目“${nextProjectName}”。`,
           });
           await pushStudioRecentProject({
             projectId: nextProjectId,
@@ -848,7 +1000,7 @@ export function StudioCanvas() {
           console.warn('Persist dragged studio project failed', error);
           pushMessage({
             role: 'system',
-            text: '项目已打开，但未能写入最近工程记录。',
+            text: '打开失败：当前工程无法安全保存，画布未被替换。',
           });
         }
         return;
@@ -913,6 +1065,7 @@ export function StudioCanvas() {
       if (!/\.xlsx$/i.test(file.name)) return;
 
       try {
+        const { parseStoryboardWorkbookFile } = await import('@/utils/storyboardWorkbook');
         const parsed = await parseStoryboardWorkbookFile(file);
         const nodeId = addShotListNode(flowPosition, parsed.storyboard, {
           importedFileName: file.name,
@@ -999,7 +1152,9 @@ export function StudioCanvas() {
 
   return (
     <div
-      className={`studio-canvas${draggingCanvasFile ? ' studio-canvas--dragging-file' : ''}`}
+      className={`studio-canvas${draggingCanvasFile ? ' studio-canvas--dragging-file' : ''}${
+        nodeDragActive ? ' studio-canvas--node-dragging' : ''
+      }`}
       onDragOver={handleCanvasDragOver}
       onDragLeave={handleCanvasDragLeave}
       onDrop={(event) => void handleCanvasDrop(event)}

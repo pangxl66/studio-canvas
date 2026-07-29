@@ -98,6 +98,7 @@ export function selectStoryboardReferencesForShots(
 export function buildStoryboardPanelReferenceInstruction(
   shot: StoryboardShot,
   references: StoryboardConnectedReference[],
+  startIndex = 1,
 ): string {
   const ordered = prioritizeStoryboardReferences(references)
     .filter((reference) => reference.dataUrl)
@@ -105,11 +106,12 @@ export function buildStoryboardPanelReferenceInstruction(
   const bindings = ordered.flatMap((reference, index) => {
     if (!storyboardReferenceMatchesShot(reference, shot)) return [];
     const targetName = reference.entityName || reference.name;
+    const referenceIndex = index + startIndex;
     const rule = reference.kind === 'character'
-      ? `角色「${targetName}」必须使用参考图${index + 1}的同一张脸、年龄、发型和服装，禁止换脸`
+      ? `角色「${targetName}」必须使用参考图${referenceIndex}的同一张脸、年龄、发型和服装，禁止换脸`
       : reference.kind === 'scene'
-        ? `场景「${targetName}」必须使用参考图${index + 1}的空间、材质和主光方向`
-        : `道具「${targetName}」必须使用参考图${index + 1}的轮廓、材质和纹理`;
+        ? `场景「${targetName}」必须使用参考图${referenceIndex}的空间、材质和主光方向`
+        : `道具「${targetName}」必须使用参考图${referenceIndex}的轮廓、材质和纹理`;
     return [rule];
   });
   return bindings.length ? `本格参考绑定：${bindings.join('；')}。` : '';

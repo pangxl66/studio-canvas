@@ -42,8 +42,10 @@ test('Vercel exposes every admin endpoint used by the browser client', () => {
 
 test('storyboard grid image generation is available in browser and both server targets', () => {
   const client = read('src/services/storyboardGridImage.ts');
+  const imageModels = read('src/services/imageGenerationModels.ts');
   const filmStoryboardNode = read('src/components/AiFilmmakingNode.tsx');
-  assert.match(client, /gpt-image-2/);
+  assert.match(imageModels, /gemini-3\.1-flash-image/);
+  assert.doesNotMatch(imageModels, /gpt-image-2|gemini-3-pro-image-preview|gemini-3\.1-flash-image-preview/);
   assert.match(client, /\/api\/images\/generate/);
   assert.match(client, /explicitImageProxyUrl/);
   assert.match(client, /window\.location\.protocol !== 'file:'/);
@@ -89,4 +91,24 @@ test('local SaaS mock mode does not require a serverless proxy URL', () => {
     /key === 'VITE_LLM_PROXY_URL'/,
     'mock mode should allow the existing direct local LLM configuration',
   );
+});
+
+test('Vite development serves the same local API routes as the Node deployment', () => {
+  const viteConfig = read('vite.config.ts');
+  const nodeServer = read('server/index.cjs');
+  assert.match(viteConfig, /studio-canvas-local-api/);
+  assert.match(viteConfig, /require\('\.\/server\/index\.cjs'\)/);
+  assert.match(viteConfig, /pathname\.startsWith\('\/api\/'\)/);
+  assert.match(viteConfig, /pathname\.startsWith\('\/assets\/'\)/);
+  assert.match(viteConfig, /public, max-age=31536000, immutable/);
+  assert.match(viteConfig, /attachLocalApi\(server, \{ cacheBuiltAssets: true \}\)/);
+  assert.match(viteConfig, /return 'app-runtime'/);
+  assert.match(viteConfig, /return 'studio-skills'/);
+  assert.match(viteConfig, /return 'vendor-html2canvas'/);
+  assert.match(viteConfig, /return 'vendor-jspdf'/);
+  assert.match(viteConfig, /return 'vendor-pdf-support'/);
+  assert.match(viteConfig, /node_modules\/html2pdf\.js\/src\/index\.js/);
+  assert.doesNotMatch(viteConfig, /return 'vendor-pdf'/);
+  assert.match(nodeServer, /if \(require\.main === module\)/);
+  assert.match(nodeServer, /module\.exports = \{[\s\S]*?\broute\b[\s\S]*?\}/);
 });

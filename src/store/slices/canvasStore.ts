@@ -24,13 +24,20 @@ type CanvasSlice = Pick<
 export function createCanvasStoreSlice(set: StudioSet, get: StudioGet): CanvasSlice {
   return {
     setSelected: (id) =>
-      set((state) => ({
-        selectedNodeId: id,
-        nodes: state.nodes.map((node) => ({
-          ...node,
-          selected: id != null && node.id === id,
-        })),
-      })),
+      set((state) => {
+        let selectionChanged = state.selectedNodeId !== id;
+        const nodes = state.nodes.map((node) => {
+          const selected = id != null && node.id === id;
+          if (node.selected === selected) return node;
+          selectionChanged = true;
+          return { ...node, selected };
+        });
+        if (!selectionChanged) return state;
+        return {
+          selectedNodeId: id,
+          nodes,
+        };
+      }),
 
     setDetailOpen: (open) => set({ detailOpen: open }),
 
@@ -43,11 +50,26 @@ export function createCanvasStoreSlice(set: StudioSet, get: StudioGet): CanvasSl
         const target = state.nodes.find((node) => node.id === id);
         const promptOwnsItsControls =
           target?.type === 'department' && target.data.type === 'prompt';
+        const detailOpen = opts?.openDetail !== false && !promptOwnsItsControls;
+        let selectionChanged = state.selectedNodeId !== id;
+        const nodes = state.nodes.map((node) => {
+          const selected = node.id === id;
+          if (node.selected === selected) return node;
+          selectionChanged = true;
+          return { ...node, selected };
+        });
+        if (
+          !selectionChanged &&
+          state.detailOpen === detailOpen &&
+          state.activeNodeId === id
+        ) {
+          return state;
+        }
         return {
           selectedNodeId: id,
-          detailOpen: opts?.openDetail !== false && !promptOwnsItsControls,
+          detailOpen,
           activeNodeId: id,
-          nodes: state.nodes.map((node) => ({ ...node, selected: node.id === id })),
+          nodes: selectionChanged ? nodes : state.nodes,
         };
       });
     },

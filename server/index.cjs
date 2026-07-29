@@ -9,6 +9,7 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { createClient } = require('@supabase/supabase-js');
 const runtimeDefaults = require('../shared/runtime-defaults.json');
+const { createLocalProjectRepository } = require('./local-project-repository.cjs');
 
 const rootDir = path.resolve(__dirname, '..');
 const distDir = path.join(rootDir, 'dist');
@@ -23,6 +24,7 @@ function parseEnvMs(value, fallback, min, max) {
 
 const MAX_INPUT_CHARS = 80_000;
 const MAX_PROJECT_SNAPSHOT_CHARS = 5_000_000;
+const MAX_LOCAL_PROJECT_SNAPSHOT_CHARS = 250_000_000;
 const PROJECT_LIST_LIMIT = 40;
 const MAX_VIDEO_UPLOAD_BYTES = Number.parseInt(process.env.VIDEO_FRAME_MAX_UPLOAD_BYTES || '', 10) || 300 * 1024 * 1024;
 const DEFAULT_MONTHLY_QUOTA = runtimeDefaults.defaultMonthlyQuota;
@@ -32,8 +34,15 @@ const DEFAULT_MODEL = runtimeDefaults.defaultModel;
 const PRIMARY_MODEL_FAILURE_WINDOW_MS = 5 * 60 * 1000;
 const PRIMARY_MODEL_COOLDOWN_MS = 10 * 60 * 1000;
 const PRIMARY_MODEL_FAILURE_THRESHOLD = 2;
-const DEFAULT_IMAGE_MODEL = 'gpt-image-2';
+const DEFAULT_IMAGE_MODEL = 'gemini-3.1-flash-image';
 const IMAGE_GENERATION_QUOTA_COST = 3;
+const BUILTIN_IMAGE_MODELS = new Set([
+  'gemini-3.1-flash-image',
+  'image2',
+]);
+const UPSTREAM_IMAGE_MODEL_ALIASES = new Map([
+  ['image2', 'gpt-image-2'],
+]);
 const TEST_INVITE_TOKEN_PREFIX = 'test-invite';
 const testInviteActivationPath = path.join(rootDir, '.data', 'test-invite-activations.json');
 const testInviteUsagePath = path.join(rootDir, '.data', 'test-invite-usage-events.json');
@@ -48,6 +57,44 @@ const staticGzipCache = new Map();
 const STATIC_GZIP_CACHE_MAX_ITEMS = 80;
 
 loadLocalEnvFile(path.join(rootDir, '.env.local'));
+
+function getLocalProjectDataRoot() {
+  const configuredRoot = String(process.env.STUDIO_PROJECT_DATA_DIR || '').trim();
+  if (configuredRoot) return path.resolve(configuredRoot);
+  if (process.platform === 'win32') {
+    const localAppData =
+      String(process.env.LOCALAPPDATA || '').trim()
+      || path.join(os.homedir(), 'AppData', 'Local');
+    return path.join(localAppData, 'Studio Canvas', 'projects');
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', 'Studio Canvas', 'projects');
+  }
+  const xdgDataHome =
+    String(process.env.XDG_DATA_HOME || '').trim()
+    || path.join(os.homedir(), '.local', 'share');
+  return path.join(xdgDataHome, 'studio-canvas', 'projects');
+}
+
+function migrateLegacyLocalProjectData(targetRoot) {
+  const legacyRoot = path.join(rootDir, '.data', 'studio-projects');
+  if (
+    path.resolve(legacyRoot) === path.resolve(targetRoot)
+    || !fs.existsSync(legacyRoot)
+    || fs.existsSync(targetRoot)
+  ) {
+    return;
+  }
+  fs.mkdirSync(path.dirname(targetRoot), { recursive: true });
+  fs.cpSync(legacyRoot, targetRoot, { recursive: true, errorOnExist: false });
+}
+
+const localProjectDataRoot = getLocalProjectDataRoot();
+migrateLegacyLocalProjectData(localProjectDataRoot);
+const localProjectRepository = createLocalProjectRepository({
+  rootDirectory: localProjectDataRoot,
+  historyLimit: 30,
+});
 
 function loadLocalEnvFile(filePath) {
   if (!fs.existsSync(filePath)) return;
@@ -1496,6 +1543,8 @@ async function pipeUpstreamStream(upstreamResponse, _req, res) {
 
   const decoder = new TextDecoder();
   let rawText = '';
+  let eventBuffer = '';
+  let streamFinished = false;
   let clientClosed = false;
   const onClose = () => {
     if (!res.writableEnded) {
@@ -1510,11 +1559,45 @@ async function pipeUpstreamStream(upstreamResponse, _req, res) {
       const { done, value } = await reader.read();
       if (done) break;
       if (!value) continue;
-      rawText += decoder.decode(value, { stream: true });
+      const decoded = decoder.decode(value, { stream: true });
+      rawText += decoded;
+      eventBuffer += decoded;
+      const eventLines = eventBuffer.split('\n');
+      eventBuffer = eventLines.pop() || '';
+      for (const rawLine of eventLines) {
+        const line = rawLine.trim();
+        if (/^data:\s*\[DONE\]$/i.test(line)) {
+          streamFinished = true;
+          break;
+        }
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trimStart();
+        try {
+          const chunk = JSON.parse(payload);
+          if (
+            chunk?.done === true ||
+            chunk?.completed === true ||
+            chunk?.choices?.some(
+              (choice) =>
+                typeof choice?.finish_reason === 'string' &&
+                choice.finish_reason.trim().length > 0,
+            )
+          ) {
+            streamFinished = true;
+            break;
+          }
+        } catch {
+          // Ignore non-JSON SSE events and continue forwarding them unchanged.
+        }
+      }
       if (clientClosed || res.destroyed || res.writableEnded) {
         throw new Error('Client disconnected during LLM stream.');
       }
       res.write(Buffer.from(value));
+      if (streamFinished) {
+        reader.cancel().catch(() => {});
+        break;
+      }
     }
     rawText += decoder.decode();
     if (!res.writableEnded) res.end();
@@ -1557,12 +1640,17 @@ async function handleHealth(req, res) {
     sendJson(res, 405, { ok: false, error: 'Method not allowed.' });
     return;
   }
+  const supabase = {
+    anonKey: Boolean(env('SUPABASE_ANON_KEY')),
+    serviceRoleKey: Boolean(env('SUPABASE_SERVICE_ROLE_KEY')),
+    url: Boolean(env('SUPABASE_URL')),
+  };
+  const supabaseConfigured = Object.values(supabase).every(Boolean);
+  const testInviteEnabled = getTestInviteCodes().length > 0;
   const checks = {
     llmApiKey: hasProviderLlmApiKey('') || hasProviderLlmApiKey('gpt') || hasProviderLlmApiKey('deepseek'),
     llmUpstream: hasLlmUpstream(),
-    supabaseAnonKey: Boolean(env('SUPABASE_ANON_KEY')),
-    supabaseServiceRoleKey: Boolean(env('SUPABASE_SERVICE_ROLE_KEY')),
-    supabaseUrl: Boolean(env('SUPABASE_URL')),
+    authBackend: supabaseConfigured || testInviteEnabled,
   };
   const ok = Object.values(checks).every(Boolean);
   const providers = ['', 'gpt', 'deepseek'].map((provider) => {
@@ -1594,6 +1682,11 @@ async function handleHealth(req, res) {
         defaultMonthlyQuota: DEFAULT_MONTHLY_QUOTA,
         legacyDefaultMonthlyQuota: LEGACY_DEFAULT_MONTHLY_QUOTA,
         testInviteMonthlyQuota: getTestInviteMonthlyQuota(),
+      },
+      auth: {
+        mode: supabaseConfigured ? 'supabase' : testInviteEnabled ? 'test-invite' : 'unconfigured',
+        supabase,
+        testInviteEnabled,
       },
       staticAssets: {
         distExists: fs.existsSync(distDir),
@@ -2896,8 +2989,60 @@ function createImageUpstreamRequest(body, model, prompt, size, quality) {
   return { edit: true, headers: {}, body: form, referenceImageCount: parsed.length };
 }
 
-function getImageApiKey() {
+function getImageApiKey(model) {
+  if (String(model || '').startsWith('gemini-')) {
+    return env('GEMINI_IMAGE_API_KEY') || env('IMAGE_API_KEY') || env('GPT_LLM_API_KEY') || env('LLM_API_KEY');
+  }
   return env('IMAGE_API_KEY') || env('GPT_LLM_API_KEY') || env('LLM_API_KEY');
+}
+
+function resolveRequestedImageModel(value) {
+  const requested = String(value || '').trim();
+  if (!requested) return DEFAULT_IMAGE_MODEL;
+  return BUILTIN_IMAGE_MODELS.has(requested) ? requested : '';
+}
+
+function resolveUpstreamImageModel(model) {
+  return UPSTREAM_IMAGE_MODEL_ALIASES.get(String(model || '').trim()) || model;
+}
+
+function measureImageBuffer(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 10) return null;
+  const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  if (buffer.length >= 24 && buffer.subarray(0, 8).equals(pngSignature)) {
+    return {
+      width: buffer.readUInt32BE(16),
+      height: buffer.readUInt32BE(20),
+      mimeType: 'image/png',
+    };
+  }
+  if (buffer[0] !== 0xff || buffer[1] !== 0xd8) return null;
+  let offset = 2;
+  const sizeMarkers = new Set([
+    0xc0, 0xc1, 0xc2, 0xc3,
+    0xc5, 0xc6, 0xc7,
+    0xc9, 0xca, 0xcb,
+    0xcd, 0xce, 0xcf,
+  ]);
+  while (offset + 9 < buffer.length) {
+    if (buffer[offset] !== 0xff) {
+      offset += 1;
+      continue;
+    }
+    const marker = buffer[offset + 1];
+    if (marker === 0xd9 || marker === 0xda) break;
+    const segmentLength = buffer.readUInt16BE(offset + 2);
+    if (sizeMarkers.has(marker)) {
+      return {
+        width: buffer.readUInt16BE(offset + 7),
+        height: buffer.readUInt16BE(offset + 5),
+        mimeType: 'image/jpeg',
+      };
+    }
+    if (segmentLength < 2) break;
+    offset += segmentLength + 2;
+  }
+  return null;
 }
 
 async function handleImageGenerate(req, res) {
@@ -2925,7 +3070,11 @@ async function handleImageGenerate(req, res) {
     return;
   }
 
-  const model = env('IMAGE_MODEL') || DEFAULT_IMAGE_MODEL;
+  const model = resolveRequestedImageModel(body.model);
+  if (!model) {
+    sendJson(res, 400, { error: { message: '当前图片生成仅支持 Nano Banana 2 或 image2。' } });
+    return;
+  }
   const cost = IMAGE_GENERATION_QUOTA_COST;
   const inChars = prompt.length;
   const isTestInvite = Boolean(auth.isTestInvite);
@@ -2975,7 +3124,7 @@ async function handleImageGenerate(req, res) {
   }
 
   try {
-    const apiKey = getImageApiKey();
+    const apiKey = getImageApiKey(model);
     const allowedSizes = new Set([
       '1024x1024',
       '1536x1536',
@@ -2988,7 +3137,8 @@ async function handleImageGenerate(req, res) {
     ]);
     const size = allowedSizes.has(String(body.size || '')) ? String(body.size) : '1536x1536';
     const quality = body.quality === 'low' || body.quality === 'high' ? body.quality : 'medium';
-    const request = createImageUpstreamRequest(body, model, prompt, size, quality);
+    const upstreamModel = resolveUpstreamImageModel(model);
+    const request = createImageUpstreamRequest(body, upstreamModel, prompt, size, quality);
     const upstreamUrl = getImageUpstreamUrl(request.edit);
     if (!upstreamUrl || !apiKey) throw new Error('Image upstream env is missing.');
     const controller = new AbortController();
@@ -3030,6 +3180,11 @@ async function handleImageGenerate(req, res) {
     const payload = JSON.parse(raw);
     const b64 = String(payload?.data?.[0]?.b64_json || '').trim();
     if (!b64) throw new Error('图片模型未返回 b64_json。');
+    const imageBuffer = Buffer.from(b64, 'base64');
+    const measuredImage = measureImageBuffer(imageBuffer);
+    const actualSize = measuredImage
+      ? `${measuredImage.width}x${measuredImage.height}`
+      : size;
     await recordUsage({
       user_id: auth.userId,
       project_id: body.projectId || null,
@@ -3043,9 +3198,13 @@ async function handleImageGenerate(req, res) {
       error_message: null,
     });
     sendJson(res, 200, {
-      imageDataUrl: `data:image/jpeg;base64,${b64}`,
+      imageDataUrl: `data:${measuredImage?.mimeType || 'image/jpeg'};base64,${b64}`,
       model,
-      size,
+      upstreamModel,
+      requestedSize: size,
+      size: actualSize,
+      width: measuredImage?.width,
+      height: measuredImage?.height,
       referenceImageCount: request.referenceImageCount,
     });
   } catch (error) {
@@ -3198,6 +3357,224 @@ function serveStatic(req, res) {
   fs.createReadStream(filePath).pipe(res);
 }
 
+function isLoopbackRequest(req) {
+  const remoteAddress = String(req.socket?.remoteAddress || '');
+  return (
+    remoteAddress === '127.0.0.1'
+    || remoteAddress === '::1'
+    || remoteAddress === '::ffff:127.0.0.1'
+  );
+}
+
+async function handleLocalProjects(req, res, url) {
+  if (!isLoopbackRequest(req)) {
+    sendJson(res, 403, { error: { message: '磁盘工程库仅允许本机访问。' } });
+    return;
+  }
+
+  if (url.pathname === '/api/local-projects/snapshot') {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, { error: { message: 'Method not allowed.' } });
+      return;
+    }
+    const body = await readJsonBody(req);
+    const snapshot = body?.snapshot;
+    if (JSON.stringify(snapshot || {}).length > MAX_LOCAL_PROJECT_SNAPSHOT_CHARS) {
+      sendJson(res, 413, { error: { message: '工程快照超过本地磁盘保存上限。' } });
+      return;
+    }
+    try {
+      const hasExpectedSavedAt = Object.prototype.hasOwnProperty.call(body || {}, 'expectedSavedAt');
+      const expectedSavedAt = body?.expectedSavedAt;
+      if (
+        hasExpectedSavedAt
+        && expectedSavedAt !== null
+        && !Number.isFinite(expectedSavedAt)
+      ) {
+        sendJson(res, 400, { error: { message: 'expectedSavedAt 必须是数字或 null。' } });
+        return;
+      }
+      const result = await localProjectRepository.saveSnapshot(
+        snapshot,
+        {
+          // Treat legacy clients that omit the precondition as having loaded an
+          // empty head. They may create a new project, but they cannot overwrite
+          // an existing project after a newer tab has saved it.
+          expectedSavedAt: hasExpectedSavedAt ? expectedSavedAt : null,
+        },
+      );
+      if (result.conflict) {
+        sendJson(res, 409, {
+          error: {
+            message: '工程已被另一个页面更新。为避免覆盖新内容，本次旧快照未保存；请重新载入工程后再继续。',
+          },
+          result,
+        });
+        return;
+      }
+      sendJson(res, 200, { ok: true, result });
+    } catch (error) {
+      sendJson(res, 400, {
+        error: {
+          message: error instanceof Error ? error.message : '磁盘工程保存失败。',
+        },
+      });
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/local-projects/active') {
+    if (req.method !== 'GET') {
+      sendJson(res, 405, { error: { message: 'Method not allowed.' } });
+      return;
+    }
+    sendJson(res, 200, {
+      snapshot: localProjectRepository.readActiveSnapshot(),
+    });
+    return;
+  }
+
+  if (url.pathname === '/api/local-projects') {
+    if (req.method !== 'GET') {
+      sendJson(res, 405, { error: { message: 'Method not allowed.' } });
+      return;
+    }
+    sendJson(res, 200, {
+      projects: localProjectRepository.listProjects(),
+    });
+    return;
+  }
+
+  const optimizeMatch = url.pathname.match(
+    /^\/api\/local-projects\/([^/]+)\/optimize$/,
+  );
+  if (optimizeMatch) {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, { error: { message: 'Method not allowed.' } });
+      return;
+    }
+    try {
+      const projectId = decodeURIComponent(optimizeMatch[1]);
+      const result = await localProjectRepository.optimizeProject(projectId);
+      sendJson(res, 200, { ok: true, result });
+    } catch (error) {
+      sendJson(res, 400, {
+        error: {
+          message: error instanceof Error ? error.message : '工程资产优化失败。',
+        },
+      });
+    }
+    return;
+  }
+
+  const versionMatch = url.pathname.match(
+    /^\/api\/local-projects\/([^/]+)\/versions\/([^/]+)$/,
+  );
+  if (versionMatch) {
+    if (req.method !== 'GET') {
+      sendJson(res, 405, { error: { message: 'Method not allowed.' } });
+      return;
+    }
+    try {
+      const projectId = decodeURIComponent(versionMatch[1]);
+      const versionId = decodeURIComponent(versionMatch[2]);
+      sendJson(res, 200, {
+        snapshot: localProjectRepository.readVersion(projectId, versionId),
+      });
+    } catch (error) {
+      sendJson(res, 400, {
+        error: {
+          message: error instanceof Error ? error.message : '磁盘工程版本读取失败。',
+        },
+      });
+    }
+    return;
+  }
+
+  const match = url.pathname.match(/^\/api\/local-projects\/([^/]+)(\/versions)?$/);
+  if (!match) {
+    sendJson(res, 404, { error: { message: 'Local project route not found.' } });
+    return;
+  }
+  if (req.method !== 'GET') {
+    sendJson(res, 405, { error: { message: 'Method not allowed.' } });
+    return;
+  }
+  try {
+    const projectId = decodeURIComponent(match[1]);
+    if (match[2]) {
+      sendJson(res, 200, {
+        versions: localProjectRepository.listVersions(projectId),
+      });
+      return;
+    }
+    sendJson(res, 200, {
+      snapshot: localProjectRepository.readSnapshot(projectId),
+    });
+  } catch (error) {
+    sendJson(res, 400, {
+      error: {
+        message: error instanceof Error ? error.message : '磁盘工程读取失败。',
+      },
+    });
+  }
+}
+
+async function handleLocalProjectAssets(req, res, url) {
+  if (!isLoopbackRequest(req)) {
+    sendJson(res, 403, { error: { message: '本地工程资产仅允许本机访问。' } });
+    return;
+  }
+  if (url.pathname === '/api/local-project-assets') {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, { error: { message: 'Method not allowed.' } });
+      return;
+    }
+    try {
+      const body = await readJsonBody(req);
+      const result = localProjectRepository.saveAssetDataUrl(
+        typeof body?.assetId === 'string' ? body.assetId : '',
+        body?.dataUrl,
+      );
+      sendJson(res, 200, { ok: true, result });
+    } catch (error) {
+      sendJson(res, 400, {
+        error: {
+          message: error instanceof Error ? error.message : '本地图片资产保存失败。',
+        },
+      });
+    }
+    return;
+  }
+  const match = url.pathname.match(/^\/api\/local-project-assets\/([^/]+)$/);
+  if (!match || (req.method !== 'GET' && req.method !== 'HEAD')) {
+    sendJson(res, match ? 405 : 404, {
+      error: { message: match ? 'Method not allowed.' : 'Local project asset route not found.' },
+    });
+    return;
+  }
+  try {
+    const assetId = decodeURIComponent(match[1]);
+    const asset = localProjectRepository.readAsset(assetId);
+    if (!asset) {
+      sendJson(res, 404, { error: { message: '本地图片资产不存在。' } });
+      return;
+    }
+    res.statusCode = 200;
+    res.setHeader('content-type', asset.mimeType);
+    res.setHeader('content-length', asset.bytes);
+    res.setHeader('cache-control', 'public, max-age=31536000, immutable');
+    if (req.method === 'HEAD') res.end();
+    else res.end(asset.buffer);
+  } catch (error) {
+    sendJson(res, 400, {
+      error: {
+        message: error instanceof Error ? error.message : '本地图片资产读取失败。',
+      },
+    });
+  }
+}
+
 async function route(req, res) {
   try {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
@@ -3227,6 +3604,20 @@ async function route(req, res) {
     }
     if (url.pathname === '/api/projects') {
       await handleProjects(req, res);
+      return;
+    }
+    if (
+      url.pathname === '/api/local-projects'
+      || url.pathname.startsWith('/api/local-projects/')
+    ) {
+      await handleLocalProjects(req, res, url);
+      return;
+    }
+    if (
+      url.pathname === '/api/local-project-assets'
+      || url.pathname.startsWith('/api/local-project-assets/')
+    ) {
+      await handleLocalProjectAssets(req, res, url);
       return;
     }
     if (url.pathname.startsWith('/api/projects/')) {
@@ -3261,8 +3652,18 @@ async function route(req, res) {
   }
 }
 
-http.createServer((req, res) => {
-  void route(req, res);
-}).listen(port, '0.0.0.0', () => {
-  console.log(`Studio Canvas server listening on http://0.0.0.0:${port}`);
-});
+if (require.main === module) {
+  http.createServer((req, res) => {
+    void route(req, res);
+  }).listen(port, '0.0.0.0', () => {
+    console.log(`Studio Canvas server listening on http://0.0.0.0:${port}`);
+  });
+}
+
+module.exports = {
+  route,
+  __test: {
+    measureImageBuffer,
+    resolveUpstreamImageModel,
+  },
+};

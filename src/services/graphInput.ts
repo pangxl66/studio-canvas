@@ -304,6 +304,16 @@ export function mergedTextInputForDepartment(
       if (block != null && block.length > 0) parts.push(block);
     } else if (src.type === 'shotList') {
       if (src.data.type !== 'shot_list_node') continue;
+      const parentId = src.data.sourceStoryboardNodeId;
+      const parent = parentId
+        ? nodes.find(
+            (node) =>
+              node.id === parentId &&
+              node.type === 'department' &&
+              node.data.type === 'storyboard',
+          )
+        : null;
+      if (parent && parent.data.status !== 'APPROVED') continue;
       const pickedWireId = parseShotListItemOutputHandleId(e.sourceHandle);
       if (consumerKind === 'prompt' && pickedWireId) {
         const bucket = promptShotSelections.get(src.id) ?? [];

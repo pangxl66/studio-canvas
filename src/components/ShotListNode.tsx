@@ -139,7 +139,7 @@ function ShotListNodeInner({ id, data, selected }: NodeProps<ShotListRF>) {
       <header className="shot-list-node__head">
         <div className="shot-list-node__head-top">
           <div className="shot-list-node__head-row">
-            <span className="shot-list-node__title">镜头表</span>
+            <span className="shot-list-node__title">分镜表</span>
             <span className="shot-list-node__badge">
               {shotCount > 0 ? `${shotCount} 镜` : '待同步'}
             </span>
@@ -147,7 +147,7 @@ function ShotListNodeInner({ id, data, selected }: NodeProps<ShotListRF>) {
           <button
             type="button"
             className="shot-list-node__download nodrag nopan nowheel"
-            title="导出当前镜头表为 CSV（Excel 可直接打开）"
+            title="导出当前分镜表为 CSV（Excel 可直接打开）"
             aria-label="导出 CSV"
             onPointerDown={(event) => event.stopPropagation()}
             onMouseDown={(event) => event.stopPropagation()}
@@ -177,7 +177,7 @@ function ShotListNodeInner({ id, data, selected }: NodeProps<ShotListRF>) {
         onPointerDown={(event) => event.stopPropagation()}
         onMouseDown={(event) => event.stopPropagation()}
       >
-        {parentHint} · 逐镜头 Output -&gt; Prompt
+        {parentHint} · 逐镜头 Output → Prompt
       </p>
 
       <ShotListEmbeddedEditor id={id} data={data} viewportHeight={height} />

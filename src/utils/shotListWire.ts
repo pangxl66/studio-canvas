@@ -25,3 +25,68 @@ export function parseShotListItemOutputHandleId(handleId: string | null | undefi
 export function isShotListItemOutputHandleId(handleId: string | null | undefined): boolean {
   return parseShotListItemOutputHandleId(handleId) != null;
 }
+
+export function reconcileShotListOutputEdges(
+  edges: Edge[],
+  shotListId: string,
+  previousShots: StoryboardShot[],
+  nextShots: StoryboardShot[],
+): { edges: Edge[]; removedCount: number; migratedCount: number } {
+  const previousWireIds = new Set(
+    previousShots.map((shot) => shot.wireId).filter((wireId): wireId is string => Boolean(wireId)),
+  );
+  const nextWireIds = new Set(
+    nextShots.map((shot) => shot.wireId).filter((wireId): wireId is string => Boolean(wireId)),
+  );
+  const mergedWireByMember = new Map<string, string>();
+  for (const shot of nextShots) {
+    if (!shot.wireId || !shot.mergedMembers?.length) continue;
+    for (const member of shot.mergedMembers) {
+      if (member.wireId) mergedWireByMember.set(member.wireId, shot.wireId);
+    }
+  }
+
+  let removedCount = 0;
+  let migratedCount = 0;
+  const nextEdges: Edge[] = [];
+  for (const edge of edges) {
+    if (edge.source !== shotListId) {
+      nextEdges.push(edge);
+      continue;
+    }
+    const wireId = parseShotListItemOutputHandleId(edge.sourceHandle);
+    if (!wireId || !previousWireIds.has(wireId) || nextWireIds.has(wireId)) {
+      nextEdges.push(edge);
+      continue;
+    }
+    const mergedWireId = mergedWireByMember.get(wireId);
+    if (!mergedWireId) {
+      removedCount += 1;
+      continue;
+    }
+    const migrated = {
+      ...edge,
+      sourceHandle: makeShotListItemOutputHandleId(mergedWireId),
+    };
+    migratedCount += 1;
+    nextEdges.push(migrated);
+  }
+  const seen = new Set<string>();
+  const deduplicated = nextEdges.filter((edge) => {
+    const signature = [
+      edge.source,
+      edge.target,
+      edge.sourceHandle ?? '',
+      edge.targetHandle ?? '',
+    ].join('::');
+    if (seen.has(signature)) {
+      removedCount += 1;
+      return false;
+    }
+    seen.add(signature);
+    return true;
+  });
+  return { edges: deduplicated, removedCount, migratedCount };
+}
+import type { Edge } from '@xyflow/react';
+import type { StoryboardShot } from '@/types/studio';

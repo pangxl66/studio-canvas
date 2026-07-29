@@ -33,7 +33,11 @@ const ALLOWED_TRANSITIONS: Record<NodeStatus, NodeStatus[]> = {
  * 标准流转：NOT_STARTED → IN_PROGRESS（AI）→ WAITING_REVIEW → APPROVED | REJECTED。
  * Prompt 也停在 WAITING_REVIEW，由独立的提示词审核节点承接后续操作。
  */
-export function canTransitionPipelineStatus(from: NodeStatus, to: NodeStatus, _kind?: NodeKind): boolean {
+export function canTransitionPipelineStatus(from: NodeStatus, to: NodeStatus, kind?: NodeKind): boolean {
+  // Storyboard review was removed: a successful generation now completes directly.
+  if (kind === 'storyboard' && from === 'IN_PROGRESS' && to === 'APPROVED') {
+    return true;
+  }
   return ALLOWED_TRANSITIONS[from]?.includes(to) ?? false;
 }
 

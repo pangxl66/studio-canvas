@@ -1,0 +1,4 @@
+interface:
+  display_name: "规范化分镜提示词生成器"
+  short_description: "生成3200字以内的单镜或多镜组合提示词，并自动匹配完整摄影机参数"
+  default_prompt: "使用 $generate-storyboard-prompts 融合我的分镜资料，生成3200字以内且带完整摄影机参数的规范组合提示词。"

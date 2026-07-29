@@ -16,7 +16,6 @@ import {
   mergeSameSceneGroups,
   selectionCanMergeConsecutive,
 } from '@/components/detailPanel/StoryboardShotListTable';
-import { ShotListCanvasDecisionStrip } from '@/components/ShotListCanvasDecisionStrip';
 import { useStudioStore } from '@/store/useStudioStore';
 import type { StoryboardOutput, StoryboardShot, StudioNodeData } from '@/types/studio';
 import {
@@ -249,7 +248,7 @@ function ShotCanvasRow({
           </button>
         )}
       </td>
-      <td className="shot-list-canvas__td shot-list-canvas__td--sound">
+      <td className="shot-list-canvas__td shot-list-canvas__td--type">
         {editingField === 'type' ? (
           <input
             type="text"
@@ -281,7 +280,7 @@ function ShotCanvasRow({
           </button>
         )}
       </td>
-      <td className="shot-list-canvas__td">
+      <td className="shot-list-canvas__td shot-list-canvas__td--movement">
         {editingField === 'movement' ? (
           <input
             type="text"
@@ -541,16 +540,8 @@ export function ShotListEmbeddedEditor({
 }) {
   const patchShotListNodeOutput = useStudioStore((s) => s.patchShotListNodeOutput);
   const setShotListSelectedWires = useStudioStore((s) => s.setShotListSelectedWires);
-  const parentId = data.sourceStoryboardNodeId ?? null;
   const edges = useStudioStore((s) => s.edges);
   const updateNodeInternals = useUpdateNodeInternals();
-
-  const parentReviewData = useStudioStore((s) => {
-    if (!parentId) return null;
-    const n = s.nodes.find((x) => x.id === parentId);
-    if (n?.type !== 'department' || n.data.type !== 'storyboard') return null;
-    return n.data;
-  });
 
   const output = useMemo((): StoryboardOutput | null => {
     if (data.type !== 'shot_list_node' || data.output == null) return null;
@@ -648,7 +639,13 @@ export function ShotListEmbeddedEditor({
 
   useEffect(() => {
     registerShotListPendingEditFlusher(id, flushPersist);
-    return () => unregisterShotListPendingEditFlusher(id, flushPersist);
+    const flushBeforeUnload = () => flushPersist();
+    window.addEventListener('beforeunload', flushBeforeUnload);
+    return () => {
+      flushPersist();
+      unregisterShotListPendingEditFlusher(id, flushPersist);
+      window.removeEventListener('beforeunload', flushBeforeUnload);
+    };
   }, [flushPersist, id]);
 
   const onLiveField = useCallback(
@@ -873,7 +870,7 @@ export function ShotListEmbeddedEditor({
       base.narrativeBeats?.length > 0
         ? base.narrativeBeats
         : nextShots.length > 0
-          ? ['鎵嬪姩缁存姢鐨勯暅澶磋〃']
+          ? ['手动维护的镜头表']
           : [];
     patchShotListNodeOutput(id, { ...base, narrativeBeats: beats, shots: reindexStoryboardShotIds(nextShots) }, true);
   }, [id, patchShotListNodeOutput, flushPersist]);
@@ -919,11 +916,6 @@ export function ShotListEmbeddedEditor({
   const hasSelection = selected.size >= 1;
   const scrollViewportHeight = Math.max(220, (viewportHeight ?? 560) - 210);
 
-  const decisionStrip =
-    parentId != null && parentReviewData != null ? (
-      <ShotListCanvasDecisionStrip parentId={parentId} parentData={parentReviewData} />
-    ) : null;
-
   if (!output || shots.length === 0) {
     return (
       <div
@@ -931,7 +923,6 @@ export function ShotListEmbeddedEditor({
         onPointerDown={stopCanvas}
         onMouseDown={stopCanvas}
       >
-        {decisionStrip}
         <div className="shot-list-canvas__empty shot-list-canvas__empty--padded">
           <p className="shot-list-canvas__empty-text">暂无镜头数据</p>
           <p className="shot-list-canvas__empty-hint">可从父分镜同步生成，或点击下方手动新增第一行</p>
@@ -956,7 +947,6 @@ export function ShotListEmbeddedEditor({
       onMouseDown={stopCanvas}
       onContextMenu={openShotListContextMenu}
     >
-      {decisionStrip}
       {hasSelection ? (
         <div className="shot-list-canvas__toolbar">
           <span className="shot-list-canvas__toolbar-hint">已选 {selected.size} 行</span>
@@ -1107,10 +1097,10 @@ export function ShotListEmbeddedEditor({
               <th className="shot-list-canvas__th shot-list-canvas__th--scene" scope="col">
                 场景
               </th>
-              <th className="shot-list-canvas__th" scope="col">
+              <th className="shot-list-canvas__th shot-list-canvas__th--type" scope="col">
                 景别
               </th>
-              <th className="shot-list-canvas__th" scope="col">
+              <th className="shot-list-canvas__th shot-list-canvas__th--movement" scope="col">
                 运镜
               </th>
               <th className="shot-list-canvas__th shot-list-canvas__th--duration" scope="col">

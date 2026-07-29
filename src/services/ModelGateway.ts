@@ -66,6 +66,7 @@ type StreamChunkJson = {
     delta?: { content?: string | null | ChatMessageContentPart | ChatMessageContentPart[] };
     message?: { content?: string | null | ChatMessageContentPart | ChatMessageContentPart[] };
     text?: string | null;
+    finish_reason?: string | null;
   }>;
   output_text?: string | null;
   delta?: string | null;
@@ -74,6 +75,8 @@ type StreamChunkJson = {
     content?: string | null | ChatMessageContentPart | ChatMessageContentPart[];
     text?: string | null;
   }>;
+  done?: boolean;
+  completed?: boolean;
   error?: { message?: string; code?: string; type?: string };
 };
 
@@ -1112,6 +1115,7 @@ async function requestLLMStreamOnce(
 
     const decoder = new TextDecoder();
     let lineBuffer = '';
+    let streamFinished = false;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -1121,9 +1125,13 @@ async function requestLLMStreamOnce(
       lineBuffer = lines.pop() ?? '';
       for (const rawLine of lines) {
         const line = rawLine.trim();
-        if (!line || line === 'data: [DONE]') continue;
-        if (!line.startsWith('data: ')) continue;
-        const payload = line.slice(6);
+        if (!line) continue;
+        if (/^data:\s*\[DONE\]$/i.test(line)) {
+          streamFinished = true;
+          break;
+        }
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trimStart();
         const parsed = safeJsonParse(payload);
         if (!parsed.ok || !parsed.value || typeof parsed.value !== 'object') continue;
         const json = parsed.value as StreamChunkJson;
@@ -1146,8 +1154,31 @@ async function requestLLMStreamOnce(
         if (piece) {
           accumulated += piece;
           params.onDelta(piece, accumulated);
+          if (params.jsonMode && safeJsonParse(accumulated).ok) {
+            streamFinished = true;
+            break;
+          }
+        }
+        if (
+          json.done === true ||
+          json.completed === true ||
+          json.choices?.some(
+            (choice) =>
+              typeof choice.finish_reason === 'string' &&
+              choice.finish_reason.trim().length > 0,
+          )
+        ) {
+          streamFinished = true;
+          break;
         }
       }
+      if (streamFinished) break;
+    }
+
+    if (streamFinished) {
+      void reader.cancel().catch(() => {
+        // The provider may already have closed the stream after its terminal event.
+      });
     }
 
     params.onComplete?.(accumulated);

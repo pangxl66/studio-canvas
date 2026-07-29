@@ -1,5 +1,5 @@
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
-import { memo, useCallback, useState, type MouseEvent } from 'react';
+import { memo, useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
 import { ReviewFeedbackDialog } from '@/components/ReviewFeedbackDialog';
 import { SkillSlotSection } from '@/components/SkillSlotSection';
 import { useStudioStore } from '@/store/useStudioStore';
@@ -124,6 +124,19 @@ export {
 function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
   const [reviewOpen, setReviewOpen] = useState(false);
   const isPromptNode = data.type === 'prompt';
+  const promptStreamRef = useRef<HTMLPreElement>(null);
+  const showPromptStream = isPromptNode && data.status === 'IN_PROGRESS';
+  const promptStreamText =
+    data.streaming_preview?.trim() || '模型已启动，正在等待首段输出…';
+
+  useEffect(() => {
+    if (!showPromptStream) return;
+    const frame = window.requestAnimationFrame(() => {
+      const preview = promptStreamRef.current;
+      if (preview) preview.scrollTop = preview.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [promptStreamText, showPromptStream]);
 
   const dept =
     data.department === 'WRITING'
@@ -135,7 +148,7 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
 
   const showPullHandle =
     data.type === 'writing' || data.type === 'storyboard' || data.type === 'prompt';
-  const supportsReview = data.type === 'writing' || data.type === 'storyboard';
+  const supportsReview = data.type === 'writing';
 
   const hasInputFeed = useStudioStore(
     useCallback((s) => departmentNodeHasInputWire(id, s.edges, s.nodes), [id]),
@@ -397,6 +410,23 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
         </div>
       </div>
 
+      {showPromptStream ? (
+        <section
+          className="prompt-node__stream nodrag nopan"
+          aria-label="提示词实时生成预览"
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <header className="prompt-node__stream-head">
+            <span className="prompt-node__stream-pulse" aria-hidden />
+            <strong>实时生成</strong>
+            <span>{promptStreamText.length.toLocaleString('zh-CN')} 字</span>
+          </header>
+          <pre ref={promptStreamRef} className="prompt-node__stream-content">
+            {promptStreamText}
+          </pre>
+        </section>
+      ) : null}
+
       {isPromptNode ? (
         <div
           className="prompt-node__skill-controls nodrag nopan"
@@ -463,7 +493,9 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
 
       {data.status === 'REJECTED' && data.review_result ? (
         <div className="dept-node__review-comment">
-          <div className="dept-node__review-comment-label">审核意见</div>
+          <div className="dept-node__review-comment-label">
+            {data.type === 'storyboard' ? '生成失败原因' : '审核意见'}
+          </div>
           <p className="dept-node__review-comment-text">{data.review_result}</p>
         </div>
       ) : null}
@@ -474,7 +506,7 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
           position={Position.Bottom}
           id={SHOT_LIST_LINK_HANDLE_ID}
           className="dept-handle dept-handle--shot-list-link"
-          title="镜头表子节点：执行后会自动在下方创建并连线。"
+          title="分解表节点：生成完成后会自动在下方创建、连线并打开。"
         />
       ) : null}
 

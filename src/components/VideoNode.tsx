@@ -10,11 +10,10 @@ import {
 } from 'react';
 import { useStudioStore } from '@/store/useStudioStore';
 import type { StudioNodeData } from '@/types/studio';
+import { VIDEO_NODE_OUTPUT_HANDLE_ID } from '@/utils/mediaNodeHandles';
 import { extractVideoContactSheet, formatVideoDuration } from '@/utils/videoFrames';
 
 type VideoRF = Node<StudioNodeData, 'videoNode'>;
-
-export const VIDEO_NODE_OUTPUT_HANDLE_ID = 'out';
 
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {

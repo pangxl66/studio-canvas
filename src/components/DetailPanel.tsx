@@ -1,4 +1,12 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+} from 'react';
 import { tryParseStoryboardOutput } from '@/agents/storyboardAgents';
 import {
   downloadStoryboardShotlistCsvIntl,
@@ -10,7 +18,6 @@ import {
 } from '@/components/detailPanel/DetailPanelHeaderActionsBar';
 import { PromptOutputPanel } from '@/components/detailPanel/PromptOutputPanel';
 import { SkillExportExtensionHeaderButtons } from '@/components/detailPanel/SkillExportExtensionHeaderButtons';
-import { ShotListReviewDecisionBar } from '@/components/detailPanel/ShotListReviewDecisionBar';
 import { StoryboardShotListTable } from '@/components/detailPanel/StoryboardShotListTable';
 import { StoryboardShotlistDownload } from '@/components/detailPanel/StoryboardShotlistDownload';
 import { PipelineReviewDecisionPanel } from '@/components/detailPanel/PipelineReviewDecisionPanel';
@@ -21,6 +28,7 @@ import { ReviewFeedbackDialog } from '@/components/ReviewFeedbackDialog';
 import { WritingDetailWorkspace } from '@/components/writing/WritingDetailWorkspace';
 import { WritingHeaderActions } from '@/components/writing/WritingHeaderActions';
 import { useStudioStore } from '@/store/useStudioStore';
+import { useStudioGraphContentNodes } from '@/hooks/useStudioGraphContent';
 import type {
   PromptOutput,
   SceneRow,
@@ -135,7 +143,7 @@ export function DetailPanel() {
   const detailOpen = useStudioStore((s) => s.detailOpen);
   const selectedId = useStudioStore((s) => s.selectedNodeId);
   const edges = useStudioStore((s) => s.edges);
-  const rfNodes = useStudioStore((s) => s.nodes);
+  const rfNodes = useStudioGraphContentNodes();
   const node = useStudioStore((s) => s.nodes.find((n) => n.id === selectedId)?.data);
   const setDetailOpen = useStudioStore((s) => s.setDetailOpen);
   const removeNodesByIds = useStudioStore((s) => s.removeNodesByIds);
@@ -150,6 +158,7 @@ export function DetailPanel() {
   const stopNodeTask = useStudioStore((s) => s.stopNodeTask);
   const pushMessage = useStudioStore((s) => s.pushMessage);
   const focusNode = useStudioStore((s) => s.focusNode);
+  const ensureShotListForStoryboard = useStudioStore((s) => s.ensureShotListForStoryboard);
   const patchShotListNodeOutput = useStudioStore((s) => s.patchShotListNodeOutput);
   const completeConnectionMenuPick = useStudioStore((s) => s.completeConnectionMenuPick);
 
@@ -272,6 +281,56 @@ export function DetailPanel() {
     node?.status,
     node?.streaming_preview,
     scrollDetailContentToBottom,
+  ]);
+
+  useEffect(() => {
+    if (
+      !detailOpen ||
+      !selectedId ||
+      node?.type !== 'storyboard' ||
+      node.status !== 'IN_PROGRESS' ||
+      node.generation_phase !== 'leader' ||
+      !tryParseStoryboardOutput(node.output)
+    ) {
+      return;
+    }
+    patchNodeData(
+      selectedId,
+      {
+        status: 'APPROVED',
+        generation_phase: undefined,
+        streaming_preview: undefined,
+        generation_error: undefined,
+        review_result: null,
+      },
+      true,
+    );
+  }, [detailOpen, node, patchNodeData, selectedId]);
+
+  useEffect(() => {
+    if (
+      !detailOpen ||
+      !selectedId ||
+      node?.type !== 'storyboard' ||
+      node.status !== 'APPROVED' ||
+      !tryParseStoryboardOutput(node.output)
+    ) {
+      return;
+    }
+    const hasChild = edges.some(
+      (edge) =>
+        edge.source === selectedId && edge.sourceHandle === SHOT_LIST_LINK_HANDLE_ID,
+    );
+    if (hasChild) return;
+    const shotListId = ensureShotListForStoryboard(selectedId);
+    if (shotListId) focusNode(shotListId, { openDetail: true });
+  }, [
+    detailOpen,
+    edges,
+    ensureShotListForStoryboard,
+    focusNode,
+    node,
+    selectedId,
   ]);
 
   const headerActionItems = useMemo((): DetailPanelHeaderActionItem[] => {
@@ -698,13 +757,11 @@ export function DetailPanel() {
   const leaderFeedbackLabel =
     node.type === 'writing'
       ? '编剧总监 反馈'
-      : node.type === 'storyboard'
-        ? '分镜总监 反馈'
-        : node.type === 'prompt'
+      : node.type === 'prompt'
           ? 'Prompt总监 反馈'
           : '总监 反馈';
 
-  const supportsReview = node.type === 'writing' || node.type === 'storyboard';
+  const supportsReview = node.type === 'writing';
 
   const canReviewLegacy =
     supportsReview &&
@@ -766,14 +823,24 @@ export function DetailPanel() {
     ) : (
       <div className="detail-panel__section">
         <div className="detail-panel__hint">
-          {node.generation_phase === 'leader' ? '总监大脑 · 审核/流式' : '员工大脑 · 流式预览'}
+          {node.type === 'storyboard'
+            ? node.generation_phase === 'leader'
+              ? '分镜生成进度 · 校验整理'
+              : '分镜生成进度 · 生成镜头'
+            : node.generation_phase === 'leader'
+              ? '总监大脑 · 审核/流式'
+              : '员工大脑 · 流式预览'}
         </div>
         <pre className="detail-panel__script detail-panel__script--streaming">
           {node.streaming_preview?.trim()
             ? node.streaming_preview
-            : node.generation_phase === 'leader'
-              ? '（正在连接总监审核 API…）'
-              : '…'}
+            : node.type === 'storyboard'
+              ? node.generation_phase === 'leader'
+                ? '（正在校验镜头结构并准备分解表节点…）'
+                : '（正在连接分镜生成 API…）'
+              : node.generation_phase === 'leader'
+                ? '（正在连接总监审核 API…）'
+                : '…'}
         </pre>
       </div>
     )
@@ -786,16 +853,6 @@ export function DetailPanel() {
         <p className="detail-panel__feedback detail-panel__feedback--generation">{node.generation_error.trim()}</p>
       </div>
     ) : null;
-
-  const shotListParentStoryboard =
-    node.type === 'shot_list_node' && node.sourceStoryboardNodeId
-      ? rfNodes.find(
-          (n) =>
-            n.id === node.sourceStoryboardNodeId &&
-            n.type === 'department' &&
-            n.data.type === 'storyboard',
-        )?.data ?? null
-      : null;
 
   const shotListBody =
     node.type === 'shot_list_node' ? (
@@ -856,14 +913,6 @@ export function DetailPanel() {
                 导出 CSV（英文表头）
               </button>
             </div>
-          </div>
-        ) : null}
-        {shotListParentStoryboard && node.sourceStoryboardNodeId ? (
-          <div className="detail-panel__section detail-panel__section--shotlist-review">
-            <ShotListReviewDecisionBar
-              parentNodeId={node.sourceStoryboardNodeId}
-              parentNode={shotListParentStoryboard}
-            />
           </div>
         ) : null}
         {shotListShotParsed ? (
@@ -973,7 +1022,7 @@ export function DetailPanel() {
                     : !Boolean(node.input?.trim()) &&
                         !(selectedId != null && departmentNodeHasInputWire(selectedId, edges, rfNodes))
                       ? '请先连接文本卡片，或在下方填写剧本正文'
-                      : '运行分镜员工与总监流水线'
+                      : '运行分镜生成流程'
                 }
                 onClick={() => void executeNodeTask(node.id)}
               >
@@ -995,7 +1044,7 @@ export function DetailPanel() {
               placeholder="剧本正文（可选；与连线输入二选一或合并策略以当前节点为准）"
               spellCheck={false}
               rows={4}
-              disabled={node.status === 'IN_PROGRESS' || node.status === 'WAITING_REVIEW'}
+              disabled={node.status === 'IN_PROGRESS'}
             />
             {node.inputSource === 'manual' && (
               <button
@@ -1018,24 +1067,11 @@ export function DetailPanel() {
           ) : null}
           {generationErrorSection}
           {streamingSection}
-          {showReviewedDecision ? (
-            <PipelineReviewDecisionPanel nodeId={node.id} node={node} />
-          ) : null}
-          {node.status === 'REJECTED' && node.review_result ? (
-            <div
-              className="detail-panel__section detail-panel__section--leader-card"
-              role="region"
-              aria-label="总监审核建议"
-            >
-              <div className="detail-panel__hint">审核意见</div>
-              <p className="detail-panel__feedback">{node.review_result}</p>
-            </div>
-          ) : null}
           {storyboardParsed && !hasShotListChild ? (
             <div className="detail-panel__section detail-panel__section--table-preview">
-              <div className="detail-panel__hint">镜头表（无子节点时在此编辑）</div>
+              <div className="detail-panel__hint">分解表恢复预览</div>
               <p className="detail-panel__tip detail-panel__tip--tight">
-                旧画布兼容：未生成「镜头表」子节点前可在此改表；新流程请用下方按钮跳转子节点。
+                正在补建缺失的分解表节点；补建完成后会自动打开。
                 {node.status === 'IN_PROGRESS' ? '（生成中不可编辑）' : ''}
               </p>
               <div className="detail-panel__table-preview-frame">
@@ -1050,29 +1086,6 @@ export function DetailPanel() {
               </div>
             </div>
           ) : null}
-          {canReviewLegacy ? (
-            <div className="detail-panel__actions detail-panel__actions--review">
-              <button
-                type="button"
-                className="detail-panel__primary"
-                onClick={() => {
-                  setReviewDialogState({
-                    nodeId: node.id,
-                    initialValue: node.ai_review_feedback?.trim() ?? '',
-                  });
-                }}
-              >
-                填写审核意见
-              </button>
-              <button
-                type="button"
-                className="detail-panel__secondary"
-                onClick={() => manualPassLeaderReview(node.id)}
-              >
-                手动通过
-              </button>
-            </div>
-          ) : null}
           <div className="detail-panel__section detail-panel__footer-nav">
             <button
               type="button"
@@ -1080,14 +1093,14 @@ export function DetailPanel() {
               disabled={!storyboardShotListChildId}
               title={
                 storyboardShotListChildId
-                  ? '在画布上定位并打开镜头表子节点'
-                  : '执行生成成功后将自动创建镜头表子节点'
+                  ? '在画布上定位并打开分解表节点'
+                  : '执行生成成功后将自动创建并打开分解表节点'
               }
               onClick={() => {
                 if (!storyboardShotListChildId) {
                   pushMessage({
                     role: 'system',
-                    text: '暂无关联的镜头表子节点：请先成功执行生成。',
+                    text: '暂无关联的分解表节点：请先成功执行生成。',
                     nodeId: node.id,
                   });
                   return;
@@ -1095,7 +1108,7 @@ export function DetailPanel() {
                 focusNode(storyboardShotListChildId, { openDetail: true });
               }}
             >
-              跳转至分镜清单
+              打开分解表节点
             </button>
           </div>
         </>
@@ -1207,7 +1220,7 @@ export function DetailPanel() {
       {canRetry && (
         <div className="detail-panel__actions">
           <button type="button" className="detail-panel__secondary" onClick={() => retryPipeline(node.id)}>
-            根据意见重新生成
+            {node.type === 'storyboard' ? '重新生成分镜' : '根据意见重新生成'}
           </button>
         </div>
       )}

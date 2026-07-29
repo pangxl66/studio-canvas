@@ -11,6 +11,8 @@ import {
   normalizePromptDepartmentStatus,
   PROMPT_GENERATED_STATUS,
 } from '@/store/workflow';
+import { recoverInterruptedTextPolish } from '@/services/textPolishLifecycle';
+import { storyboardLegacyStatePatch } from '@/utils/storyboardLegacyRecovery';
 
 /** 持久化恢复后由 store 注入，供节点 / 右键菜单调用；勿依赖 JSON 往返保留 */
 export type StudioPersistenceRuntimeApi = {
@@ -43,7 +45,33 @@ export function toPersistableNodesAndEdges(
   nodes: StudioRFNode[],
   edges: Edge[],
 ): { nodes: StudioRFNode[]; edges: Edge[] } {
-  const safeNodes = nodes.map((node) => ({ ...node, data: normalizeTransientNodeData(node.data) }));
+  const normalizedNodes = nodes.map((node) => ({ ...node, data: normalizeTransientNodeData(node.data) }));
+  const imageOutputIdsWithPayload = new Set(
+    normalizedNodes
+      .filter((node) => node.type === 'imageNode' && Boolean(node.data.imageDataUrl))
+      .map((node) => node.id),
+  );
+  const safeNodes = normalizedNodes.map((node) => {
+    if (node.type !== 'aiFilmStoryboard' || node.data.type !== 'film_storyboard_node') return node;
+    const outputIds = node.data.storyboardOutputImageNodeIds ?? [];
+    const storedPageCount = node.data.storyboardGridImages?.length ?? (node.data.imageDataUrl ? 1 : 0);
+    const hasCompleteOutputCopy =
+      storedPageCount > 0 &&
+      outputIds.length >= storedPageCount &&
+      outputIds.every((outputId) => imageOutputIdsWithPayload.has(outputId));
+    if (!hasCompleteOutputCopy) return node;
+    return {
+      ...node,
+      data: {
+        ...node.data,
+        imageDataUrl: undefined,
+        storyboardGridImages: node.data.storyboardGridImages?.map((page) => ({
+          ...page,
+          imageDataUrl: undefined,
+        })),
+      },
+    };
+  });
   const json = JSON.stringify(
     { nodes: safeNodes, edges },
     (_, v) => (typeof v === 'function' ? undefined : v),
@@ -63,7 +91,26 @@ function normalizeTransientNodeData(data: StudioNodeData): StudioNodeData {
       leader_review_suggested_pass: undefined,
     };
   }
+  if (data.type === 'storyboard') {
+    const storyboardOutput = normalizeStoryboardOutputValue(data.output);
+    const storyboardSnapshot =
+      normalizeStoryboardOutputValue(data.storyboard_ai_snapshot) ?? storyboardOutput;
+    const hasStoryboardOutput = Boolean(storyboardOutput?.shots.length);
+    return {
+      ...data,
+      ...storyboardLegacyStatePatch(hasStoryboardOutput),
+      output: storyboardOutput,
+      storyboard_ai_snapshot: storyboardSnapshot,
+      generation_error: hasStoryboardOutput ? undefined : data.generation_error,
+    };
+  }
   if (data.status !== 'IN_PROGRESS') return data;
+  if (data.type === 'text_node') {
+    return {
+      ...data,
+      ...recoverInterruptedTextPolish(data),
+    };
+  }
   const hasOutput = data.output != null;
   const preservedStatus =
     data.type === 'prompt' ? PROMPT_GENERATED_STATUS : 'APPROVED';
@@ -72,6 +119,7 @@ function normalizeTransientNodeData(data: StudioNodeData): StudioNodeData {
     status: hasOutput ? preservedStatus : 'NOT_STARTED',
     generation_error: '',
     streaming_preview: '',
+    generation_phase: undefined,
     review_result:
       data.type === 'prompt'
         ? null
@@ -155,7 +203,6 @@ export function normalizeRestoredStudioNode(node: StudioRFNode): StudioRFNode {
           'storyboard',
           safeNode.data.mounted_skills ?? [DEFAULT_STORYBOARD_SKILL_ID],
         ),
-        output: normalizeStoryboardOutputValue(safeNode.data.output) as StudioNodeData['output'],
       },
     };
   }

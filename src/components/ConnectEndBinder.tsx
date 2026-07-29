@@ -1,6 +1,6 @@
 import { useReactFlow, type OnConnectEnd } from '@xyflow/react';
 import { useLayoutEffect, type MutableRefObject } from 'react';
-import { DEPT_INPUT_PULL_HANDLE_ID } from '@/components/DepartmentNode';
+import { DEPT_INPUT_PULL_HANDLE_ID } from '@/utils/departmentInputWire';
 import { isShotListItemOutputHandleId } from '@/utils/shotListWire';
 
 export type NodePickerState = {

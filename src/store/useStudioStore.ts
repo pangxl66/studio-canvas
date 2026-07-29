@@ -60,6 +60,7 @@ import {
   isShotListItemOutputHandleId,
   makeShotListItemOutputHandleId,
   parseShotListItemOutputHandleId,
+  reconcileShotListOutputEdges,
 } from '@/utils/shotListWire';
 import type { StudioRFNode } from '@/types/reactFlow';
 import {
@@ -82,6 +83,7 @@ import {
   rebindStudioNodeRuntimeHandlers,
   stripFunctionsDeep,
 } from '@/utils/studioNodePersistence';
+import { findRecoverableStoryboardShotListId } from '@/utils/storyboardLegacyRecovery';
 import { formatReviewOptimizationPayload } from '@/utils/pipelineReviewContentPreview';
 import { formatPipelineOutputPreview, typewriterStream } from '@/utils/streamPreview';
 import {
@@ -169,6 +171,59 @@ const AUTO_PROMPT_REVIEW_COLLISION_STEP = 96;
 const AUTO_PROMPT_REVIEW_COLLISION_PADDING = 24;
 const UNDO_STACK_LIMIT = 20;
 const activeTaskAbortControllers = new Map<string, AbortController>();
+const activeDragUndoNodeIds = new Set<string>();
+const activeResizeUndoNodeIds = new Set<string>();
+
+function trackNodeGestureUndo(changes: NodeChange<StudioRFNode>[]): {
+  captureUndo: boolean;
+  liveGestureFrame: boolean;
+} {
+  let captureUndo = false;
+  const hasLiveResize = changes.some(
+    (change) => change.type === 'dimensions' && change.resizing === true,
+  );
+
+  for (const change of changes) {
+    if (change.type === 'remove') {
+      captureUndo = true;
+      activeDragUndoNodeIds.delete(change.id);
+      activeResizeUndoNodeIds.delete(change.id);
+      continue;
+    }
+    if (change.type === 'dimensions') {
+      if (change.resizing === true) {
+        if (!activeResizeUndoNodeIds.has(change.id)) {
+          activeResizeUndoNodeIds.add(change.id);
+          captureUndo = true;
+        }
+      } else if (change.resizing === false) {
+        activeResizeUndoNodeIds.delete(change.id);
+      }
+      continue;
+    }
+    if (change.type !== 'position') continue;
+    if (change.dragging === true) {
+      if (!activeDragUndoNodeIds.has(change.id)) {
+        activeDragUndoNodeIds.add(change.id);
+        captureUndo = true;
+      }
+    } else if (change.dragging === false) {
+      activeDragUndoNodeIds.delete(change.id);
+    } else if (!hasLiveResize) {
+      captureUndo = true;
+    }
+  }
+
+  const liveGestureFrame =
+    changes.length > 0 &&
+    changes.every(
+      (change) =>
+        (change.type === 'position' &&
+          (change.dragging === true || hasLiveResize)) ||
+        (change.type === 'dimensions' && change.resizing === true),
+    );
+  return { captureUndo, liveGestureFrame };
+}
 
 type StudioNodeWithMeasuredSize = StudioRFNode & {
   width?: number;
@@ -530,6 +585,9 @@ function makeImageNodeData(
     imageDataUrl: opts?.imageDataUrl,
     imageMimeType: opts?.imageMimeType,
     imageFileName: opts?.imageFileName,
+    imageNodeMode: 'asset',
+    imageEditAspectRatio: 'source',
+    imageGenerationSelectedModel: 'gemini-3.1-flash-image',
     assistant_preferences: '',
     assistant_task_instruction: '',
   };
@@ -599,7 +657,11 @@ function makeAiFilmNodeData(id: string, kind: AiFilmNodeKind): StudioNodeData {
     assistant_preferences: '',
     assistant_task_instruction: '',
     ...(kind === 'film_storyboard_node'
-      ? { film_storyboard_skill_id: DEFAULT_STORYBOARD_SKILL_ID, film_storyboard_aspect_ratio: '16:9' }
+      ? {
+          film_storyboard_skill_id: DEFAULT_STORYBOARD_SKILL_ID,
+          film_storyboard_aspect_ratio: '16:9',
+          imageGenerationSelectedModel: 'gemini-3.1-flash-image',
+        }
       : {}),
   };
 }
@@ -768,7 +830,7 @@ export type StudioState = {
   /** 闂€婊冦仈鐞涖劏濡悙纭呫€冮弽鑲╃椽鏉堟埊绱版稉搴ｅ煑閸掑棝鏆呴懞鍌滃仯 `output` 閸氬本顒為獮璺哄煕閺傞绗呭〒?Prompt 缁涘鎮庨獮鎯扮翻閸?*/
   patchShotListNodeOutput: (shotListId: string, output: StoryboardOutput, bumpVersion?: boolean) => void;
   /** 閸掑棝鏆呴崨妯轰紣娴溠冨毉閺堝鏅ラ梹婊冦仈閸氬函绱伴懛顏勫З閸︺劋绗呴弬鐟板灡瀵ゆ椽鏆呮径纾嬨€冪€涙劘濡悙鐟拌嫙鏉╃偟鍤庨敍灞惧灗閸掗攱鏌婂鍙夋箒鐎涙劘濡悙瑙勬殶閹?*/
-  ensureShotListForStoryboard: (storyboardNodeId: string) => void;
+  ensureShotListForStoryboard: (storyboardNodeId: string) => string | undefined;
   /** 鐏忓棗缍嬮崜宥呭瀻闂€?output 閹恒劑鈧礁鍩屽鑼拨鐎规氨娈戦梹婊冦仈鐞涖劌鐡欓懞鍌滃仯閿涘牅绗夐崘娆忔礀閻栨儼濡悙鐧哥礆 */
   syncShotListNodesFromStoryboard: (storyboardNodeId: string) => void;
   ensureShotListForStoryboardFile: (storyboardFileNodeId: string) => void;
@@ -1097,7 +1159,12 @@ function makeRuntimeApi(get: () => StudioState) {
 }
 
 function snapshotNodesForUndo(nodes: StudioRFNode[]): StudioRFNode[] {
-  return stripFunctionsDeep(nodes) as StudioRFNode[];
+  return nodes.map((node) => ({
+    ...node,
+    position: { ...node.position },
+    data: node.data,
+    measured: node.measured ? { ...node.measured } : node.measured,
+  }));
 }
 
 function makeUndoSnapshot(state: Pick<
@@ -1112,19 +1179,79 @@ function makeUndoSnapshot(state: Pick<
 >): UndoSnapshot {
   return {
     nodes: snapshotNodesForUndo(state.nodes),
-    edges: stripFunctionsDeep(state.edges) as Edge[],
-    assets: stripFunctionsDeep(state.assets) as ApprovedAsset[],
-    shotListSelectedWiresByNodeId: stripFunctionsDeep(
-      state.shotListSelectedWiresByNodeId,
-    ) as Record<string, string[]>,
+    edges: state.edges.slice(),
+    assets: state.assets.slice(),
+    shotListSelectedWiresByNodeId: Object.fromEntries(
+      Object.entries(state.shotListSelectedWiresByNodeId).map(([nodeId, wireIds]) => [
+        nodeId,
+        wireIds.slice(),
+      ]),
+    ),
     selectedNodeId: state.selectedNodeId,
     activeNodeId: state.activeNodeId,
     detailOpen: state.detailOpen,
   };
 }
 
-function undoSnapshotSignature(snapshot: UndoSnapshot): string {
-  return JSON.stringify(snapshot);
+function undoSnapshotsEqual(left: UndoSnapshot, right: UndoSnapshot): boolean {
+  if (
+    left.selectedNodeId !== right.selectedNodeId ||
+    left.activeNodeId !== right.activeNodeId ||
+    left.detailOpen !== right.detailOpen ||
+    left.nodes.length !== right.nodes.length ||
+    left.edges.length !== right.edges.length ||
+    left.assets.length !== right.assets.length
+  ) {
+    return false;
+  }
+  for (let index = 0; index < left.nodes.length; index += 1) {
+    const a = left.nodes[index];
+    const b = right.nodes[index];
+    if (
+      !a ||
+      !b ||
+      a.id !== b.id ||
+      a.type !== b.type ||
+      a.data !== b.data ||
+      a.position.x !== b.position.x ||
+      a.position.y !== b.position.y ||
+      a.selected !== b.selected ||
+      a.dragging !== b.dragging ||
+      a.width !== b.width ||
+      a.height !== b.height ||
+      a.measured?.width !== b.measured?.width ||
+      a.measured?.height !== b.measured?.height ||
+      a.className !== b.className ||
+      a.hidden !== b.hidden ||
+      a.zIndex !== b.zIndex
+    ) {
+      return false;
+    }
+  }
+  if (!left.edges.every((edge, index) => edge === right.edges[index])) return false;
+  if (!left.assets.every((asset, index) => asset === right.assets[index])) return false;
+  const leftSelections = Object.entries(left.shotListSelectedWiresByNodeId);
+  const rightSelections = Object.entries(right.shotListSelectedWiresByNodeId);
+  if (leftSelections.length !== rightSelections.length) return false;
+  return leftSelections.every(([nodeId, wireIds]) => {
+    const other = right.shotListSelectedWiresByNodeId[nodeId];
+    return (
+      other != null &&
+      wireIds.length === other.length &&
+      wireIds.every((wireId, index) => wireId === other[index])
+    );
+  });
+}
+
+function appendUndoSnapshot(state: StudioState): UndoSnapshot[] {
+  const snapshot = makeUndoSnapshot(state);
+  const prev = state.undoStack[state.undoStack.length - 1];
+  if (prev && undoSnapshotsEqual(prev, snapshot)) {
+    return state.undoStack;
+  }
+  return state.undoStack.length >= UNDO_STACK_LIMIT
+    ? [...state.undoStack.slice(state.undoStack.length - UNDO_STACK_LIMIT + 1), snapshot]
+    : [...state.undoStack, snapshot];
 }
 
 type StudioSet = (
@@ -1136,15 +1263,8 @@ type StudioSet = (
 
 function pushUndoSnapshot(set: StudioSet) {
   set((state) => {
-    const snapshot = makeUndoSnapshot(state);
-    const prev = state.undoStack[state.undoStack.length - 1];
-    if (prev && undoSnapshotSignature(prev) === undoSnapshotSignature(snapshot)) {
-      return state;
-    }
-    const nextStack =
-      state.undoStack.length >= UNDO_STACK_LIMIT
-        ? [...state.undoStack.slice(state.undoStack.length - UNDO_STACK_LIMIT + 1), snapshot]
-        : [...state.undoStack, snapshot];
+    const nextStack = appendUndoSnapshot(state);
+    if (nextStack === state.undoStack) return state;
     return { undoStack: nextStack };
   });
 }
@@ -1159,11 +1279,14 @@ function restoreUndoSnapshot(snapshot: UndoSnapshot, get: () => StudioState): Pa
   }));
   return {
     nodes: rebound,
-    edges: stripFunctionsDeep(snapshot.edges) as Edge[],
-    assets: stripFunctionsDeep(snapshot.assets) as ApprovedAsset[],
-    shotListSelectedWiresByNodeId: stripFunctionsDeep(
-      snapshot.shotListSelectedWiresByNodeId,
-    ) as Record<string, string[]>,
+    edges: snapshot.edges.map((edge) => ({ ...edge })),
+    assets: snapshot.assets.slice(),
+    shotListSelectedWiresByNodeId: Object.fromEntries(
+      Object.entries(snapshot.shotListSelectedWiresByNodeId).map(([nodeId, wireIds]) => [
+        nodeId,
+        wireIds.slice(),
+      ]),
+    ),
     selectedNodeId: snapshot.selectedNodeId,
     activeNodeId: snapshot.activeNodeId,
     detailOpen: snapshot.detailOpen && snapshot.selectedNodeId != null,
@@ -1306,45 +1429,61 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   }),
 
   onNodesChange: (changes) => {
-    if (
-      changes.some(
-        (change) =>
-          change.type === 'remove' ||
-          change.type === 'dimensions' ||
-          (change.type === 'position' && change.dragging !== true),
-      )
-    ) {
-      pushUndoSnapshot(set);
+    const gesture = trackNodeGestureUndo(changes);
+    if (gesture.liveGestureFrame) {
+      set((state) => ({
+        nodes: applyNodeChanges(changes, state.nodes) as StudioRFNode[],
+        undoStack: gesture.captureUndo
+          ? appendUndoSnapshot(state)
+          : state.undoStack,
+      }));
+      return;
     }
+
+    const captureUndo = gesture.captureUndo;
     set((s) => {
-      let toApply = changes as NodeChange<StudioRFNode>[];
-      for (const c of changes) {
-        if (c.type === 'remove') {
-          const n = s.nodes.find((x) => x.id === c.id);
-          if (n?.type === 'department' && n.data.type === 'storyboard') {
-            for (const m of s.nodes) {
-              if (m.type === 'shotList' && m.data.sourceStoryboardNodeId === c.id) {
-                if (!toApply.some((t) => t.type === 'remove' && 'id' in t && t.id === m.id)) {
-                  toApply = [...toApply, { type: 'remove', id: m.id } as NodeChange<StudioRFNode>];
-                }
-              }
-            }
-          }
-          if (n?.type === 'storyboardFile') {
-            for (const m of s.nodes) {
-              if (m.type === 'shotList' && m.data.sourceStoryboardFileNodeId === c.id) {
-                if (!toApply.some((t) => t.type === 'remove' && 'id' in t && t.id === m.id)) {
-                  toApply = [...toApply, { type: 'remove', id: m.id } as NodeChange<StudioRFNode>];
-                }
-              }
-            }
+      const explicitRemovedIds = new Set(
+        changes
+          .filter(
+            (change): change is NodeChange<StudioRFNode> & { type: 'remove'; id: string } =>
+              change.type === 'remove',
+          )
+          .map((change) => change.id),
+      );
+      const removedStoryboardIds = new Set<string>();
+      const removedStoryboardFileIds = new Set<string>();
+      for (const node of s.nodes) {
+        if (!explicitRemovedIds.has(node.id)) continue;
+        if (node.type === 'department' && node.data.type === 'storyboard') {
+          removedStoryboardIds.add(node.id);
+        } else if (node.type === 'storyboardFile') {
+          removedStoryboardFileIds.add(node.id);
+        }
+      }
+      const cascadeRemoveChanges: NodeChange<StudioRFNode>[] = [];
+      if (removedStoryboardIds.size > 0 || removedStoryboardFileIds.size > 0) {
+        for (const node of s.nodes) {
+          if (node.type !== 'shotList' || explicitRemovedIds.has(node.id)) continue;
+          if (
+            (node.data.sourceStoryboardNodeId &&
+              removedStoryboardIds.has(node.data.sourceStoryboardNodeId)) ||
+            (node.data.sourceStoryboardFileNodeId &&
+              removedStoryboardFileIds.has(node.data.sourceStoryboardFileNodeId))
+          ) {
+            explicitRemovedIds.add(node.id);
+            cascadeRemoveChanges.push({
+              type: 'remove',
+              id: node.id,
+            } as NodeChange<StudioRFNode>);
           }
         }
       }
+      const toApply =
+        cascadeRemoveChanges.length > 0
+          ? ([...changes, ...cascadeRemoveChanges] as NodeChange<StudioRFNode>[])
+          : (changes as NodeChange<StudioRFNode>[]);
 
-      const removedIds = toApply
-        .filter((c): c is NodeChange<StudioRFNode> & { type: 'remove'; id: string } => c.type === 'remove')
-        .map((c) => c.id);
+      const removedIds = Array.from(explicitRemovedIds);
 
       const nextNodes = applyNodeChanges(toApply, s.nodes) as StudioRFNode[];
 
@@ -1370,6 +1509,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       return {
         nodes: nextNodes,
         edges: nextEdges,
+        undoStack: captureUndo ? appendUndoSnapshot(s) : s.undoStack,
         selectedNodeId: sel,
         activeNodeId,
         detailOpen,
@@ -1379,11 +1519,12 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   },
 
   onEdgesChange: (changes) => {
-    if (changes.some((change) => change.type === 'remove')) {
-      pushUndoSnapshot(set);
-    }
-    set((s) => ({ edges: applyEdgeChanges(changes, s.edges) }));
-    if (changes.some((ch) => ch.type === 'remove')) {
+    const captureUndo = changes.some((change) => change.type === 'remove');
+    set((s) => ({
+      edges: applyEdgeChanges(changes, s.edges),
+      undoStack: captureUndo ? appendUndoSnapshot(s) : s.undoStack,
+    }));
+    if (captureUndo) {
       get().reconcileShotListGraphBindings();
     } else {
       resyncConsumersAfterEdgeMutation(get);
@@ -2154,13 +2295,100 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     const parsed = out ? tryParseStoryboardOutput(out) : null;
     if (!parsed?.shots?.length) return;
 
-    const existing = get().edges.find(
-      (e) =>
-        e.source === storyboardNodeId && e.sourceHandle === SHOT_LIST_LINK_HANDLE_ID,
+    const stateBeforeCreate = get();
+    const existingId = findRecoverableStoryboardShotListId(
+      storyboardNodeId,
+      stateBeforeCreate.nodes,
+      stateBeforeCreate.edges,
+      SHOT_LIST_LINK_HANDLE_ID,
     );
-    if (existing) {
-      get().syncShotListNodesFromStoryboard(storyboardNodeId);
-      return;
+    if (existingId) {
+      const existingNode = stateBeforeCreate.nodes.find(
+        (node) =>
+          node.id === existingId &&
+          node.type === 'shotList' &&
+          node.data.type === 'shot_list_node',
+      );
+      if (!existingNode) return;
+      const existingOutput = existingNode.data.output
+        ? tryParseStoryboardOutput(existingNode.data.output)
+        : null;
+      const canonicalEdges = stateBeforeCreate.edges.filter(
+        (edge) =>
+          edge.source === storyboardNodeId &&
+          edge.sourceHandle === SHOT_LIST_LINK_HANDLE_ID,
+      );
+      const relationEdges = stateBeforeCreate.edges.filter(
+        (edge) => edge.source === storyboardNodeId && edge.target === existingId,
+      );
+      const hasCanonicalRelation = canonicalEdges.some(
+        (edge) =>
+          edge.target === existingId &&
+          (edge.targetHandle == null || edge.targetHandle === SHOT_LIST_PARENT_HANDLE_ID),
+      );
+      const needsEdgeRepair =
+        !hasCanonicalRelation ||
+        canonicalEdges.length !== 1 ||
+        relationEdges.length !== 1;
+      const needsDataRepair =
+        existingNode.data.sourceStoryboardNodeId !== storyboardNodeId ||
+        existingNode.data.sourceStoryboardFileNodeId != null ||
+        !existingOutput?.shots?.length;
+
+      if (needsEdgeRepair || needsDataRepair) {
+        const parentSnapshot = sb.data.storyboard_ai_snapshot
+          ? cloneStoryboardOutput(sb.data.storyboard_ai_snapshot)
+          : cloneStoryboardOutput(parsed);
+        set((state) => {
+          const nodes = needsDataRepair
+            ? state.nodes.map((node) => {
+                if (node.id !== existingId || node.type !== 'shotList') return node;
+                return {
+                  ...node,
+                  data: {
+                    ...node.data,
+                    sourceStoryboardNodeId: storyboardNodeId,
+                    sourceStoryboardFileNodeId: undefined,
+                    sourceSceneCount:
+                      typeof sb.data.sourceSceneCount === 'number'
+                        ? sb.data.sourceSceneCount
+                        : node.data.sourceSceneCount,
+                    ...(!existingOutput?.shots?.length
+                      ? {
+                          output: cloneStoryboardOutput(parsed),
+                          storyboard_ai_snapshot: parentSnapshot,
+                        }
+                      : {}),
+                  },
+                };
+              })
+            : state.nodes;
+          const edges = needsEdgeRepair
+            ? addEdge(
+                {
+                  source: storyboardNodeId,
+                  target: existingId,
+                  sourceHandle: SHOT_LIST_LINK_HANDLE_ID,
+                  targetHandle: SHOT_LIST_PARENT_HANDLE_ID,
+                  animated: true,
+                  style: { strokeDasharray: '6 4' },
+                },
+                state.edges.filter(
+                  (edge) =>
+                    !(
+                      edge.source === storyboardNodeId &&
+                      (
+                        edge.sourceHandle === SHOT_LIST_LINK_HANDLE_ID ||
+                        edge.target === existingId
+                      )
+                    ),
+                ),
+              )
+            : state.edges;
+          return { nodes, edges };
+        });
+      }
+      return existingId;
     }
 
     const slId = uid('shotlist');
@@ -2176,7 +2404,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         sourceSceneCount: typeof sb.data.sourceSceneCount === 'number' ? sb.data.sourceSceneCount : undefined,
       },
     );
-    const pos = { x: sb.position.x, y: sb.position.y + 200 };
+    const parentSize = getNodeSize(sb);
+    const pos = { x: sb.position.x, y: sb.position.y + parentSize.height + 80 };
     set((s) => ({
       nodes: [
         ...s.nodes,
@@ -2197,14 +2426,21 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           animated: true,
           style: { strokeDasharray: '6 4' },
         },
-        s.edges,
+        s.edges.filter(
+          (edge) =>
+            !(
+              edge.source === storyboardNodeId &&
+              edge.sourceHandle === SHOT_LIST_LINK_HANDLE_ID
+            ),
+        ),
       ),
     }));
     get().pushMessage({
       role: 'broadcast',
-      text: '已根据当前分镜自动生成镜头表节点，可以继续编辑后再连接 Prompt。',
+      text: '已根据当前分镜自动生成分解表节点，可以继续编辑后再连接 Prompt。',
       nodeId: slId,
     });
+    return slId;
   },
 
   syncShotListNodesFromStoryboardFile: (storyboardFileId) => {
@@ -2304,6 +2540,26 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     if (!sl || sl.type !== 'shotList' || sl.data.type !== 'shot_list_node') return;
     const storyboardParentId = sl.data.sourceStoryboardNodeId;
     const storyboardFileParentId = sl.data.sourceStoryboardFileNodeId;
+    const previousOutput = sl.data.output ? tryParseStoryboardOutput(sl.data.output) : null;
+    const reconciledEdges = reconcileShotListOutputEdges(
+      get().edges,
+      shotListId,
+      previousOutput?.shots ?? [],
+      output.shots,
+    );
+    const parentBefore = storyboardParentId
+      ? get().nodes.find(
+          (node) =>
+            node.id === storyboardParentId &&
+            node.type === 'department' &&
+            node.data.type === 'storyboard',
+        )
+      : undefined;
+    const nextParentVersion = parentBefore
+      ? bumpVersion
+        ? parentBefore.data.version + 1
+        : parentBefore.data.version
+      : undefined;
     const now = Date.now();
     set((s) => ({
       nodes: s.nodes.map((n) => {
@@ -2345,6 +2601,30 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         }
         return n;
       }),
+      edges: reconciledEdges.edges,
+      assets:
+        storyboardParentId && parentBefore?.data.status === 'APPROVED'
+          ? (() => {
+              const candidates = s.assets
+                .filter(
+                  (asset) =>
+                    asset.nodeId === storyboardParentId &&
+                    asset.department === 'STORYBOARD',
+                )
+                .sort((a, b) => b.createdAt - a.createdAt);
+              const latestSnapshotId = candidates[0]?.snapshotId;
+              if (!latestSnapshotId) return s.assets;
+              return s.assets.map((asset) =>
+                asset.snapshotId === latestSnapshotId
+                  ? {
+                      ...asset,
+                      version: nextParentVersion ?? asset.version,
+                      payload: cloneStoryboardOutput(output),
+                    }
+                  : asset,
+              );
+            })()
+          : s.assets,
     }));
     if (storyboardParentId) {
       refreshDownstreamAfterDepartmentOutputChange(get, storyboardParentId);
@@ -2354,6 +2634,22 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     }
     // 閻㈣绔?鐠囷附鍎忛幍瀣暭闂€婊冦仈鐞涖劌鎮楅敍宀勩€忕拋鈺勭箾閸︺劑鏆呮径纾嬨€?Output 娑撳﹦娈?Prompt 婵绮撻崥鍐ㄥ煂閺堚偓閺?JSON閿涘牅绗夐崶鐘绘桨閺夎￥鈧本澧滈崝銊ㄧ翻閸忋儯鈧秷鈧苯宕辨担蹇ョ礆
     refreshDownstreamAfterDepartmentOutputChange(get, shotListId, { ignoreManualInput: true });
+    if (reconciledEdges.removedCount || reconciledEdges.migratedCount) {
+      get().pushMessage({
+        role: 'system',
+        text: [
+          reconciledEdges.migratedCount
+            ? `已把 ${reconciledEdges.migratedCount} 条旧镜头连线迁移到合并后的镜头。`
+            : '',
+          reconciledEdges.removedCount
+            ? `已清理 ${reconciledEdges.removedCount} 条失效或重复的逐镜头连线。`
+            : '',
+        ]
+          .filter(Boolean)
+          .join(''),
+        nodeId: shotListId,
+      });
+    }
   },
 
   setStatus: (id, next) => {
@@ -3593,6 +3889,30 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         throw new Error(STOP_TASK_MESSAGE);
       }
     };
+    let pendingModelStreamText = '';
+    let modelStreamFrame: number | null = null;
+    let hasModelStreamOutput = false;
+    const publishModelStreamPreview = () => {
+      modelStreamFrame = null;
+      const accumulated = pendingModelStreamText;
+      get().patchNodeData(
+        nodeId,
+        {
+          streaming_preview: accumulated.trim()
+            ? `模型正在返回结构化结果，请稍候...\n\n${accumulated}`
+            : '模型已连接，正在等待首段输出...',
+          generation_phase: 'employee',
+        },
+        false,
+      );
+    };
+    const flushModelStreamPreview = () => {
+      if (modelStreamFrame != null) {
+        window.cancelAnimationFrame(modelStreamFrame);
+        modelStreamFrame = null;
+      }
+      publishModelStreamPreview();
+    };
 
     try {
       if (kind === 'storyboard') {
@@ -3679,16 +3999,11 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         reviewOptimization,
         signal: controller.signal,
         onModelStreamChunk: (_delta: string, accumulated: string) => {
-          get().patchNodeData(
-            nodeId,
-            {
-              streaming_preview: accumulated.trim()
-                ? `模型正在返回结构化结果，请稍候...\n\n${accumulated}`
-                : '模型已连接，正在等待首段输出...',
-              generation_phase: 'employee',
-            },
-            false,
-          );
+          pendingModelStreamText = accumulated;
+          hasModelStreamOutput ||= Boolean(accumulated.trim());
+          if (modelStreamFrame == null) {
+            modelStreamFrame = window.requestAnimationFrame(publishModelStreamPreview);
+          }
         },
       };
 
@@ -3700,6 +4015,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
       const { executeEmployeePhase } = await import('@/services/agents/executeTask');
       const emp = await executeEmployeePhase(taskParams);
+      if (hasModelStreamOutput) flushModelStreamPreview();
       ensureNotStopped();
 
       if (emp.ok && emp.skillWarnings?.length) {
@@ -3762,18 +4078,20 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       }
 
       const previewBody = formatPipelineOutputPreview(kind, emp.output);
-      await typewriterStream(
-        previewBody,
-        (acc) => get().patchNodeData(nodeId, { streaming_preview: acc, generation_phase: 'employee' }, false),
-        { chunkChars: 40, delayMs: 20, signal: controller.signal },
-      );
+      if (!(kind === 'prompt' && hasModelStreamOutput)) {
+        await typewriterStream(
+          previewBody,
+          (acc) => get().patchNodeData(nodeId, { streaming_preview: acc, generation_phase: 'employee' }, false),
+          { chunkChars: 40, delayMs: 20, signal: controller.signal },
+        );
+      }
       ensureNotStopped();
 
       const afterEmployee: Partial<StudioNodeData> = {
         output: emp.output,
         input: emp.inputUsed,
         streaming_preview: undefined,
-        generation_phase: 'leader',
+        generation_phase: undefined,
         generation_error: undefined,
         output_stale_reason: null,
       };
@@ -3783,27 +4101,39 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       if (kind === 'storyboard' && emp.output) {
         afterEmployee.storyboard_ai_snapshot = cloneStoryboardOutput(emp.output as StoryboardOutput);
       }
-      get().patchNodeData(nodeId, afterEmployee, true);
 
       const finalStatus: NodeStatus =
-        kind === 'prompt' ? PROMPT_GENERATED_STATUS : 'WAITING_REVIEW';
+        kind === 'prompt'
+          ? PROMPT_GENERATED_STATUS
+          : kind === 'storyboard'
+            ? 'APPROVED'
+            : 'WAITING_REVIEW';
       get().patchNodeData(
         nodeId,
         {
+          ...afterEmployee,
           status: finalStatus,
           ai_review_feedback: null,
           leader_review_suggested_pass: undefined,
           review_result: null,
-          streaming_preview: undefined,
-          generation_phase: undefined,
-          generation_error: undefined,
-          output_stale_reason: null,
         },
         true,
       );
+      let storyboardShotListId: string | undefined;
       if (kind === 'storyboard') {
-        get().ensureShotListForStoryboard(nodeId);
+        storyboardShotListId = get().ensureShotListForStoryboard(nodeId);
         get().syncShotListNodesFromStoryboard(nodeId);
+        const version = get().nodes.find((x) => x.id === nodeId)?.data.version ?? 1;
+        get().registerAsset({
+          nodeId,
+          department: 'STORYBOARD',
+          version,
+          payload: cloneStoryboardOutput(emp.output as StoryboardOutput),
+          createdAt: Date.now(),
+        });
+        if (storyboardShotListId) {
+          get().focusNode(storyboardShotListId, { openDetail: true });
+        }
       }
       let syncedPromptReviewId: string | null = null;
       if (kind === 'prompt') {
@@ -3825,8 +4155,12 @@ export const useStudioStore = create<StudioState>((set, get) => ({
             ? syncedPromptReviewId
               ? 'Prompt 节点已生成完成，提示词审核节点已自动打开。'
               : 'Prompt 节点已生成完成，但自动创建提示词审核节点失败。'
-            : `${deptLabel(kindToDepartment(kind))} 已生成完成，请填写审核意见。`,
-        nodeId,
+            : kind === 'storyboard'
+              ? storyboardShotListId
+                ? '分镜部已生成完成，分解表节点已自动打开。'
+                : '分镜部已生成完成，但分解表节点创建失败，请重新生成。'
+              : `${deptLabel(kindToDepartment(kind))} 已生成完成，请填写审核意见。`,
+        nodeId: kind === 'storyboard' ? (storyboardShotListId ?? nodeId) : nodeId,
       });
 
       const workflowSession = get().workflowAgentSession;
@@ -3851,7 +4185,11 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           });
         }
         if (kind === 'storyboard' && workflowSession.storyboardNodeId === nodeId) {
-          const shotListChild = findStoryboardShotListChild(get().nodes, get().edges, nodeId);
+          const shotListChild =
+            (storyboardShotListId
+              ? get().nodes.find((candidate) => candidate.id === storyboardShotListId)
+              : undefined) ??
+            findStoryboardShotListChild(get().nodes, get().edges, nodeId);
           set((state) =>
             state.workflowAgentSession?.id === workflowSession.id
               ? {
@@ -3859,7 +4197,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
                     ...state.workflowAgentSession,
                     state: 'STORYBOARD_GENERATED',
                     shotListNodeId: shotListChild?.id,
-                    lastAssistantMessage: '分镜结果已生成，请先填写审核意见，再决定优化或通过。',
+                    lastAssistantMessage: '分镜结果已生成，分解表节点已经自动打开，可以继续编辑或生成 Prompt。',
                     updatedAt: Date.now(),
                   },
                 }
@@ -3867,7 +4205,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           );
           get().pushMessage({
             role: 'assistant',
-            text: 'Agent：分镜结果已完成，镜头表也已同步生成。请先填写审核意见，再决定继续优化或生成 Prompt。',
+            text: 'Agent：分镜结果已完成，分解表节点已同步生成并自动打开，可以继续编辑或生成 Prompt。',
             nodeId: shotListChild?.id ?? nodeId,
           });
         }
@@ -3937,6 +4275,9 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         nodeId,
       });
     } finally {
+      if (modelStreamFrame != null) {
+        window.cancelAnimationFrame(modelStreamFrame);
+      }
       if (activeTaskAbortControllers.get(nodeId) === controller) {
         activeTaskAbortControllers.delete(nodeId);
       }
@@ -3951,6 +4292,14 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     }
     const node = get().nodes.find((n) => n.id === id);
     if (!node || node.type !== 'department') return;
+    if (node.data.type === 'storyboard') {
+      get().pushMessage({
+        role: 'system',
+        text: '分镜生成完成后会自动创建并打开分解表节点。',
+        nodeId: id,
+      });
+      return;
+    }
     if (node.data.status !== 'REVIEWED') {
       get().pushMessage({
         role: 'system',
@@ -3989,6 +4338,14 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     }
     const node = get().nodes.find((n) => n.id === id);
     if (!node || node.type !== 'department') return undefined;
+    if (node.data.type === 'storyboard') {
+      get().pushMessage({
+        role: 'system',
+        text: '分镜生成完成后会自动创建并打开分解表节点。',
+        nodeId: id,
+      });
+      return id;
+    }
     if (node.data.status !== 'REVIEWED') {
       get().pushMessage({
         role: 'system',
@@ -4033,40 +4390,6 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       get().pushMessage({
         role: 'broadcast',
         text: '编剧节点已按当前结果直接通过，并归档为可用资产。',
-        nodeId: id,
-      });
-      return id;
-    }
-    if (node.data.type === 'storyboard') {
-      const out = node.data.output as StoryboardOutput | null;
-      if (!out) {
-        get().pushMessage({ role: 'system', text: '分镜节点当前没有可归档的输出结果。', nodeId: id });
-        return id;
-      }
-      get().patchNodeData(
-        id,
-        {
-          status: 'APPROVED',
-          review_result: REVIEW_RESULT_APPROVE_AS_IS,
-          pipeline_resolution_history: hist,
-          ai_review_feedback: null,
-          leader_review_suggested_pass: undefined,
-          pipeline_decision_flash: { kind: 'approve', until: flashUntil },
-        },
-        true,
-      );
-      schedulePipelineFlashClear(get, id, flashUntil);
-      const v = get().nodes.find((x) => x.id === id)?.data.version ?? node.data.version;
-      get().registerAsset({
-        nodeId: id,
-        department: 'STORYBOARD',
-        version: v,
-        payload: out,
-        createdAt: Date.now(),
-      });
-      get().pushMessage({
-        role: 'broadcast',
-        text: '分镜节点已按当前结果直接通过，并归档为可用资产。',
         nodeId: id,
       });
       return id;
@@ -4121,6 +4444,14 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     }
     const node = get().nodes.find((n) => n.id === id);
     if (!node || node.type !== 'department') return undefined;
+    if (node.data.type === 'storyboard') {
+      get().pushMessage({
+        role: 'system',
+        text: '请直接编辑分解表节点，或重新生成分镜。',
+        nodeId: id,
+      });
+      return id;
+    }
     if (node.data.status !== 'WAITING_REVIEW' && node.data.status !== 'REVIEWED') {
       get().pushMessage({
         role: 'system',
@@ -4630,6 +4961,14 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     }
     const node = get().nodes.find((n) => n.id === id);
     if (!node) return undefined;
+    if (node.type === 'department' && node.data.type === 'storyboard') {
+      get().pushMessage({
+        role: 'system',
+        text: '分镜生成完成后会自动创建并打开分解表节点。',
+        nodeId: id,
+      });
+      return id;
+    }
     if (node.data.status === 'REVIEWED') {
       return get().approveReviewedAsIs(id);
     }
@@ -4660,29 +4999,6 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       get().pushMessage({
         role: 'broadcast',
         text: '编剧节点已直接通过当前结果，并归档为可用资产。',
-        nodeId: id,
-      });
-      return id;
-    }
-
-    if (node.data.type === 'storyboard') {
-      const out = node.data.output as StoryboardOutput | null;
-      if (!out) {
-        get().pushMessage({ role: 'system', text: '分镜节点当前没有可直接通过的输出结果。', nodeId: id });
-        return id;
-      }
-      get().patchNodeData(id, { status: 'APPROVED', review_result: REVIEW_RESULT_MANUAL_PASS }, true);
-      const v = get().nodes.find((x) => x.id === id)?.data.version ?? node.data.version;
-      get().registerAsset({
-        nodeId: id,
-        department: 'STORYBOARD',
-        version: v,
-        payload: out,
-        createdAt: Date.now(),
-      });
-      get().pushMessage({
-        role: 'broadcast',
-        text: '分镜节点已直接通过当前结果，并归档为可用资产。',
         nodeId: id,
       });
       return id;

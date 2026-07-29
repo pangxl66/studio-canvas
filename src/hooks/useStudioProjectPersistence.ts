@@ -1,21 +1,18 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  createStudioProjectPayload,
   getActiveStudioProjectRef,
   getStudioAutosave,
   getStudioProjectRecord,
-  putStudioAutosave,
-  putStudioProjectRecord,
+  hydrateStudioProjectPayloadImages,
+  parseStudioProjectPayload,
+  queueStudioProjectSnapshot,
   setActiveStudioProjectRef,
-  STUDIO_PROJECT_JSON_VERSION,
-  type StudioProjectFilePayload,
   type StudioRecentProjectRef,
 } from '@/services/studioProjectPersistence';
+import { getActiveDiskProjectSnapshot } from '@/services/localProjectDiskService';
 import { chooseStudioProjectRestoreCandidate } from '@/services/studioProjectRestorePolicy';
 import { useStudioStore } from '@/store/useStudioStore';
-import { toPersistableNodesAndEdges } from '@/utils/studioNodePersistence';
-
-const AUTOSAVE_INTERVAL_MS = 5 * 60 * 1000;
-const AUTOSAVE_DEBOUNCE_MS = 1200;
 
 type UseStudioProjectPersistenceOptions = {
   rememberRecent: (
@@ -25,15 +22,31 @@ type UseStudioProjectPersistenceOptions = {
   ) => Promise<void>;
 };
 
-export function useStudioProjectPersistence({ rememberRecent }: UseStudioProjectPersistenceOptions): void {
-  const autosaveTimerRef = useRef<number | null>(null);
+export type StudioProjectSaveStatus = 'idle' | 'dirty' | 'saving' | 'saved' | 'error';
+
+export type StudioProjectPersistenceController = {
+  error: string | null;
+  flushCurrentProjectSnapshot: () => Promise<void>;
+  lastSavedAt: number | null;
+  saveStatus: StudioProjectSaveStatus;
+};
+
+export function useStudioProjectPersistence({
+  rememberRecent,
+}: UseStudioProjectPersistenceOptions): StudioProjectPersistenceController {
   const persistenceReadyRef = useRef(false);
+  const dirtyRevisionRef = useRef(0);
+  const [saveStatus, setSaveStatus] = useState<StudioProjectSaveStatus>('idle');
+  const saveStatusRef = useRef<StudioProjectSaveStatus>('idle');
+  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const hydrateProject = useStudioStore((state) => state.hydrateProject);
-  const currentProjectId = useStudioStore((state) => state.currentProjectId);
-  const currentProjectName = useStudioStore((state) => state.currentProjectName);
-  const nodes = useStudioStore((state) => state.nodes);
-  const edges = useStudioStore((state) => state.edges);
+  const updateSaveStatus = useCallback((next: StudioProjectSaveStatus) => {
+    if (saveStatusRef.current === next) return;
+    saveStatusRef.current = next;
+    setSaveStatus(next);
+  }, []);
 
   const persistCurrentProjectSnapshot = useCallback(async () => {
     const {
@@ -42,32 +55,47 @@ export function useStudioProjectPersistence({ rememberRecent }: UseStudioProject
       currentProjectId: liveProjectId,
       currentProjectName: liveProjectName,
     } = useStudioStore.getState();
-    const { nodes: persistableNodes, edges: persistableEdges } = toPersistableNodesAndEdges(
-      liveNodes,
-      liveEdges,
-    );
-
-    if (persistableNodes.length === 0 && persistableEdges.length === 0 && !liveProjectId) {
+    if (liveNodes.length === 0 && liveEdges.length === 0 && !liveProjectId) {
       return;
     }
-
-    const payload: StudioProjectFilePayload = {
-      version: STUDIO_PROJECT_JSON_VERSION,
-      savedAt: Date.now(),
-      nodes: persistableNodes,
-      edges: persistableEdges,
-      projectId: liveProjectId ?? undefined,
-      projectName: liveProjectName,
-    };
-    await putStudioAutosave(payload);
-    if (liveProjectId) {
-      await putStudioProjectRecord(liveProjectId, liveProjectName, liveNodes, liveEdges);
-      await setActiveStudioProjectRef({
-        projectId: liveProjectId,
+    updateSaveStatus('saving');
+    setError(null);
+    const revisionAtSaveStart = dirtyRevisionRef.current;
+    try {
+      const payload = createStudioProjectPayload(liveNodes, liveEdges, {
+        projectId: liveProjectId ?? undefined,
         projectName: liveProjectName,
       });
+      await queueStudioProjectSnapshot(payload);
+      setLastSavedAt(payload.savedAt);
+      updateSaveStatus(
+        dirtyRevisionRef.current === revisionAtSaveStart ? 'saved' : 'dirty',
+      );
+    } catch (saveError) {
+      const message = saveError instanceof Error ? saveError.message : '工程保存失败';
+      setError(message);
+      updateSaveStatus('error');
+      throw saveError;
     }
-  }, []);
+  }, [updateSaveStatus]);
+
+  useEffect(() => {
+    let previousNodes = useStudioStore.getState().nodes;
+    let previousEdges = useStudioStore.getState().edges;
+    return useStudioStore.subscribe((state) => {
+      if (state.nodes === previousNodes && state.edges === previousEdges) return;
+      previousNodes = state.nodes;
+      previousEdges = state.edges;
+      if (!persistenceReadyRef.current) return;
+      dirtyRevisionRef.current += 1;
+      if (
+        saveStatusRef.current !== 'saving' &&
+        saveStatusRef.current !== 'dirty'
+      ) {
+        updateSaveStatus('dirty');
+      }
+    });
+  }, [updateSaveStatus]);
 
   useEffect(() => {
     let cancelled = false;
@@ -80,16 +108,21 @@ export function useStudioProjectPersistence({ rememberRecent }: UseStudioProject
           return;
         }
 
-        const [activeRef, autosave] = await Promise.all([
+        const [activeRef, autosave, rawDiskSnapshot] = await Promise.all([
           getActiveStudioProjectRef(),
           getStudioAutosave(),
+          getActiveDiskProjectSnapshot(),
         ]);
         const activeRecord = activeRef ? await getStudioProjectRecord(activeRef.projectId) : null;
+        const diskSnapshot = await hydrateStudioProjectPayloadImages(
+          parseStudioProjectPayload(rawDiskSnapshot),
+        );
 
         const restore = chooseStudioProjectRestoreCandidate({
           activeRef,
           activeRecord,
           autosave,
+          diskSnapshot,
           fallbackProjectName: useStudioStore.getState().currentProjectName,
         });
 
@@ -109,11 +142,13 @@ export function useStudioProjectPersistence({ rememberRecent }: UseStudioProject
           await rememberRecent(
             restore.payload.projectId,
             restore.projectName,
-            restore.source === 'workspace' ? 'workspace' : 'autosave',
+            restore.source,
           );
         }
       } catch (error) {
         console.warn('Studio project restore failed', error);
+        setError(error instanceof Error ? error.message : '工程恢复失败');
+        updateSaveStatus('error');
       } finally {
         persistenceReadyRef.current = true;
       }
@@ -123,39 +158,7 @@ export function useStudioProjectPersistence({ rememberRecent }: UseStudioProject
     return () => {
       cancelled = true;
     };
-  }, [hydrateProject, rememberRecent]);
-
-  useEffect(() => {
-    if (!persistenceReadyRef.current) return;
-    if (autosaveTimerRef.current != null) {
-      window.clearTimeout(autosaveTimerRef.current);
-    }
-    autosaveTimerRef.current = window.setTimeout(() => {
-      void persistCurrentProjectSnapshot().catch((error) => {
-        console.warn('IndexedDB autosave failed', error);
-      });
-      autosaveTimerRef.current = null;
-    }, AUTOSAVE_DEBOUNCE_MS);
-
-    return () => {
-      if (autosaveTimerRef.current != null) {
-        window.clearTimeout(autosaveTimerRef.current);
-        autosaveTimerRef.current = null;
-      }
-    };
-  }, [currentProjectId, currentProjectName, edges, nodes, persistCurrentProjectSnapshot]);
-
-  useEffect(() => {
-    const tick = () => {
-      if (!persistenceReadyRef.current) return;
-      void persistCurrentProjectSnapshot().catch((error) => {
-        console.warn('IndexedDB autosave failed', error);
-      });
-    };
-
-    const id = window.setInterval(tick, AUTOSAVE_INTERVAL_MS);
-    return () => window.clearInterval(id);
-  }, [persistCurrentProjectSnapshot]);
+  }, [hydrateProject, rememberRecent, updateSaveStatus]);
 
   useEffect(() => {
     const flushSnapshot = () => {
@@ -180,4 +183,11 @@ export function useStudioProjectPersistence({ rememberRecent }: UseStudioProject
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, [persistCurrentProjectSnapshot]);
+
+  return {
+    error,
+    flushCurrentProjectSnapshot: persistCurrentProjectSnapshot,
+    lastSavedAt,
+    saveStatus,
+  };
 }

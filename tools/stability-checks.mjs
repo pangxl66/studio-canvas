@@ -120,14 +120,20 @@ function checkPersistenceBoundaries() {
   }
 
   for (const required of [
-    'const AUTOSAVE_INTERVAL_MS = 5 * 60 * 1000',
-    'const AUTOSAVE_DEBOUNCE_MS = 1200',
     "window.addEventListener('pagehide'",
     "window.addEventListener('beforeunload'",
     "document.addEventListener('visibilitychange'",
     'chooseStudioProjectRestoreCandidate',
   ]) {
     assertIncludes(hook, required, 'useStudioProjectPersistence');
+  }
+  for (const forbidden of [
+    'AUTOSAVE_INTERVAL_MS',
+    'AUTOSAVE_DEBOUNCE_MS',
+    'autosaveTimerRef',
+    'window.setInterval',
+  ]) {
+    assertNotIncludes(hook, forbidden, 'useStudioProjectPersistence');
   }
 
   assertIncludes(policy, 'autosave.savedAt >= activeRecord.updatedAt', 'restore policy');

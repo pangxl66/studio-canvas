@@ -314,7 +314,47 @@ function bodyInputChars(body: ChatRequestBody): number {
   );
 }
 
+function extractStreamOutputChars(rawText: string): number | null {
+  if (!rawText.includes('data:')) return null;
+  let content = '';
+  for (const rawLine of rawText.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (!line.startsWith('data:')) continue;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === '[DONE]') continue;
+    try {
+      const parsed = JSON.parse(payload) as {
+        choices?: Array<{
+          delta?: { content?: unknown };
+          message?: { content?: unknown };
+          text?: unknown;
+        }>;
+        output_text?: unknown;
+        delta?: unknown;
+        content?: unknown;
+      };
+      const choice = parsed.choices?.[0];
+      const candidates = [
+        choice?.delta?.content,
+        choice?.message?.content,
+        choice?.text,
+        parsed.output_text,
+        parsed.delta,
+        parsed.content,
+      ];
+      for (const value of candidates) {
+        if (typeof value === 'string') content += value;
+      }
+    } catch {
+      // Ignore non-content utility frames.
+    }
+  }
+  return content ? content.length : rawText.length;
+}
+
 function extractOutputChars(rawText: string): number {
+  const streamChars = extractStreamOutputChars(rawText);
+  if (streamChars != null) return streamChars;
   try {
     const parsed = JSON.parse(rawText) as {
       choices?: Array<{ message?: { content?: unknown } }>;
@@ -561,6 +601,97 @@ async function callUpstreamWithModelFallback(
   throw lastError || new Error('LLM fallback failed.');
 }
 
+async function pipeUpstreamStream(
+  upstreamResponse: Response,
+  res: ServerResponse,
+): Promise<string> {
+  const reader = upstreamResponse.body?.getReader();
+  if (!reader) {
+    throw new Error('LLM stream response has no readable body.');
+  }
+
+  res.statusCode = upstreamResponse.status;
+  res.setHeader(
+    'content-type',
+    upstreamResponse.headers.get('content-type') || 'text/event-stream; charset=utf-8',
+  );
+  res.setHeader('cache-control', 'no-store, no-transform');
+  res.setHeader('connection', 'keep-alive');
+  res.setHeader('x-accel-buffering', 'no');
+  res.flushHeaders();
+
+  const decoder = new TextDecoder();
+  let rawText = '';
+  let eventBuffer = '';
+  let streamFinished = false;
+  let clientClosed = false;
+  const onClose = () => {
+    if (!res.writableEnded) {
+      clientClosed = true;
+      void reader.cancel();
+    }
+  };
+  res.on('close', onClose);
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      const decoded = decoder.decode(value, { stream: true });
+      rawText += decoded;
+      eventBuffer += decoded;
+      const eventLines = eventBuffer.split('\n');
+      eventBuffer = eventLines.pop() ?? '';
+      for (const rawLine of eventLines) {
+        const line = rawLine.trim();
+        if (/^data:\s*\[DONE\]$/i.test(line)) {
+          streamFinished = true;
+          break;
+        }
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trimStart();
+        try {
+          const chunk = JSON.parse(payload) as {
+            done?: boolean;
+            completed?: boolean;
+            choices?: Array<{ finish_reason?: string | null }>;
+          };
+          if (
+            chunk.done === true ||
+            chunk.completed === true ||
+            chunk.choices?.some(
+              (choice) =>
+                typeof choice.finish_reason === 'string' &&
+                choice.finish_reason.trim().length > 0,
+            )
+          ) {
+            streamFinished = true;
+            break;
+          }
+        } catch {
+          // Ignore non-JSON SSE events and continue forwarding them unchanged.
+        }
+      }
+      if (clientClosed || res.destroyed || res.writableEnded) {
+        throw new Error('Client disconnected during LLM stream.');
+      }
+      res.write(Buffer.from(value));
+      if (streamFinished) {
+        void reader.cancel().catch(() => {
+          // The provider may already have closed the stream after its terminal event.
+        });
+        break;
+      }
+    }
+    rawText += decoder.decode();
+    if (!res.writableEnded) res.end();
+    return rawText;
+  } finally {
+    res.off('close', onClose);
+  }
+}
+
 export default async function handler(req: IncomingMessage, res: ServerResponse) {
   if (req.method !== 'POST') {
     json(res, 405, { error: { message: 'Method not allowed.' } });
@@ -651,6 +782,53 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     const upstreamAttempt = await callUpstreamWithModelFallback(body, model);
     const upstreamResponse = upstreamAttempt.response;
     const responseModel = upstreamAttempt.model;
+
+    if (body.stream === true) {
+      if (!upstreamResponse.ok) {
+        const rawText = await upstreamResponse.text();
+        const failureMessage = classifyUpstreamError(upstreamResponse.status, rawText);
+        await writeUsage(serviceClient, {
+          user_id: userId,
+          project_id: body.projectId ?? null,
+          feature,
+          model: responseModel,
+          input_chars: inputChars,
+          output_chars: 0,
+          estimated_tokens: estimateTokens(inputChars, 0),
+          quota_cost: 0,
+          status: 'failed',
+          error_message: failureMessage,
+        });
+        await refundQuota(serviceClient, userId, quotaCost);
+        json(res, upstreamResponse.status, {
+          error: {
+            message: failureMessage,
+            upstreamStatus: upstreamResponse.status,
+          },
+        });
+        return;
+      }
+
+      const rawText = await pipeUpstreamStream(upstreamResponse, res);
+      const outputChars = extractOutputChars(rawText);
+      try {
+        await writeUsage(serviceClient, {
+          user_id: userId,
+          project_id: body.projectId ?? null,
+          feature,
+          model: responseModel,
+          input_chars: inputChars,
+          output_chars: outputChars,
+          estimated_tokens: estimateTokens(inputChars, outputChars),
+          quota_cost: quotaCost,
+          status: 'success',
+        });
+      } catch (usageError) {
+        console.warn('LLM stream usage record failed', sanitizeError(usageError));
+      }
+      return;
+    }
+
     const rawText = await upstreamResponse.text();
     const outputChars = extractOutputChars(rawText);
     const isOk = upstreamResponse.ok;
@@ -711,6 +889,10 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       status: 'failed',
       error_message: errorMessage,
     });
-    json(res, 502, { error: { message: errorMessage } });
+    if (!res.headersSent) {
+      json(res, 502, { error: { message: errorMessage } });
+    } else if (!res.writableEnded) {
+      res.end();
+    }
   }
 }

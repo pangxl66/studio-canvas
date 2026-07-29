@@ -11,49 +11,129 @@ import {
   type SyntheticEvent,
 } from 'react';
 import {
-  STORYBOARD_GRID_IMAGE_MODEL,
   STORYBOARD_GRID_MAX_PANELS,
   buildStoryboardGridPrompt,
   generateStoryboardGridImage,
+  measureStoryboardGridImage,
   paginateStoryboardGridSources,
+  prepareImageEditReference,
   resolveStoryboardGridSource,
   storyboardGridActionLabel,
 } from '@/services/storyboardGridImage';
+import {
+  imageEditOutputSize,
+  resolveImageEditSource,
+  type ImageEditAspectRatio,
+} from '@/services/imageEdit';
+import {
+  IMAGE_GENERATION_MODELS,
+  imageNodeModelOption,
+  resolveImageGenerationModel,
+  type ImageGenerationModelId,
+} from '@/services/imageGenerationModels';
+import {
+  buildShipLightingPalettePrompt,
+  normalizeShipLightingPaletteImage,
+  prepareShipLightingPaletteReferences,
+  SHIP_LIGHTING_PALETTE_REQUEST_SIZE,
+  SHIP_LIGHTING_PALETTE_SKILL_ID,
+} from '@/services/shipLightingPalette';
 import { useStudioStore } from '@/store/useStudioStore';
+import { useStudioGraphContentNodes } from '@/hooks/useStudioGraphContent';
 import type { StoryboardGridImagePage, StudioNodeData } from '@/types/studio';
 import { imageNodeLayout } from '@/utils/imageNodeLayout';
+import {
+  IMAGE_NODE_INPUT_HANDLE_ID,
+  IMAGE_NODE_OUTPUT_HANDLE_ID,
+} from '@/utils/mediaNodeHandles';
 
 type ImageRF = Node<StudioNodeData, 'imageNode'>;
-
-export const IMAGE_NODE_OUTPUT_HANDLE_ID = 'out';
-export const IMAGE_NODE_INPUT_HANDLE_ID = 'in';
 
 function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
   const patchNodeData = useStudioStore((state) => state.patchNodeData);
   const pushMessage = useStudioStore((state) => state.pushMessage);
-  const nodes = useStudioStore((state) => state.nodes);
+  const nodes = useStudioGraphContentNodes();
   const edges = useStudioStore((state) => state.edges);
   const currentProjectId = useStudioStore((state) => state.currentProjectId);
   const inputRef = useRef<HTMLInputElement>(null);
+  const modelMenuRef = useRef<HTMLDivElement>(null);
   const generationAbortRef = useRef<AbortController | null>(null);
   const [imageSize, setImageSize] = useState<{ width: number; height: number } | null>(null);
   const [previewPageIndex, setPreviewPageIndex] = useState(0);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [modelMenuPlacement, setModelMenuPlacement] = useState<'up' | 'down'>('down');
+  const [composerExpanded, setComposerExpanded] = useState(false);
   const source = useMemo(() => resolveStoryboardGridSource(id, nodes, edges), [edges, id, nodes]);
+  const editSourceContext = useMemo(() => resolveImageEditSource(id, nodes), [id, nodes]);
+  const editSource = editSourceContext.source;
+  const isEditMode = Boolean(editSource?.dataUrl);
   const isGenerating = data.imageGenerationStatus === 'generating';
+  const isEditGenerating = isGenerating && data.imageGenerationTask === 'edit';
+  const isPaletteGenerating = isGenerating && data.imageGenerationTask === 'palette';
+  const hasRestorableSource = Boolean(
+    data.imageNodeMode === 'palette'
+      ? data.imagePaletteSourceDataUrl?.trim()
+      : data.imageEditBaseDataUrl?.trim(),
+  );
   const generatedPages = useMemo(() => data.storyboardGridImages ?? [], [data.storyboardGridImages]);
   const activePage = generatedPages[previewPageIndex] ?? generatedPages[0];
-  const previewUrl = activePage?.imageDataUrl ?? data.imageDataUrl;
+  const ownPreviewUrl = activePage?.imageDataUrl ?? data.imageDataUrl;
+  const previewUrl = ownPreviewUrl;
   const actionLabel = storyboardGridActionLabel(source.shots.length);
+  const selectedModel = resolveImageGenerationModel(data.imageGenerationSelectedModel);
+  const selectedModelOption = imageNodeModelOption(selectedModel);
+  const canSwitchImageModel = IMAGE_GENERATION_MODELS.length > 1;
 
   useEffect(() => () => generationAbortRef.current?.abort(), []);
+
+  useEffect(() => {
+    if (!modelMenuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!modelMenuRef.current?.contains(event.target as globalThis.Node)) setModelMenuOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setModelMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [modelMenuOpen]);
 
   useEffect(() => {
     if (previewPageIndex >= generatedPages.length && generatedPages.length) setPreviewPageIndex(0);
     setImageSize(null);
   }, [generatedPages, previewPageIndex]);
 
+  useEffect(() => {
+    if (selected) return;
+    setModelMenuOpen(false);
+    setComposerExpanded(false);
+  }, [selected]);
+
   const pickImage = useCallback(() => {
     inputRef.current?.click();
+  }, []);
+
+  const selectImageModel = useCallback(
+    (model: ImageGenerationModelId) => {
+      patchNodeData(id, { imageGenerationSelectedModel: model }, true);
+      setModelMenuOpen(false);
+    },
+    [id, patchNodeData],
+  );
+
+  const toggleModelMenu = useCallback(() => {
+    setModelMenuOpen((open) => {
+      if (!open) {
+        const triggerRect = modelMenuRef.current?.getBoundingClientRect();
+        const availableBelow = triggerRect ? window.innerHeight - triggerRect.bottom : window.innerHeight;
+        setModelMenuPlacement(availableBelow < 340 ? 'up' : 'down');
+      }
+      return !open;
+    });
   }, []);
 
   const onImagePicked = useCallback(
@@ -87,9 +167,26 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
           imageGenerationSourceNodeIds: undefined,
           imageGenerationCompletedAt: undefined,
           imageGenerationStatus: 'idle',
+          imageGenerationTask: undefined,
           imageGenerationCompletedPages: undefined,
           imageGenerationTotalPages: undefined,
           storyboardGridImages: undefined,
+          imageNodeMode: 'asset',
+          imageEditBaseDataUrl: undefined,
+          imageEditBaseMimeType: undefined,
+          imageEditBaseFileName: undefined,
+          imageEditBaseWidth: undefined,
+          imageEditBaseHeight: undefined,
+          imageEditSourceNodeId: undefined,
+          imageEditSourceSignature: undefined,
+          imageEditCompletedAt: undefined,
+          imagePaletteSourceDataUrl: undefined,
+          imagePaletteSourceMimeType: undefined,
+          imagePaletteSourceFileName: undefined,
+          imagePaletteSourceWidth: undefined,
+          imagePaletteSourceHeight: undefined,
+          imagePaletteSourceSignature: undefined,
+          imagePaletteCompletedAt: undefined,
           output: null,
           label: data.label?.trim() || file.name.replace(/\.[^.]+$/u, '') || '图片节点',
         },
@@ -127,6 +224,7 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
         imageGenerationStatus: 'generating',
         imageGenerationCompletedPages: 0,
         imageGenerationTotalPages: sourcePages.length,
+        imageGenerationTask: 'grid',
         generation_error: undefined,
         status: 'IN_PROGRESS',
       },
@@ -134,7 +232,7 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
     );
     pushMessage({
       role: 'system',
-      text: `正在使用 ${STORYBOARD_GRID_IMAGE_MODEL} 根据 ${source.shots.length} 个唯一镜头生成 ${sourcePages.length} 张分镜宫格……`,
+      text: `正在使用 ${selectedModelOption.label} 根据 ${source.shots.length} 个唯一镜头生成 ${sourcePages.length} 张分镜宫格……`,
       nodeId: id,
     });
 
@@ -146,7 +244,14 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
           pageSources.map((item) => item.shot),
           data.imageGenerationPrompt,
         );
-        const result = await generateStoryboardGridImage(prompt, currentProjectId, abortController.signal);
+        const result = await generateStoryboardGridImage(
+          prompt,
+          currentProjectId,
+          abortController.signal,
+          undefined,
+          undefined,
+          selectedModel,
+        );
         const completedAt = Date.now();
         pages.push({
           id: `storyboard-grid-${completedAt}-${pageIndex + 1}`,
@@ -191,7 +296,21 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
           imageGenerationStatus: 'idle',
           imageGenerationCompletedPages: undefined,
           imageGenerationTotalPages: undefined,
+          imageGenerationTask: undefined,
           storyboardGridImages: pages,
+          imageNodeMode: 'storyboard-grid',
+          imageEditBaseDataUrl: undefined,
+          imageEditBaseMimeType: undefined,
+          imageEditBaseFileName: undefined,
+          imageEditBaseWidth: undefined,
+          imageEditBaseHeight: undefined,
+          imagePaletteSourceDataUrl: undefined,
+          imagePaletteSourceMimeType: undefined,
+          imagePaletteSourceFileName: undefined,
+          imagePaletteSourceWidth: undefined,
+          imagePaletteSourceHeight: undefined,
+          imagePaletteSourceSignature: undefined,
+          imagePaletteCompletedAt: undefined,
           generation_error: undefined,
           status: 'APPROVED',
           output: {
@@ -227,6 +346,7 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
           imageGenerationStatus: 'idle',
           imageGenerationCompletedPages: undefined,
           imageGenerationTotalPages: undefined,
+          imageGenerationTask: undefined,
           generation_error: cancelled ? undefined : message,
           status: data.imageDataUrl ? 'APPROVED' : cancelled ? 'NOT_STARTED' : 'REJECTED',
         },
@@ -236,7 +356,401 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
     } finally {
       if (generationAbortRef.current === abortController) generationAbortRef.current = null;
     }
-  }, [currentProjectId, data.imageDataUrl, data.imageGenerationPrompt, data.label, id, isGenerating, patchNodeData, pushMessage, source]);
+  }, [currentProjectId, data.imageDataUrl, data.imageGenerationPrompt, data.label, id, isGenerating, patchNodeData, pushMessage, selectedModel, selectedModelOption.label, source]);
+
+  const generateEdit = useCallback(async () => {
+    if (isGenerating) {
+      generationAbortRef.current?.abort();
+      pushMessage({ role: 'system', text: '正在停止图片编辑……', nodeId: id });
+      return;
+    }
+    if (!editSource?.dataUrl) {
+      const message = '当前图片节点还没有可编辑的图片。';
+      patchNodeData(id, { generation_error: message }, false);
+      pushMessage({ role: 'system', text: message, nodeId: id });
+      return;
+    }
+    const prompt = data.imageEditPrompt?.trim() ?? '';
+    if (!prompt) {
+      const message = '请先填写希望如何修改当前图片。';
+      patchNodeData(id, { generation_error: message }, false);
+      pushMessage({ role: 'system', text: message, nodeId: id });
+      return;
+    }
+
+    const abortController = new AbortController();
+    generationAbortRef.current = abortController;
+    patchNodeData(
+      id,
+      {
+        imageNodeMode: 'edit',
+        imageGenerationStatus: 'generating',
+        imageGenerationTask: 'edit',
+        generation_error: undefined,
+        status: 'IN_PROGRESS',
+      },
+      false,
+    );
+    pushMessage({
+      role: 'system',
+      text: `正在使用 ${selectedModelOption.label} 原地编辑“${editSource.label}”……`,
+      nodeId: id,
+    });
+
+    try {
+      const reference = await prepareImageEditReference(editSource.dataUrl, editSource.label);
+      const aspectRatio = (data.imageEditAspectRatio ?? 'source') as ImageEditAspectRatio;
+      const sourceWidth = editSource.width ?? imageSize?.width;
+      const sourceHeight = editSource.height ?? imageSize?.height;
+      const requestedSize = imageEditOutputSize(aspectRatio, sourceWidth, sourceHeight);
+      const rawResult = await generateStoryboardGridImage(
+        prompt,
+        currentProjectId,
+        abortController.signal,
+        requestedSize,
+        [reference],
+        selectedModel,
+      );
+      const result = await measureStoryboardGridImage(rawResult);
+      const completedAt = Date.now();
+      patchNodeData(
+        id,
+        {
+          imageDataUrl: result.imageDataUrl,
+          imageMimeType: 'image/jpeg',
+          imageFileName: `image-edit-${completedAt}.jpg`,
+          imageWidth: result.width,
+          imageHeight: result.height,
+          imageAnalysisSummary: undefined,
+          imageColorAnalysisSummary: undefined,
+          imageNodeMode: 'edit',
+          imageEditBaseDataUrl: data.imageEditBaseDataUrl ?? editSource.dataUrl,
+          imageEditBaseMimeType: data.imageEditBaseMimeType ?? editSource.mimeType,
+          imageEditBaseFileName: data.imageEditBaseFileName ?? editSource.label,
+          imageEditBaseWidth: data.imageEditBaseWidth ?? editSource.width,
+          imageEditBaseHeight: data.imageEditBaseHeight ?? editSource.height,
+          imageGenerationModel: result.model,
+          imageGenerationSourceShotIds: undefined,
+          imageGenerationSourceNodeIds: [editSource.nodeId],
+          imageGenerationReferenceCount: result.referenceImageCount ?? 1,
+          imageGenerationReferenceLabels: [`原图:${editSource.label}`],
+          imageGenerationCompletedAt: completedAt,
+          imageGenerationStatus: 'idle',
+          imageGenerationTask: undefined,
+          storyboardGridImages: undefined,
+          imageEditSourceNodeId: editSource.nodeId,
+          imageEditSourceSignature: editSource.signature,
+          imageEditCompletedAt: completedAt,
+          generation_error: undefined,
+          status: 'APPROVED',
+          output: {
+            kind: 'image_edit',
+            model: result.model,
+            size: result.size,
+            sourceImageNodeId: editSource.nodeId,
+            sourceImageLabel: editSource.label,
+            referenceImageCount: result.referenceImageCount ?? 1,
+            prompt,
+            completedAt,
+          },
+        },
+        true,
+      );
+      setImageSize(result.width && result.height ? { width: result.width, height: result.height } : null);
+      setPreviewPageIndex(0);
+      pushMessage({
+        role: 'system',
+        text: `已完成“${editSource.label}”的原地编辑；首次编辑前的原图基线已保留。`,
+        nodeId: id,
+      });
+    } catch (error) {
+      const cancelled = abortController.signal.aborted;
+      const message = cancelled
+        ? '已停止图片编辑。'
+        : error instanceof Error
+          ? error.message
+          : '图片编辑失败。';
+      patchNodeData(
+        id,
+        {
+          imageGenerationStatus: 'idle',
+          imageGenerationTask: undefined,
+          generation_error: cancelled ? undefined : message,
+          status: data.imageDataUrl ? 'APPROVED' : cancelled ? 'NOT_STARTED' : 'REJECTED',
+        },
+        false,
+      );
+      pushMessage({ role: 'system', text: message, nodeId: id });
+    } finally {
+      if (generationAbortRef.current === abortController) generationAbortRef.current = null;
+    }
+  }, [
+    currentProjectId,
+    data.imageDataUrl,
+    data.imageEditBaseDataUrl,
+    data.imageEditBaseFileName,
+    data.imageEditBaseHeight,
+    data.imageEditBaseMimeType,
+    data.imageEditBaseWidth,
+    data.imageEditAspectRatio,
+    data.imageEditPrompt,
+    editSource,
+    id,
+    imageSize,
+    isGenerating,
+    patchNodeData,
+    pushMessage,
+    selectedModel,
+    selectedModelOption.label,
+  ]);
+
+  const generatePalette = useCallback(async () => {
+    if (isGenerating) {
+      if (data.imageGenerationTask === 'palette') {
+        generationAbortRef.current?.abort();
+        pushMessage({ role: 'system', text: '正在停止灯光色表生成……', nodeId: id });
+      }
+      return;
+    }
+    if (!editSource?.dataUrl) {
+      const message = '请先读取或上传一张图片，再生成灯光色表。';
+      patchNodeData(id, { generation_error: message }, false);
+      pushMessage({ role: 'system', text: message, nodeId: id });
+      return;
+    }
+
+    const hasStoredPaletteSource =
+      data.imageNodeMode === 'palette' && Boolean(data.imagePaletteSourceDataUrl?.trim());
+    const sourceDataUrl = hasStoredPaletteSource
+      ? (data.imagePaletteSourceDataUrl as string)
+      : editSource.dataUrl;
+    const sourceLabel = hasStoredPaletteSource
+      ? data.imagePaletteSourceFileName?.trim() || '色表来源图'
+      : editSource.label;
+    const sourceMimeType = hasStoredPaletteSource
+      ? data.imagePaletteSourceMimeType
+      : editSource.mimeType;
+    const sourceWidth = hasStoredPaletteSource
+      ? data.imagePaletteSourceWidth
+      : editSource.width;
+    const sourceHeight = hasStoredPaletteSource
+      ? data.imagePaletteSourceHeight
+      : editSource.height;
+    const sourceSignature = hasStoredPaletteSource
+      ? data.imagePaletteSourceSignature
+      : editSource.signature;
+
+    const abortController = new AbortController();
+    generationAbortRef.current = abortController;
+    patchNodeData(
+      id,
+      {
+        imageGenerationStatus: 'generating',
+        imageGenerationTask: 'palette',
+        generation_error: undefined,
+        status: 'IN_PROGRESS',
+      },
+      false,
+    );
+    pushMessage({
+      role: 'system',
+      text: `正在使用 ${selectedModelOption.label} 读取“${sourceLabel}”并生成飞船内景灯光色表……`,
+      nodeId: id,
+    });
+
+    try {
+      const references = await prepareShipLightingPaletteReferences(sourceDataUrl, sourceLabel);
+      const prompt = buildShipLightingPalettePrompt(sourceLabel);
+      const rawResult = await generateStoryboardGridImage(
+        prompt,
+        currentProjectId,
+        abortController.signal,
+        SHIP_LIGHTING_PALETTE_REQUEST_SIZE,
+        references,
+        selectedModel,
+      );
+      const result = await normalizeShipLightingPaletteImage(rawResult);
+      const completedAt = Date.now();
+      patchNodeData(
+        id,
+        {
+          imageDataUrl: result.imageDataUrl,
+          imageMimeType: 'image/png',
+          imageFileName: `飞船内景灯光色表-${completedAt}.png`,
+          imageWidth: result.width,
+          imageHeight: result.height,
+          imageAnalysisSummary: '按原图主导色与真实高光区域生成的 20+4 色灯光分析板。',
+          imageColorAnalysisSummary: undefined,
+          imageNodeMode: 'palette',
+          imageGenerationModel: result.model,
+          imageGenerationSourceShotIds: undefined,
+          imageGenerationSourceNodeIds: [id],
+          imageGenerationReferenceCount: result.referenceImageCount ?? references.length,
+          imageGenerationReferenceLabels: [
+            `颜色来源:${sourceLabel}`,
+            '版式:ship-interior-lighting-palette@1.0.0',
+          ],
+          imageGenerationCompletedAt: completedAt,
+          imageGenerationStatus: 'idle',
+          imageGenerationTask: undefined,
+          storyboardGridImages: undefined,
+          imagePaletteSourceDataUrl: sourceDataUrl,
+          imagePaletteSourceMimeType: sourceMimeType,
+          imagePaletteSourceFileName: sourceLabel,
+          imagePaletteSourceWidth: sourceWidth,
+          imagePaletteSourceHeight: sourceHeight,
+          imagePaletteSourceSignature: sourceSignature,
+          imagePaletteCompletedAt: completedAt,
+          generation_error: undefined,
+          status: 'APPROVED',
+          output: {
+            kind: 'image_color_palette',
+            skill: SHIP_LIGHTING_PALETTE_SKILL_ID,
+            model: result.model,
+            size: result.size,
+            sourceImageNodeId: id,
+            sourceImageLabel: sourceLabel,
+            referenceImageCount: result.referenceImageCount ?? references.length,
+            completedAt,
+          },
+        },
+        true,
+      );
+      setImageSize({ width: result.width ?? 1920, height: result.height ?? 1080 });
+      setPreviewPageIndex(0);
+      pushMessage({
+        role: 'system',
+        text: `已按 ${SHIP_LIGHTING_PALETTE_SKILL_ID} 规范生成 1920×1080 PNG 色表；来源图已保留，可随时恢复或重新生成。`,
+        nodeId: id,
+      });
+    } catch (error) {
+      const cancelled = abortController.signal.aborted;
+      const message = cancelled
+        ? '已停止灯光色表生成。'
+        : error instanceof Error
+          ? error.message
+          : '灯光色表生成失败。';
+      patchNodeData(
+        id,
+        {
+          imageGenerationStatus: 'idle',
+          imageGenerationTask: undefined,
+          generation_error: cancelled ? undefined : message,
+          status: data.imageDataUrl ? 'APPROVED' : cancelled ? 'NOT_STARTED' : 'REJECTED',
+        },
+        false,
+      );
+      pushMessage({ role: 'system', text: message, nodeId: id });
+    } finally {
+      if (generationAbortRef.current === abortController) generationAbortRef.current = null;
+    }
+  }, [
+    currentProjectId,
+    data.imageDataUrl,
+    data.imageGenerationTask,
+    data.imageNodeMode,
+    data.imagePaletteSourceDataUrl,
+    data.imagePaletteSourceFileName,
+    data.imagePaletteSourceHeight,
+    data.imagePaletteSourceMimeType,
+    data.imagePaletteSourceSignature,
+    data.imagePaletteSourceWidth,
+    editSource,
+    id,
+    isGenerating,
+    patchNodeData,
+    pushMessage,
+    selectedModel,
+    selectedModelOption.label,
+  ]);
+
+  const restoreOriginalImage = useCallback(() => {
+    const restoringPalette =
+      data.imageNodeMode === 'palette' && Boolean(data.imagePaletteSourceDataUrl?.trim());
+    const originalDataUrl = restoringPalette
+      ? data.imagePaletteSourceDataUrl?.trim()
+      : data.imageEditBaseDataUrl?.trim();
+    if (!originalDataUrl || isGenerating) return;
+    const originalMimeType = restoringPalette
+      ? data.imagePaletteSourceMimeType
+      : data.imageEditBaseMimeType;
+    const originalFileName = restoringPalette
+      ? data.imagePaletteSourceFileName
+      : data.imageEditBaseFileName;
+    const originalWidth = restoringPalette
+      ? data.imagePaletteSourceWidth
+      : data.imageEditBaseWidth;
+    const originalHeight = restoringPalette
+      ? data.imagePaletteSourceHeight
+      : data.imageEditBaseHeight;
+    patchNodeData(
+      id,
+      {
+        imageDataUrl: originalDataUrl,
+        imageMimeType: originalMimeType,
+        imageFileName: originalFileName,
+        imageWidth: originalWidth,
+        imageHeight: originalHeight,
+        imageNodeMode: restoringPalette && data.imageEditBaseDataUrl ? 'edit' : 'asset',
+        imageGenerationModel: undefined,
+        imageGenerationCompletedAt: undefined,
+        imageGenerationTask: undefined,
+        imageGenerationSourceNodeIds: undefined,
+        imageGenerationReferenceCount: undefined,
+        imageGenerationReferenceLabels: undefined,
+        imageEditBaseDataUrl: restoringPalette ? data.imageEditBaseDataUrl : undefined,
+        imageEditBaseMimeType: restoringPalette ? data.imageEditBaseMimeType : undefined,
+        imageEditBaseFileName: restoringPalette ? data.imageEditBaseFileName : undefined,
+        imageEditBaseWidth: restoringPalette ? data.imageEditBaseWidth : undefined,
+        imageEditBaseHeight: restoringPalette ? data.imageEditBaseHeight : undefined,
+        imageEditSourceNodeId: restoringPalette ? data.imageEditSourceNodeId : undefined,
+        imageEditSourceSignature: restoringPalette ? data.imageEditSourceSignature : undefined,
+        imageEditCompletedAt: restoringPalette ? data.imageEditCompletedAt : undefined,
+        imagePaletteSourceDataUrl: undefined,
+        imagePaletteSourceMimeType: undefined,
+        imagePaletteSourceFileName: undefined,
+        imagePaletteSourceWidth: undefined,
+        imagePaletteSourceHeight: undefined,
+        imagePaletteSourceSignature: undefined,
+        imagePaletteCompletedAt: undefined,
+        storyboardGridImages: undefined,
+        generation_error: undefined,
+        status: 'APPROVED',
+        output: null,
+      },
+      true,
+    );
+    setImageSize(
+      originalWidth && originalHeight
+        ? { width: originalWidth, height: originalHeight }
+        : null,
+    );
+    setPreviewPageIndex(0);
+    pushMessage({
+      role: 'system',
+      text: restoringPalette ? '已恢复生成色表前的来源图。' : '已恢复第一次原地编辑前的原图。',
+      nodeId: id,
+    });
+  }, [
+    data.imageEditBaseDataUrl,
+    data.imageEditBaseFileName,
+    data.imageEditBaseHeight,
+    data.imageEditBaseMimeType,
+    data.imageEditBaseWidth,
+    data.imageEditCompletedAt,
+    data.imageEditSourceNodeId,
+    data.imageEditSourceSignature,
+    data.imageNodeMode,
+    data.imagePaletteSourceDataUrl,
+    data.imagePaletteSourceFileName,
+    data.imagePaletteSourceHeight,
+    data.imagePaletteSourceMimeType,
+    data.imagePaletteSourceWidth,
+    id,
+    isGenerating,
+    patchNodeData,
+    pushMessage,
+  ]);
 
   const onPreviewLoaded = useCallback(
     (event: SyntheticEvent<HTMLImageElement>) => {
@@ -270,10 +784,64 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
       : data.imageDataUrl
         ? 'Image'
         : '未上传';
+  const modelSwitcher = (
+    <div
+      ref={modelMenuRef}
+      className={`image-table-node__model-switcher nodrag nowheel ${modelMenuOpen ? 'image-table-node__model-switcher--open' : ''} image-table-node__model-switcher--${modelMenuPlacement}`}
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      <button
+        type="button"
+        className="image-table-node__model-trigger"
+        aria-haspopup={canSwitchImageModel ? 'listbox' : undefined}
+        aria-expanded={canSwitchImageModel ? modelMenuOpen : undefined}
+        title={`图片模型：${selectedModelOption.label}`}
+        onClick={canSwitchImageModel ? toggleModelMenu : undefined}
+      >
+        <span className="image-table-node__model-trigger-copy">
+          <strong>{selectedModelOption.label}</strong>
+          <small>{selectedModelOption.badge}</small>
+        </span>
+        <span className="image-table-node__model-chevron" aria-hidden>
+          {canSwitchImageModel ? (modelMenuOpen ? '收起' : '切换') : '固定'}
+        </span>
+      </button>
+      {canSwitchImageModel && modelMenuOpen ? (
+        <div className="image-table-node__model-menu" role="listbox" aria-label="选择图片生成模型">
+          <div className="image-table-node__model-menu-head">
+            <strong>图片模型</strong>
+            <span>生成和编辑共用</span>
+          </div>
+          {IMAGE_GENERATION_MODELS.map((model) => {
+            const active = model.id === selectedModel;
+            return (
+              <button
+                key={model.id}
+                type="button"
+                role="option"
+                aria-selected={active}
+                className={`image-table-node__model-option ${active ? 'image-table-node__model-option--active' : ''}`}
+                onClick={() => selectImageModel(model.id)}
+              >
+                <span className="image-table-node__model-option-copy">
+                  <span className="image-table-node__model-option-title">
+                    <strong>{model.label}</strong>
+                    <em>{model.badge}</em>
+                  </span>
+                  <small>{model.description}</small>
+                </span>
+                <span className="image-table-node__model-latency">{model.latencyLabel}</span>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
 
   return (
     <div
-      className={`image-table-node ${data.imageDataUrl ? 'image-table-node--loaded' : ''} ${data.imageGenerationModel ? 'image-table-node--grid' : ''} ${layout.preservesSourceRatio ? '' : 'image-table-node--ratio-limited'} ${selected ? 'image-table-node--selected' : ''}`}
+      className={`image-table-node ${data.imageDataUrl ? 'image-table-node--loaded' : ''} ${data.imageGenerationModel && !isEditMode ? 'image-table-node--grid' : ''} ${isEditMode ? 'image-table-node--edit' : ''} ${layout.preservesSourceRatio ? '' : 'image-table-node--ratio-limited'} ${selected ? 'image-table-node--selected' : ''}`}
       style={nodeStyle}
     >
       <Handle
@@ -281,12 +849,17 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
         position={Position.Left}
         id={IMAGE_NODE_INPUT_HANDLE_ID}
         className="image-table-node__handle image-table-node__handle--input"
-        title="Input：连接分镜表、分镜部门，或镜头表中的单个镜头。"
+        title="Input：连接分镜表、分镜部门或单个镜头，可生成分镜宫格。"
       />
       <header className="image-table-node__head">
         <span className="image-table-node__title">
           <span className="image-table-node__title-icon" aria-hidden />
           <span className="image-table-node__title-text">{title}</span>
+          {isEditMode && selected ? (
+            <span className="image-table-node__mode">
+              {data.imageNodeMode === 'palette' ? '色表' : '编辑'}
+            </span>
+          ) : null}
         </span>
         <span className="image-table-node__dimension">{dimensionLabel}</span>
       </header>
@@ -304,7 +877,7 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
             <span className="image-table-node__empty-copy">上传或粘贴图片后，可连接到文本卡片或分镜节点。</span>
           </button>
         )}
-        {generatedPages.length > 1 ? (
+        {!isEditMode && generatedPages.length > 1 ? (
           <div className="image-table-node__pager nodrag">
             <button type="button" onClick={() => setPreviewPageIndex((index) => Math.max(0, index - 1))} disabled={previewPageIndex <= 0}>‹</button>
             <span>{previewPageIndex + 1}/{generatedPages.length}</span>
@@ -312,7 +885,114 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
           </div>
         ) : null}
       </div>
-      {!previewUrl ? (
+      {editSource?.dataUrl && selected ? (
+        <div
+          className={`image-table-node__body image-table-node__body--edit image-table-node__composer nodrag nopan nowheel ${composerExpanded ? 'image-table-node__composer--expanded' : ''}`}
+          role="dialog"
+          aria-label="图片编辑器"
+        >
+          <div className="image-table-node__composer-head">
+            <div className="image-table-node__composer-chips" aria-label="图片编辑辅助项">
+              <span className="image-table-node__composer-chip image-table-node__composer-chip--active">
+                参考 {editSource.dataUrl ? '1' : '0'}
+              </span>
+              <button
+                type="button"
+                className={`image-table-node__composer-chip image-table-node__composer-chip--button ${data.imageNodeMode === 'palette' ? 'image-table-node__composer-chip--palette-active' : ''}`}
+                onClick={generatePalette}
+                disabled={isGenerating && !isPaletteGenerating}
+                title="按 ship-interior-lighting-palette Skill 生成 1920×1080 灯光色表"
+              >
+                {isPaletteGenerating
+                  ? '停止色表'
+                  : data.imageNodeMode === 'palette'
+                    ? '重新生成色表'
+                    : '生成色表'}
+              </button>
+              <span className="image-table-node__composer-chip">标记</span>
+              <span className="image-table-node__composer-chip">风格</span>
+            </div>
+            <div className="image-table-node__composer-head-actions">
+              {hasRestorableSource ? (
+                <button
+                  type="button"
+                  className="image-table-node__composer-reset"
+                  disabled={isGenerating}
+                  onClick={restoreOriginalImage}
+                >
+                  {data.imageNodeMode === 'palette' ? '恢复来源图' : '恢复原图'}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="image-table-node__composer-expand"
+                aria-expanded={composerExpanded}
+                onClick={() => setComposerExpanded((expanded) => !expanded)}
+              >
+                {composerExpanded ? '收起编辑器' : '展开编辑器'}
+              </button>
+            </div>
+          </div>
+          <div
+            className="image-table-node__composer-reference"
+            title={
+              editSource.width && editSource.height
+                ? `${editSource.label} · ${editSource.width} × ${editSource.height}`
+                : editSource.label
+            }
+          >
+            <span className="image-table-node__composer-reference-index">1</span>
+            {editSource.dataUrl ? <img src={editSource.dataUrl} alt={editSource.label} /> : <span>无图</span>}
+          </div>
+          <textarea
+            className="image-table-node__instruction image-table-node__composer-instruction nodrag nowheel"
+            value={data.imageEditPrompt ?? ''}
+            rows={composerExpanded ? 7 : 4}
+            maxLength={2000}
+            placeholder="描述希望如何修改，例如：场景中主体缩小，保留舷窗、雾气与整体光线。"
+            onChange={(event) => patchNodeData(id, { imageEditPrompt: event.target.value }, false)}
+          />
+          <div className="image-table-node__composer-footer">
+            {modelSwitcher}
+            <span className="image-table-node__composer-separator" aria-hidden />
+            <label className="image-table-node__composer-format">
+              <span>画幅</span>
+              <select
+                aria-label="输出画幅"
+                value={data.imageEditAspectRatio ?? 'source'}
+                onChange={(event) =>
+                  patchNodeData(
+                    id,
+                    { imageEditAspectRatio: event.target.value as ImageEditAspectRatio },
+                    false,
+                  )
+                }
+              >
+                <option value="source">沿用当前图</option>
+                <option value="16:9">16:9 横屏</option>
+                <option value="9:16">9:16 竖屏</option>
+                <option value="1:1">1:1 方形</option>
+              </select>
+            </label>
+            <span className="image-table-node__composer-output-note">标准画质 · 1张</span>
+            <span className="image-table-node__composer-credit">3 次额度</span>
+            <button
+              type="button"
+              className="image-table-node__composer-submit"
+              onClick={generateEdit}
+              disabled={
+                (isGenerating && !isEditGenerating)
+                || (!isGenerating && (!editSource.dataUrl || !data.imageEditPrompt?.trim()))
+              }
+            >
+              {isEditGenerating ? '停止' : data.imageEditCompletedAt ? '重新生成' : '生成'}
+            </button>
+          </div>
+          {data.generation_error?.trim() ? (
+            <div className="image-table-node__error">{data.generation_error.trim()}</div>
+          ) : null}
+        </div>
+      ) : !previewUrl ? (
         <div className="image-table-node__body">
         <div className="image-table-node__source">
           <span>{source.shots.length ? `${source.sourceNodeIds.length} 个来源 · ${source.shots.length} 个镜头` : '等待分镜连线'}</span>
@@ -359,12 +1039,13 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
         ) : null}
         </div>
       ) : null}
+      {!isEditMode ? modelSwitcher : null}
       <Handle
         type="source"
         position={Position.Right}
         id={IMAGE_NODE_OUTPUT_HANDLE_ID}
         className="image-table-node__handle"
-        title="Output：连接到文本卡片或分镜节点。"
+        title="Output：连接到文本卡片、分镜节点或其他下游节点。"
       />
     </div>
   );

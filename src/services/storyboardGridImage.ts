@@ -5,6 +5,12 @@ import { requestCreditRefresh, spendMockCredit } from '@/services/creditService'
 import type { StudioRFNode } from '@/types/reactFlow';
 import type { StoryboardShot } from '@/types/studio';
 import {
+  DEFAULT_IMAGE_GENERATION_MODEL,
+  imageGenerationModelOption,
+  resolveImageGenerationModel,
+  type ImageGenerationModelId,
+} from '@/services/imageGenerationModels';
+import {
   prioritizeStoryboardReferences,
   type StoryboardConnectedReference,
 } from '@/services/storyboardReferenceImages';
@@ -26,7 +32,7 @@ export {
   storyboardGridName,
 } from '@/utils/storyboardGridLayout';
 
-export const STORYBOARD_GRID_IMAGE_MODEL = 'gpt-image-2';
+export const STORYBOARD_GRID_IMAGE_MODEL = DEFAULT_IMAGE_GENERATION_MODEL;
 export const STORYBOARD_GRID_IMAGE_QUOTA_COST = 3;
 
 export type StoryboardGridShotSource = {
@@ -264,7 +270,7 @@ export function buildStoryboardGridPrompt(
     : '';
   const captionInstruction = [
     '镜头说明标识规范：每个分镜面板底部必须预留一条干净、连续、约占单格高度 20% 的深色半透明说明带。',
-    '说明带必须位于本格内部，不跨格、不遮挡人物面部和关键道具；image2 不要在说明带里自行生成文字、数字或符号，系统会在生成后按分镜表原文叠加准确的镜头号、景别、运镜和画面说明。',
+    '说明带必须位于本格内部，不跨格、不遮挡人物面部和关键道具；图片模型不要在说明带里自行生成文字、数字或符号，系统会在生成后按分镜表原文叠加准确的镜头号、景别、运镜和画面说明。',
   ].join('');
   const cropSafetyInstruction =
     options.canvas === 'landscape'
@@ -290,7 +296,7 @@ export function buildStoryboardGridPrompt(
       ? '信息职责：分镜事实决定角色、场景、道具、剧情动作和最终结果；提示词视觉执行决定机位、构图、焦点、光线、镜头参数和可见表演。两者冲突时不得改写分镜事实。每格只表现一个最有代表性的目标关键帧，不要把视频时间轴画成多重曝光或同格多阶段动作。'
       : '',
     '连续性要求：所有画面属于同一故事世界；人物面孔、年龄、发型、服装、身材比例保持一致；场景方位、时代、美术风格、关键道具、天气、时间和主光方向保持连续。写实电影质感，构图清晰，细节可信。',
-    '除每格底部预留的空白镜头说明带外，画面中禁止出现任何文字、数字、字幕、对白、logo、水印、拼贴标题或界面元素；不要由 image2 伪造镜头标识。',
+    '除每格底部预留的空白镜头说明带外，画面中禁止出现任何文字、数字、字幕、对白、logo、水印、拼贴标题或界面元素；不要由图片模型伪造镜头标识。',
     `统一场景：${scenes}`,
     `统一角色：${characters}`,
     `统一关键道具：${props}`,
@@ -441,6 +447,7 @@ function dataUrlToBlob(dataUrl: string): Blob {
 async function compressReferenceImage(
   dataUrl: string,
   kind: StoryboardGridReferenceImage['kind'],
+  overrides?: { maxSide?: number; quality?: number },
 ): Promise<string> {
   const image = new Image();
   image.decoding = 'async';
@@ -449,7 +456,7 @@ async function compressReferenceImage(
     image.onerror = () => reject(new Error('参考图读取失败。'));
     image.src = dataUrl;
   });
-  const maxSide = kind === 'character' ? 1536 : kind === 'prop' ? 1280 : 1024;
+  const maxSide = overrides?.maxSide ?? (kind === 'character' ? 1536 : kind === 'prop' ? 1280 : 1024);
   const scale = Math.min(1, maxSide / Math.max(image.naturalWidth || 1, image.naturalHeight || 1));
   const width = Math.max(1, Math.round(image.naturalWidth * scale));
   const height = Math.max(1, Math.round(image.naturalHeight * scale));
@@ -461,8 +468,19 @@ async function compressReferenceImage(
   context.fillStyle = '#ffffff';
   context.fillRect(0, 0, width, height);
   context.drawImage(image, 0, 0, width, height);
-  const quality = kind === 'character' ? 0.95 : kind === 'prop' ? 0.9 : 0.84;
+  const quality = overrides?.quality ?? (kind === 'character' ? 0.95 : kind === 'prop' ? 0.9 : 0.84);
   return canvas.toDataURL('image/jpeg', quality);
+}
+
+export async function prepareImageEditReference(
+  dataUrl: string,
+  name: string,
+): Promise<StoryboardGridReferenceImage> {
+  return {
+    dataUrl: await compressReferenceImage(dataUrl, 'layout', { maxSide: 1536, quality: 0.92 }),
+    name,
+    kind: 'layout',
+  };
 }
 
 export async function prepareStoryboardReferenceImages(
@@ -493,7 +511,7 @@ function layoutRows(panelCount: number, aspectRatio: '16:9' | '9:16'): number[] 
   return [3, 3, 3];
 }
 
-/** A blank guide sent to image2 so panel geometry is generated, not post-cropped. */
+/** A blank guide sent to the image model so panel geometry is generated, not post-cropped. */
 export function createStoryboardLayoutReference(
   panelCount: number,
   aspectRatio: '16:9' | '9:16',
@@ -557,9 +575,12 @@ export async function generateStoryboardGridImage(
   signal?: AbortSignal,
   size: StoryboardGridImageSize = '1536x1536',
   referenceImages: StoryboardGridReferenceImage[] = [],
+  requestedModel: ImageGenerationModelId = STORYBOARD_GRID_IMAGE_MODEL,
 ): Promise<StoryboardGridImageResult> {
   const config = getResolvedVisionLlmGatewayConfig();
   if (!config) throw new Error('尚未配置可用的图片模型接口。请先完成模型设置。');
+  const model = resolveImageGenerationModel(requestedModel);
+  const modelLabel = imageGenerationModelOption(model).label;
 
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), Math.max(config.timeoutMs ?? 120_000, 420_000));
@@ -591,13 +612,14 @@ export async function generateStoryboardGridImage(
       body = JSON.stringify({
         prompt,
         projectId,
+        model,
         size,
         quality: referenceImages.some((reference) => reference.kind === 'character') ? 'high' : 'medium',
         referenceImages,
       });
     } else if (referenceImages.length) {
       const form = new FormData();
-      form.set('model', STORYBOARD_GRID_IMAGE_MODEL);
+      form.set('model', model);
       form.set('prompt', prompt);
       form.set('n', '1');
       form.set('size', size);
@@ -614,7 +636,7 @@ export async function generateStoryboardGridImage(
     } else {
       headers['Content-Type'] = 'application/json';
       body = JSON.stringify({
-        model: STORYBOARD_GRID_IMAGE_MODEL,
+        model,
         prompt,
         n: 1,
         size,
@@ -638,17 +660,19 @@ export async function generateStoryboardGridImage(
       const confirmedReferenceCount =
         typeof payload?.referenceImageCount === 'number' ? payload.referenceImageCount : null;
       if (referenceImages.length && confirmedReferenceCount == null) {
-        throw new Error('图片代理未确认参考图已传入 image2，已拒绝把结果标记为参考图生成。');
+        throw new Error(`图片代理未确认参考图已传入 ${modelLabel}，已拒绝把结果标记为参考图生成。`);
       }
       if (confirmedReferenceCount != null && confirmedReferenceCount !== referenceImages.length) {
-        throw new Error(`计划传入 ${referenceImages.length} 张参考图，但 image2 请求仅确认 ${confirmedReferenceCount} 张。`);
+        throw new Error(`计划传入 ${referenceImages.length} 张参考图，但 ${modelLabel} 请求仅确认 ${confirmedReferenceCount} 张。`);
       }
       spendMockCredit(STORYBOARD_GRID_IMAGE_QUOTA_COST);
       if (isSaasAuthEnabled()) requestCreditRefresh();
       return {
         imageDataUrl,
-        model: typeof payload?.model === 'string' ? payload.model : STORYBOARD_GRID_IMAGE_MODEL,
+        model: typeof payload?.model === 'string' ? payload.model : model,
         size: typeof payload?.size === 'string' ? payload.size : size,
+        width: typeof payload?.width === 'number' ? payload.width : undefined,
+        height: typeof payload?.height === 'number' ? payload.height : undefined,
         referenceImageCount: confirmedReferenceCount ?? 0,
       };
     }
@@ -659,7 +683,7 @@ export async function generateStoryboardGridImage(
     if (!b64) throw new Error('图片模型未返回可用图像。');
     return {
       imageDataUrl: `data:image/jpeg;base64,${b64}`,
-      model: STORYBOARD_GRID_IMAGE_MODEL,
+      model,
       size,
       referenceImageCount: referenceImages.length,
     };

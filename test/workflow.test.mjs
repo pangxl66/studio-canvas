@@ -13,6 +13,7 @@ test('pipeline state machine only accepts declared transitions', () => {
   assert.equal(canTransitionPipelineStatus('NOT_STARTED', 'IN_PROGRESS', 'writing'), true);
   assert.equal(canTransitionPipelineStatus('NOT_STARTED', 'APPROVED', 'writing'), false);
   assert.equal(canTransitionPipelineStatus('IN_PROGRESS', 'APPROVED', 'writing'), false);
+  assert.equal(canTransitionPipelineStatus('IN_PROGRESS', 'APPROVED', 'storyboard'), true);
   assert.equal(canTransitionPipelineStatus('IN_PROGRESS', 'APPROVED', 'prompt'), false);
   assert.equal(canTransitionPipelineStatus('IN_PROGRESS', PROMPT_GENERATED_STATUS, 'prompt'), true);
   assert.equal(canTransitionPipelineStatus('APPROVED', 'IN_PROGRESS', 'prompt'), false);

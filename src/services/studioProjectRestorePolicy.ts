@@ -18,10 +18,13 @@ export type StudioProjectRestorePolicyInput = {
   activeRef: ActiveStudioProjectRef | null;
   activeRecord: StudioProjectRecord | null;
   autosave: StudioProjectFilePayload | null;
+  diskSnapshot?: StudioProjectFilePayload | null;
   fallbackProjectName: string;
 };
 
-function hasCanvasContent(payload: Pick<StudioProjectFilePayload, 'nodes' | 'edges'> | null | undefined): boolean {
+function hasCanvasContent(
+  payload: Pick<StudioProjectFilePayload, 'nodes' | 'edges'> | null | undefined,
+): boolean {
   return Boolean(payload && (payload.nodes.length > 0 || payload.edges.length > 0));
 }
 
@@ -29,6 +32,7 @@ export function chooseStudioProjectRestoreCandidate({
   activeRef,
   activeRecord,
   autosave,
+  diskSnapshot,
   fallbackProjectName,
 }: StudioProjectRestorePolicyInput): StudioProjectRestoreCandidate | null {
   let restorePayload: RestorePayload | null = null;
@@ -40,11 +44,11 @@ export function chooseStudioProjectRestoreCandidate({
   }
 
   if (
-    autosave &&
-    hasCanvasContent(autosave) &&
-    activeRecord?.projectId &&
-    autosave.projectId === activeRecord.projectId &&
-    autosave.savedAt >= activeRecord.updatedAt
+    autosave
+    && hasCanvasContent(autosave)
+    && activeRecord?.projectId
+    && autosave.projectId === activeRecord.projectId
+    && autosave.savedAt >= activeRecord.updatedAt
   ) {
     restorePayload = autosave;
     restoreSource = 'autosave';
@@ -53,13 +57,28 @@ export function chooseStudioProjectRestoreCandidate({
     restoreSource = 'autosave';
   }
 
+  const restoreTimestamp =
+    restorePayload && 'updatedAt' in restorePayload
+      ? restorePayload.updatedAt
+      : restorePayload?.savedAt ?? 0;
+  if (
+    diskSnapshot
+    && hasCanvasContent(diskSnapshot)
+    && diskSnapshot.savedAt >= restoreTimestamp
+  ) {
+    restorePayload = diskSnapshot;
+    restoreSource = 'disk';
+  }
+
   if (!restorePayload) return null;
 
   const projectName = restorePayload.projectName ?? activeRef?.projectName ?? fallbackProjectName;
   const broadcastText =
-    restoreSource === 'autosave'
-      ? `已恢复上次自动存档「${projectName}」。`
-      : `已恢复上次工程「${projectName}」。`;
+    restoreSource === 'disk'
+      ? `已从磁盘工程库恢复“${projectName}”。`
+      : restoreSource === 'autosave'
+        ? `已恢复上次自动存档“${projectName}”。`
+        : `已恢复上次工程“${projectName}”。`;
 
   return {
     payload: restorePayload,

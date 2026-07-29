@@ -11,6 +11,7 @@ import { resolveWritingExportTemplate } from '@/components/writing/writingExport
 import { ReviewFeedbackDialog } from '@/components/ReviewFeedbackDialog';
 import { mergedTextNodeSourcesForDepartment } from '@/services/graphInput';
 import { useStudioStore } from '@/store/useStudioStore';
+import { useStudioGraphContentNodes } from '@/hooks/useStudioGraphContent';
 import type { SceneRow, StudioNodeData } from '@/types/studio';
 
 function isWritingOutput(o: unknown): o is import('@/types/studio').WritingOutput {
@@ -74,7 +75,7 @@ export function WritingDetailWorkspace(props: {
   const [tab, setTab] = useState<TabId>('structured');
   const [compareMode, setCompareMode] = useState(false);
   const [docxBusy, setDocxBusy] = useState(false);
-  const nodes = useStudioStore((s) => s.nodes);
+  const nodes = useStudioGraphContentNodes();
   const edges = useStudioStore((s) => s.edges);
   const patchNodeData = useStudioStore((s) => s.patchNodeData);
   const submitLeaderReviewFeedback = useStudioStore((s) => s.submitLeaderReviewFeedback);

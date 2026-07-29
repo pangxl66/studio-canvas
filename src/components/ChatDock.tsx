@@ -1,6 +1,7 @@
 import { useReactFlow } from '@xyflow/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useStudioStore } from '@/store/useStudioStore';
+import { useStudioGraphContentNodes } from '@/hooks/useStudioGraphContent';
 import type { StudioRFNode } from '@/types/reactFlow';
 
 const CHAT_DOCK_COLLAPSED_KEY = 'studio.nodeAssistantDockCollapsed.v2';
@@ -128,7 +129,7 @@ function buildPreserveDraft(node: StudioRFNode): string {
 export function ChatDock() {
   const { screenToFlowPosition } = useReactFlow();
   const messages = useStudioStore((s) => s.messages);
-  const nodes = useStudioStore((s) => s.nodes);
+  const nodes = useStudioGraphContentNodes();
   const selectedNodeId = useStudioStore((s) => s.selectedNodeId);
   const detailOpen = useStudioStore((s) => s.detailOpen);
   const focusNode = useStudioStore((s) => s.focusNode);

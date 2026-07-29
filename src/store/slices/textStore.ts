@@ -1,4 +1,8 @@
 import { getLlmSettingsFormDefaults, getResolvedLlmGatewayConfig, getResolvedVisionLlmGatewayConfig } from '@/config/llmSettings';
+import {
+  TEXT_POLISH_TIMEOUT_MESSAGE,
+  TEXT_POLISH_TIMEOUT_MS,
+} from '@/services/textPolishLifecycle';
 import type { StudioRFNode } from '@/types/reactFlow';
 import type { StudioState } from '../useStudioStore';
 
@@ -280,11 +284,18 @@ export function createTextStoreSlice(
       deps.activeTaskAbortControllers.get(nodeId)?.abort();
       const controller = new AbortController();
       deps.activeTaskAbortControllers.set(nodeId, controller);
+      let timedOut = false;
+      const timeoutId = globalThis.setTimeout(() => {
+        if (deps.activeTaskAbortControllers.get(nodeId) !== controller) return;
+        timedOut = true;
+        controller.abort();
+      }, TEXT_POLISH_TIMEOUT_MS);
       get().setActiveNodeId(nodeId);
       get().patchNodeData(
         nodeId,
         {
           status: 'IN_PROGRESS',
+          text_polish_started_at: Date.now(),
           generation_error: undefined,
           streaming_preview: hasVideoContext
             ? 'LLM 正在读取连接的视频抽帧，并分析构图、元素、景别与运镜...'
@@ -359,18 +370,25 @@ export function createTextStoreSlice(
                 signal: controller.signal,
               });
 
+        if (deps.activeTaskAbortControllers.get(nodeId) !== controller) return;
+
         if (!finalResult.ok) {
           if (finalResult.error.code === 'USER_ABORT') {
             get().patchNodeData(
               nodeId,
               {
                 status: 'APPROVED',
-                generation_error: undefined,
+                generation_error: timedOut ? TEXT_POLISH_TIMEOUT_MESSAGE : undefined,
                 streaming_preview: undefined,
+                text_polish_started_at: undefined,
               },
               true,
             );
-            get().pushMessage({ role: 'system', text: deps.stopTaskMessage, nodeId });
+            get().pushMessage({
+              role: 'system',
+              text: timedOut ? TEXT_POLISH_TIMEOUT_MESSAGE : deps.stopTaskMessage,
+              nodeId,
+            });
             return;
           }
           get().patchNodeData(
@@ -379,6 +397,7 @@ export function createTextStoreSlice(
               status: 'APPROVED',
               generation_error: finalResult.error.message,
               streaming_preview: undefined,
+              text_polish_started_at: undefined,
             },
             true,
           );
@@ -391,12 +410,17 @@ export function createTextStoreSlice(
             nodeId,
             {
               status: 'APPROVED',
-              generation_error: undefined,
+              generation_error: timedOut ? TEXT_POLISH_TIMEOUT_MESSAGE : undefined,
               streaming_preview: undefined,
+              text_polish_started_at: undefined,
             },
             true,
           );
-          get().pushMessage({ role: 'system', text: deps.stopTaskMessage, nodeId });
+          get().pushMessage({
+            role: 'system',
+            text: timedOut ? TEXT_POLISH_TIMEOUT_MESSAGE : deps.stopTaskMessage,
+            nodeId,
+          });
           return;
         }
 
@@ -408,6 +432,7 @@ export function createTextStoreSlice(
               status: 'APPROVED',
               generation_error: '模型没有返回可写入的润色正文，请稍后重试。',
               streaming_preview: undefined,
+              text_polish_started_at: undefined,
             },
             true,
           );
@@ -423,6 +448,7 @@ export function createTextStoreSlice(
             raw_text: polished,
             generation_error: undefined,
             streaming_preview: undefined,
+            text_polish_started_at: undefined,
             review_result: hasVideoContext
               ? `已结合 ${videoRefs.length} 个视频节点完成构图、元素和运镜分析。`
               : hasImageContext
@@ -440,7 +466,26 @@ export function createTextStoreSlice(
               : `文本节点 LLM ${mode === 'simple' ? '简单优化' : '深度优化'}已完成，并已写回正文。`,
           nodeId,
         });
+      } catch (error) {
+        if (deps.activeTaskAbortControllers.get(nodeId) !== controller) return;
+        const message = timedOut
+          ? TEXT_POLISH_TIMEOUT_MESSAGE
+          : error instanceof Error
+            ? `文本润色失败：${error.message}`
+            : '文本润色失败，请稍后重试。';
+        get().patchNodeData(
+          nodeId,
+          {
+            status: 'APPROVED',
+            generation_error: message,
+            streaming_preview: undefined,
+            text_polish_started_at: undefined,
+          },
+          true,
+        );
+        get().pushMessage({ role: 'system', text: message, nodeId });
       } finally {
+        globalThis.clearTimeout(timeoutId);
         if (deps.activeTaskAbortControllers.get(nodeId) === controller) {
           deps.activeTaskAbortControllers.delete(nodeId);
         }

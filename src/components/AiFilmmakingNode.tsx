@@ -1,5 +1,5 @@
 import { Handle, Position, useReactFlow, type Node, type NodeProps } from '@xyflow/react';
-import { memo, useCallback, useEffect, useMemo, useRef, type ChangeEvent } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import {
   STORYBOARD_GRID_MAX_PANELS,
   addStoryboardPanelCaptions,
@@ -33,9 +33,16 @@ import {
   normalizeFilmStoryboardSkillId,
 } from '@/services/skillLoader';
 import { normalizeStoryboardAspectRatio } from '@/services/aiFilmmakingPrompts';
-import { IMAGE_NODE_INPUT_HANDLE_ID } from '@/components/ImageTableNode';
+import {
+  STORYBOARD_GRID_IMAGE_MODELS,
+  imageGenerationModelOption,
+  resolveImageGenerationModel,
+  type ImageGenerationModelId,
+} from '@/services/imageGenerationModels';
+import { IMAGE_NODE_INPUT_HANDLE_ID } from '@/utils/mediaNodeHandles';
 import { FILM_INPUT_HANDLE_ID, FILM_OUTPUT_HANDLE_ID } from '@/store/slices/aiFilmmakingStore';
 import { useStudioStore } from '@/store/useStudioStore';
+import { useStudioGraphContentNodes } from '@/hooks/useStudioGraphContent';
 import type {
   NodeKind,
   StoryboardGridImagePage,
@@ -47,6 +54,7 @@ import type {
 type FilmNodeType = 'aiFilmCharacter' | 'aiFilmStoryboard' | 'aiFilmVideoPrompt';
 type FilmNodeKind = Extract<NodeKind, 'film_character_node' | 'film_storyboard_node' | 'film_video_prompt_node'>;
 type FilmRF = Node<StudioNodeData, FilmNodeType>;
+type StoryboardGridGeneratedPage = StoryboardGridImagePage & { imageDataUrl: string };
 
 const NODE_META: Record<
   FilmNodeKind,
@@ -99,6 +107,15 @@ function textFromData(data: StudioNodeData): string {
   return '';
 }
 
+function hashStoryboardFingerprint(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+}
+
 function videoModeLabel(data: StudioNodeData): string | null {
   if (data.type !== 'film_video_prompt_node') return null;
   const mode = data.output && typeof data.output === 'object' ? (data.output as { videoMode?: unknown }).videoMode : null;
@@ -112,12 +129,16 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
   const pushMessage = useStudioStore((state) => state.pushMessage);
   const patchNodeData = useStudioStore((state) => state.patchNodeData);
   const addImageNode = useStudioStore((state) => state.addImageNode);
+  const removeNodesByIds = useStudioStore((state) => state.removeNodesByIds);
   const onConnect = useStudioStore((state) => state.onConnect);
   const reactFlow = useReactFlow();
-  const nodes = useStudioStore((state) => state.nodes);
+  const nodes = useStudioGraphContentNodes();
   const edges = useStudioStore((state) => state.edges);
   const currentProjectId = useStudioStore((state) => state.currentProjectId);
   const imageAbortRef = useRef<AbortController | null>(null);
+  const storyboardModelMenuRef = useRef<HTMLDivElement>(null);
+  const [storyboardModelMenuOpen, setStoryboardModelMenuOpen] = useState(false);
+  const [storyboardModelMenuPlacement, setStoryboardModelMenuPlacement] = useState<'up' | 'down'>('down');
   const meta = isFilmKind(data.type) ? NODE_META[data.type] : NODE_META.film_video_prompt_node;
   const busy = data.status === 'IN_PROGRESS';
   const imageBusy = data.imageGenerationStatus === 'generating';
@@ -125,8 +146,31 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
   const text = textFromData(data);
   const hasText = Boolean(text);
   const isStoryboardNode = data.type === 'film_storyboard_node';
+  const storyboardOutputImageNodeIds = useMemo(
+    () =>
+      isStoryboardNode
+        ? (data.storyboardOutputImageNodeIds ?? []).filter((nodeId) =>
+            nodes.some(
+              (node) =>
+                node.id === nodeId &&
+                node.type === 'imageNode' &&
+                node.data.generatedFromStoryboardNodeId === id &&
+                Boolean(node.data.imageDataUrl),
+            ),
+          )
+        : [],
+    [data.storyboardOutputImageNodeIds, id, isStoryboardNode, nodes],
+  );
+  const embeddedStoryboardPages = useMemo(
+    () =>
+      (data.storyboardGridImages ?? []).filter(
+        (page): page is StoryboardGridGeneratedPage => Boolean(page.imageDataUrl),
+      ),
+    [data.storyboardGridImages],
+  );
   const hasImage =
-    isStoryboardNode && Boolean(data.storyboardGridImages?.length || data.imageDataUrl);
+    isStoryboardNode &&
+    Boolean(storyboardOutputImageNodeIds.length || embeddedStoryboardPages.length || data.imageDataUrl);
   const modeLabel = videoModeLabel(data);
   const connectedStoryboardSource = useMemo(
     () =>
@@ -182,22 +226,45 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
   );
   const referenceSignature = useMemo(
     () =>
-      storyboardReferenceContext.references
-        .map((reference) =>
-          [
-            reference.imageNodeId,
-            reference.name,
-            reference.kind,
-            reference.entityId ?? '',
-            reference.dataUrl?.length ?? 0,
-          ].join(':'),
-        )
-        .join('|'),
+      hashStoryboardFingerprint(
+        storyboardReferenceContext.references
+          .map((reference) =>
+            [
+              reference.imageNodeId,
+              reference.name,
+              reference.kind,
+              reference.entityId ?? '',
+              reference.dataUrl ? hashStoryboardFingerprint(reference.dataUrl) : '',
+            ].join(':'),
+          )
+          .join('|'),
+      ),
     [storyboardReferenceContext.references],
   );
   const storyboardPageCount = Math.ceil(storyboardSource.shots.length / STORYBOARD_GRID_MAX_PANELS);
   const imageActionLabel = storyboardGridActionLabel(storyboardSource.shots.length);
   const selectedStoryboardAspectRatio = normalizeStoryboardAspectRatio(data.film_storyboard_aspect_ratio);
+  const selectedStoryboardModel = resolveImageGenerationModel(data.imageGenerationSelectedModel);
+  const selectedStoryboardModelOption = imageGenerationModelOption(selectedStoryboardModel);
+  const canSwitchStoryboardModel = STORYBOARD_GRID_IMAGE_MODELS.length > 1;
+  const storyboardBusinessReferenceLimit = Math.max(0, STORYBOARD_REFERENCE_MAX_IMAGES - 1);
+  const storyboardSkills = useMemo(
+    () => (isStoryboardNode ? listSkillsInFolder('storyboard') : []),
+    [isStoryboardNode],
+  );
+  const selectedStoryboardSkillId = isStoryboardNode
+    ? normalizeFilmStoryboardSkillId(data.film_storyboard_skill_id)
+    : DEFAULT_STORYBOARD_SKILL_ID;
+  const effectiveStoryboardSkillId = storyboardSkills.some((skill) => skill.id === selectedStoryboardSkillId)
+    ? selectedStoryboardSkillId
+    : normalizeFilmStoryboardSkillId(storyboardSkills[0]?.id);
+  const storyboardInstructionSignature = useMemo(
+    () =>
+      hashStoryboardFingerprint(
+        [effectiveStoryboardSkillId, data.raw_text?.trim() ?? ''].join('\u001f'),
+      ),
+    [data.raw_text, effectiveStoryboardSkillId],
+  );
   const storyboardImageStale = useMemo(() => {
     if (!data.storyboardGridImages?.length) return false;
     const currentSignature = storyboardSource.shotSources
@@ -211,29 +278,42 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
       currentSignature !== generatedSignature ||
       (data.imageGenerationReferenceSignature ?? '') !== referenceSignature ||
       (data.imageGenerationPromptSignature ?? '') !== storyboardPromptResolution.signature ||
-      data.imageGenerationAspectRatio !== selectedStoryboardAspectRatio
+      (data.imageGenerationInstructionSignature ?? '') !== storyboardInstructionSignature ||
+      data.imageGenerationAspectRatio !== selectedStoryboardAspectRatio ||
+      (data.imageGenerationModel && data.imageGenerationModel !== selectedStoryboardModel)
     );
   }, [
     data.imageGenerationAspectRatio,
+    data.imageGenerationModel,
+    data.imageGenerationInstructionSignature,
     data.imageGenerationReferenceSignature,
     data.imageGenerationPromptSignature,
     data.storyboardGridImages,
     referenceSignature,
     selectedStoryboardAspectRatio,
+    selectedStoryboardModel,
+    storyboardInstructionSignature,
     storyboardPromptResolution.signature,
     storyboardSource.shotSources,
   ]);
-  const storyboardSkills = useMemo(
-    () => (isStoryboardNode ? listSkillsInFolder('storyboard') : []),
-    [isStoryboardNode],
-  );
-  const selectedStoryboardSkillId = isStoryboardNode
-    ? normalizeFilmStoryboardSkillId(data.film_storyboard_skill_id)
-    : DEFAULT_STORYBOARD_SKILL_ID;
-  const effectiveStoryboardSkillId = storyboardSkills.some((skill) => skill.id === selectedStoryboardSkillId)
-    ? selectedStoryboardSkillId
-    : normalizeFilmStoryboardSkillId(storyboardSkills[0]?.id);
   useEffect(() => () => imageAbortRef.current?.abort(), []);
+  useEffect(() => {
+    if (!storyboardModelMenuOpen) return;
+    const closeOnPointerDown = (event: PointerEvent) => {
+      if (!storyboardModelMenuRef.current?.contains(event.target as globalThis.Node)) {
+        setStoryboardModelMenuOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setStoryboardModelMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOnPointerDown);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnPointerDown);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [storyboardModelMenuOpen]);
 
   const onRun = useCallback(() => {
     if (busy) {
@@ -279,6 +359,36 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
     },
     [id, patchNodeData, pushMessage],
   );
+
+  const selectStoryboardModel = useCallback(
+    (model: ImageGenerationModelId) => {
+      const nextModel = resolveImageGenerationModel(model);
+      const option = imageGenerationModelOption(nextModel);
+      patchNodeData(
+        id,
+        { imageGenerationSelectedModel: nextModel, generation_error: undefined },
+        false,
+      );
+      pushMessage({
+        role: 'system',
+        text: `影视分镜图片模型已切换为：${option.label}。`,
+        nodeId: id,
+      });
+      setStoryboardModelMenuOpen(false);
+    },
+    [id, patchNodeData, pushMessage],
+  );
+
+  const toggleStoryboardModelMenu = useCallback(() => {
+    setStoryboardModelMenuOpen((open) => {
+      if (!open) {
+        const triggerRect = storyboardModelMenuRef.current?.getBoundingClientRect();
+        const availableBelow = triggerRect ? window.innerHeight - triggerRect.bottom : window.innerHeight;
+        setStoryboardModelMenuPlacement(availableBelow < 340 ? 'up' : 'down');
+      }
+      return !open;
+    });
+  }, []);
 
   const saveReferenceBindings = useCallback(
     (imageNodeId: string, changes: Partial<StoryboardReferenceBinding>) => {
@@ -355,6 +465,9 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
 
     const skill = getSkillById(effectiveStoryboardSkillId);
     const extraInstruction = [
+      data.raw_text?.trim()
+        ? `用户已生成或编辑的宫格导演提示词（优先执行，但不得覆盖镜头数量、顺序、画幅和参考图硬约束）：\n${data.raw_text.trim().slice(0, 8000)}`
+        : '',
       skill?.system_instruction ? `分镜风格：${skill.system_instruction.slice(0, 6000)}` : '',
     ]
       .filter(Boolean)
@@ -376,29 +489,28 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
     );
     pushMessage({
       role: 'system',
-      text: `正在把 ${storyboardSource.shots.length} 个镜头${promptOnlyStoryboardMode ? '（来自提示词节点）' : storyboardPromptSource.sourceNodeIds.length ? `及 ${storyboardPromptResolution.matchedCount} 条已匹配 Prompt` : ''}合并为 ${sourcePages.length} 张 ${selectedStoryboardAspectRatio} 分镜宫格；每页只调用一次 image2，不做后期切割……`,
+      text: `正在把 ${storyboardSource.shots.length} 个镜头${promptOnlyStoryboardMode ? '（来自提示词节点）' : storyboardPromptSource.sourceNodeIds.length ? `及 ${storyboardPromptResolution.matchedCount} 条已匹配 Prompt` : ''}合并为 ${sourcePages.length} 张 ${selectedStoryboardAspectRatio} 分镜宫格；每页只调用一次 ${selectedStoryboardModelOption.label}，不做后期切割……`,
       nodeId: id,
     });
 
     try {
-      const generatedPages: StoryboardGridImagePage[] = [];
+      const generatedPages: StoryboardGridGeneratedPage[] = [];
       let nativeSizeFallbackCount = 0;
       for (let pageIndex = 0; pageIndex < sourcePages.length; pageIndex += 1) {
         const pageSources = sourcePages[pageIndex];
         const pageReferences = selectStoryboardReferencesForShots(
           storyboardReferenceContext.references,
           pageSources.map((source) => source.shot),
-          STORYBOARD_REFERENCE_MAX_IMAGES,
+          storyboardBusinessReferenceLimit,
         );
         const preparedReferences = await prepareStoryboardReferenceImages(
           pageReferences,
-          STORYBOARD_REFERENCE_MAX_IMAGES,
+          storyboardBusinessReferenceLimit,
         );
-        const referenceInstruction = buildStoryboardReferenceInstruction(pageReferences, 1);
+        const referenceInstruction = buildStoryboardReferenceInstruction(pageReferences, 2);
         const panelReferenceInstructions = pageSources.map((source) =>
-          buildStoryboardPanelReferenceInstruction(source.shot, pageReferences),
+          buildStoryboardPanelReferenceInstruction(source.shot, pageReferences, 2),
         );
-        const useLayoutReference = preparedReferences.length === 0;
         const pagePromptMatches = storyboardPromptResolution.matches.slice(
           pageIndex * STORYBOARD_GRID_MAX_PANELS,
           pageIndex * STORYBOARD_GRID_MAX_PANELS + pageSources.length,
@@ -414,8 +526,8 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
             canvas: isPortrait ? 'portrait' : 'landscape',
             panelAspectRatio: selectedStoryboardAspectRatio,
             referenceInstruction,
-            hasLayoutReference: useLayoutReference,
-            layoutReferenceIndex: useLayoutReference ? 1 : undefined,
+            hasLayoutReference: true,
+            layoutReferenceIndex: 1,
             panelPrompts: pagePromptMatches.map((match) => match.visualPrompt || undefined),
             panelReferenceInstructions,
           },
@@ -424,7 +536,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
           pageSources.length,
           selectedStoryboardAspectRatio,
         );
-        const requestReferences = useLayoutReference ? [layoutReference] : preparedReferences;
+        const requestReferences = [layoutReference, ...preparedReferences];
         let rawResult;
         let usedFallbackSize = false;
         try {
@@ -434,12 +546,13 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
             abortController.signal,
             preferredSize,
             requestReferences,
+            selectedStoryboardModel,
           );
         } catch (error) {
           const message = error instanceof Error ? error.message : '';
           if (!/(?:HTTP\s*(?:400|422)|尺寸|size|unsupported|不支持)/iu.test(message)) throw error;
           if (pageSources.length === 6) {
-            throw new Error(`当前 image2 渠道不支持六宫格专属尺寸 ${preferredSize}，已停止生成，不会改用错误比例的默认画布。`);
+            throw new Error(`当前 ${selectedStoryboardModelOption.label} 渠道不支持六宫格专属尺寸 ${preferredSize}，已停止生成，不会改用错误比例的默认画布。`);
           }
           rawResult = await generateStoryboardGridImage(
             prompt,
@@ -447,6 +560,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
             abortController.signal,
             fallbackSize,
             requestReferences,
+            selectedStoryboardModel,
           );
           usedFallbackSize = true;
           nativeSizeFallbackCount += 1;
@@ -458,7 +572,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
           const ratioError = Math.abs(actualCanvasRatio / expectedCanvasRatio - 1);
           if (ratioError > 0.03) {
             throw new Error(
-              `image2 未按六宫格专属尺寸返回图片（实际 ${measuredResult.width}×${measuredResult.height}），已拒绝显示错误比例结果。`,
+              `${selectedStoryboardModelOption.label} 未按六宫格专属尺寸返回图片（实际 ${measuredResult.width}×${measuredResult.height}），已拒绝显示错误比例结果。`,
             );
           }
         }
@@ -551,7 +665,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
             imageDisplayMode: 'storyboard-output',
             generatedFromStoryboardNodeId: id,
             generatedStoryboardPageIndex: page.pageIndex,
-            imageAnalysisSummary: `${page.panelCount} 个镜头 · 目标 ${selectedStoryboardAspectRatio} · 实际 ${page.size.replace('x', '×')} · image2 合并提示词单次生成`,
+            imageAnalysisSummary: `${page.panelCount} 个镜头 · 目标 ${selectedStoryboardAspectRatio} · 实际 ${page.size.replace('x', '×')} · ${selectedStoryboardModelOption.label} 合并提示词单次生成`,
             imageGenerationModel: page.model,
             imageGenerationSourceShotIds: page.panels.map((panel) => panel.shotId),
             imageGenerationSourceNodeIds: storyboardSource.sourceNodeIds,
@@ -559,6 +673,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
             imageGenerationReferenceCount: page.referenceImageCount,
             imageGenerationReferenceLabels: page.referenceLabels,
             imageGenerationPromptSignature: storyboardPromptResolution.signature,
+            imageGenerationInstructionSignature: storyboardInstructionSignature,
             imageGenerationPromptSourceNodeIds: storyboardPromptSource.sourceNodeIds,
             imageGenerationPromptMatchedCount: storyboardPromptResolution.matchedCount,
             imageGenerationAspectRatio: selectedStoryboardAspectRatio,
@@ -593,10 +708,24 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
         }
         return imageNodeId;
       });
+      const obsoleteOutputNodeIds = useStudioStore
+        .getState()
+        .nodes.filter(
+          (node) =>
+            node.type === 'imageNode' &&
+            node.data.generatedFromStoryboardNodeId === id &&
+            !outputImageNodeIds.includes(node.id),
+        )
+        .map((node) => node.id);
+      if (obsoleteOutputNodeIds.length) removeNodesByIds(obsoleteOutputNodeIds);
+      const persistedPageMetadata: StoryboardGridImagePage[] = generatedPages.map((page) => ({
+        ...page,
+        imageDataUrl: undefined,
+      }));
       patchNodeData(
         id,
         {
-          imageDataUrl: firstPage.imageDataUrl,
+          imageDataUrl: undefined,
           imageMimeType: 'image/jpeg',
           imageFileName: `film-storyboard-grid-${now}.jpg`,
           imageWidth: firstPage.width,
@@ -609,6 +738,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
           imageGenerationReferenceCount: firstPage.referenceImageCount,
           imageGenerationReferenceLabels: firstPage.referenceLabels,
           imageGenerationPromptSignature: storyboardPromptResolution.signature,
+          imageGenerationInstructionSignature: storyboardInstructionSignature,
           imageGenerationPromptSourceNodeIds: storyboardPromptSource.sourceNodeIds,
           imageGenerationPromptMatchedCount: storyboardPromptResolution.matchedCount,
           imageGenerationAspectRatio: selectedStoryboardAspectRatio,
@@ -616,7 +746,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
           imageGenerationStatus: 'idle',
           imageGenerationCompletedPages: undefined,
           imageGenerationTotalPages: undefined,
-          storyboardGridImages: generatedPages,
+          storyboardGridImages: persistedPageMetadata,
           storyboardOutputImageNodeIds: outputImageNodeIds,
           generation_error: undefined,
           status: 'APPROVED',
@@ -648,7 +778,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
       );
       pushMessage({
         role: 'system',
-        text: `已将 ${storyboardSource.shots.length} 个镜头${storyboardPromptSource.sourceNodeIds.length ? `与 ${storyboardPromptResolution.matchedCount} 条 Prompt` : ''}合并生成 ${generatedPages.length} 张分镜宫格，并输出到右侧 ${outputImageNodeIds.length} 个独立图片节点；每页仅调用一次 image2，未做后期切割${nativeSizeFallbackCount ? `；${nativeSizeFallbackCount} 页因渠道尺寸限制保留原生画幅` : ''}${firstPage.referenceImageCount ? `；image2 已接收 ${firstPage.referenceImageCount} 张命名参考图` : ''}。`,
+        text: `已将 ${storyboardSource.shots.length} 个镜头${storyboardPromptSource.sourceNodeIds.length ? `与 ${storyboardPromptResolution.matchedCount} 条 Prompt` : ''}合并生成 ${generatedPages.length} 张分镜宫格，并输出到右侧 ${outputImageNodeIds.length} 个独立图片节点；每页仅调用一次 ${selectedStoryboardModelOption.label}，未做后期切割${nativeSizeFallbackCount ? `；${nativeSizeFallbackCount} 页因渠道尺寸限制保留原生画幅` : ''}${firstPage.referenceImageCount ? `；${selectedStoryboardModelOption.label} 已接收 ${firstPage.referenceImageCount} 张命名参考图` : ''}。`,
         nodeId: id,
       });
       window.requestAnimationFrame(() => {
@@ -683,6 +813,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
     addImageNode,
     currentProjectId,
     data.output,
+    data.raw_text,
     effectiveStoryboardSkillId,
     id,
     imageBusy,
@@ -692,7 +823,12 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
     pushMessage,
     reactFlow,
     referenceSignature,
+    removeNodesByIds,
     selectedStoryboardAspectRatio,
+    selectedStoryboardModel,
+    selectedStoryboardModelOption.label,
+    storyboardInstructionSignature,
+    storyboardBusinessReferenceLimit,
     storyboardPromptResolution,
     storyboardPromptSource,
     storyboardSource,
@@ -732,17 +868,17 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
         </span>
       </header>
       <section className={`ai-film-node__body ${hasText || hasImage ? 'ai-film-node__body--filled' : ''}`}>
-        {isStoryboardNode && data.storyboardOutputImageNodeIds?.length ? (
+        {isStoryboardNode && storyboardOutputImageNodeIds.length ? (
           <div className="ai-film-node__output-card">
             <span className="ai-film-node__output-icon" aria-hidden>↗</span>
             <div>
               <strong>分镜图片已输出</strong>
-              <span>右侧 {data.storyboardOutputImageNodeIds.length} 个独立图片节点</span>
+              <span>右侧 {storyboardOutputImageNodeIds.length} 个独立图片节点</span>
             </div>
           </div>
-        ) : isStoryboardNode && data.storyboardGridImages?.length ? (
+        ) : isStoryboardNode && embeddedStoryboardPages.length ? (
           <div className="ai-film-node__grid-gallery">
-            {data.storyboardGridImages.map((page) => (
+            {embeddedStoryboardPages.map((page) => (
               <figure key={page.id} className="ai-film-node__grid-preview">
                 <img src={page.imageDataUrl} alt={`影视分镜宫格第 ${page.pageIndex} 页`} />
                 <figcaption>
@@ -783,6 +919,63 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
                 <option value="9:16">9:16 竖屏</option>
               </select>
             </label>
+            <div className="ai-film-node__skill ai-film-node__model-picker">
+              <span>图片模型</span>
+              <div
+                ref={storyboardModelMenuRef}
+                className={`image-table-node__model-switcher nodrag nowheel ${storyboardModelMenuOpen ? 'image-table-node__model-switcher--open' : ''} image-table-node__model-switcher--${storyboardModelMenuPlacement}`}
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                <button
+                  type="button"
+                  className="image-table-node__model-trigger"
+                  aria-label="影视分镜图片模型"
+                  aria-haspopup={canSwitchStoryboardModel ? 'listbox' : undefined}
+                  aria-expanded={canSwitchStoryboardModel ? storyboardModelMenuOpen : undefined}
+                  title={`切换图片模型：${selectedStoryboardModelOption.label}`}
+                  onClick={canSwitchStoryboardModel ? toggleStoryboardModelMenu : undefined}
+                  disabled={anyBusy}
+                >
+                  <span className="image-table-node__model-trigger-copy">
+                    <strong>{selectedStoryboardModelOption.label}</strong>
+                    <small>{selectedStoryboardModelOption.badge}</small>
+                  </span>
+                  <span className="image-table-node__model-chevron" aria-hidden>
+                    {canSwitchStoryboardModel ? (storyboardModelMenuOpen ? '收起' : '切换') : '固定'}
+                  </span>
+                </button>
+                {canSwitchStoryboardModel && storyboardModelMenuOpen ? (
+                  <div className="image-table-node__model-menu" role="listbox" aria-label="选择影视分镜图片模型">
+                    <div className="image-table-node__model-menu-head">
+                      <strong>图片模型</strong>
+                      <span>影视分镜宫格</span>
+                    </div>
+                    {STORYBOARD_GRID_IMAGE_MODELS.map((model) => {
+                      const active = model.id === selectedStoryboardModel;
+                      return (
+                        <button
+                          key={model.id}
+                          type="button"
+                          role="option"
+                          aria-selected={active}
+                          className={`image-table-node__model-option ${active ? 'image-table-node__model-option--active' : ''}`}
+                          onClick={() => selectStoryboardModel(model.id)}
+                        >
+                          <span className="image-table-node__model-option-copy">
+                            <span className="image-table-node__model-option-title">
+                              <strong>{model.label}</strong>
+                              <em>{model.badge}</em>
+                            </span>
+                            <small>{model.description}</small>
+                          </span>
+                          <span className="image-table-node__model-latency">{model.latencyLabel}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
+            </div>
             <label className="ai-film-node__skill">
               <span>分镜 Skill</span>
               <select
@@ -805,7 +998,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
                   <b>
                     {Math.min(
                       storyboardReferenceContext.references.filter((reference) => reference.dataUrl).length,
-                      STORYBOARD_REFERENCE_MAX_IMAGES,
+                      storyboardBusinessReferenceLimit,
                     )}
                     /{storyboardReferenceContext.references.length}
                   </b>
@@ -866,16 +1059,16 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
                 </div>
                 <p>
                   {storyboardReferenceContext.entities.length
-                    ? `已从${storyboardReferenceContext.entitySource === 'connected' ? '连入的分镜/分解表' : '当前项目分解表'}识别 ${storyboardReferenceContext.entities.length} 个角色、场景或道具；生成时会把原图传给 image2。`
+                    ? `已从${storyboardReferenceContext.entitySource === 'connected' ? '连入的分镜/分解表' : '当前项目分解表'}识别 ${storyboardReferenceContext.entities.length} 个角色、场景或道具；生成时会把原图传给 ${selectedStoryboardModelOption.label}。`
                     : '尚未识别到角色、场景或道具。请确认分镜表包含场景、角色、道具列，或先运行剧本拆解。'}
-                  {storyboardReferenceContext.references.length > STORYBOARD_REFERENCE_MAX_IMAGES
-                    ? ` 单次最多读取前 ${STORYBOARD_REFERENCE_MAX_IMAGES} 张。`
+                  {storyboardReferenceContext.references.length > storyboardBusinessReferenceLimit
+                    ? ` 单次最多读取 ${storyboardBusinessReferenceLimit} 张业务参考图，并固定保留 1 张宫格布局参考图。`
                     : ''}
                   {storyboardReferenceContext.missingImageCount
                     ? ` 有 ${storyboardReferenceContext.missingImageCount} 个图片节点尚未上传图片。`
                     : ''}
                   {typeof data.imageGenerationReferenceCount === 'number'
-                    ? ` 上次出图已确认传入 image2：${data.imageGenerationReferenceCount} 张。`
+                    ? ` 上次出图已确认传入 ${data.imageGenerationModel ? imageGenerationModelOption(resolveImageGenerationModel(data.imageGenerationModel)).label : selectedStoryboardModelOption.label}：${data.imageGenerationReferenceCount} 张。`
                     : ''}
                   {data.imageGenerationReferenceLabels?.length
                     ? ` 实际顺序：${data.imageGenerationReferenceLabels

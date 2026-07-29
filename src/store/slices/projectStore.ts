@@ -5,6 +5,7 @@ import {
   rebindStudioNodeRuntimeHandlers,
 } from '@/utils/studioNodePersistence';
 import { removeDeprecatedScriptNodes } from '@/utils/deprecatedScriptNodes';
+import { SHOT_LIST_LINK_HANDLE_ID } from '@/utils/shotListWire';
 import type { StudioState } from '../useStudioStore';
 
 type StudioSet = (
@@ -66,6 +67,21 @@ export function createProjectStoreSlice(
     },
 
     hydrateProject: (nodes: StudioRFNode[], edges: Edge[], opts) => {
+      const migratedStoryboardStates = nodes.filter(
+        (node) =>
+          node.type === 'department' &&
+          node.data.type === 'storyboard' &&
+          (
+            node.data.status === 'WAITING_REVIEW' ||
+            node.data.status === 'REVIEWED' ||
+            node.data.status === 'REJECTED' ||
+            node.data.review_result != null ||
+            node.data.ai_review_feedback != null ||
+            node.data.leader_review_suggested_pass != null ||
+            node.data.generation_phase != null ||
+            node.data.streaming_preview != null
+          ),
+      ).length;
       const normalized = nodes.map(normalizeRestoredStudioNode);
       const filtered = removeDeprecatedScriptNodes(normalized, edges);
       const api = {
@@ -93,12 +109,39 @@ export function createProjectStoreSlice(
         currentProjectName: deps.nextProjectName(opts?.projectName),
         workflowAgentSession: null,
       });
+      const repairedShotLists: string[] = [];
+      for (const node of cleaned) {
+        if (
+          node.type !== 'department'
+          || node.data.type !== 'storyboard'
+          || node.data.status !== 'APPROVED'
+          || !node.data.output
+        ) {
+          continue;
+        }
+        const hasCanonicalShotListChild = get().edges.some(
+          (edge) =>
+            edge.source === node.id
+            && edge.sourceHandle === SHOT_LIST_LINK_HANDLE_ID
+            && get().nodes.some(
+              (candidate) => candidate.id === edge.target && candidate.type === 'shotList',
+            ),
+        );
+        const childId = get().ensureShotListForStoryboard(node.id);
+        if (childId && !hasCanonicalShotListChild) repairedShotLists.push(childId);
+      }
       get().reconcileShotListGraphBindings();
       get().pushMessage({
         role: 'broadcast',
         text:
           opts?.broadcastText ??
-          `已恢复项目，包含 ${nodes.length} 个节点、${edges.length} 条连线。`,
+          `已恢复项目，包含 ${nodes.length} 个节点、${edges.length} 条连线。`
+          + (repairedShotLists.length
+            ? ` 已自动补齐 ${repairedShotLists.length} 个分解表节点。`
+            : '')
+          + (migratedStoryboardStates
+            ? ` 已清理 ${migratedStoryboardStates} 个分镜节点的旧审核状态。`
+            : ''),
       });
     },
   };

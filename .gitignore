@@ -13,6 +13,7 @@ dist/
 .vite/
 .vercel/
 coverage/
+.data/
 
 # Logs
 *.log
