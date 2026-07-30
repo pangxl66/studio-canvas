@@ -32,3 +32,16 @@ test('hosted mode never treats a remembered email as an authenticated session', 
   assert.match(authClient, /stored\?\.accessToken\?\.startsWith\('test-invite\.'\)/);
   assert.doesNotMatch(authClient, /return stored \? buildMockAuthSnapshot/);
 });
+
+test('test-invite sessions are refreshed with the server instead of reusing stale tokens', () => {
+  const authClient = read('src/services/authClient.ts');
+  const authGate = read('src/components/AuthGate.tsx');
+  const adminClient = read('src/services/adminCreditService.ts');
+
+  assert.match(authClient, /export async function restoreAuthSnapshot/);
+  assert.match(authClient, /signInWithTestInvite\(email, ''\)/);
+  assert.doesNotMatch(authClient, /if \(normalizedEmail && activatedAuth\)/);
+  assert.match(authGate, /restoreAuthSnapshot\(\)/);
+  assert.match(adminClient, /response\.status !== 401/);
+  assert.match(adminClient, /signInWithTestInvite\(session\.user\.email, ''\)/);
+});

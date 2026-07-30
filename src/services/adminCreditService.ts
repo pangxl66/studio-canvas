@@ -1,4 +1,9 @@
-import { getAuthSnapshot, isSaasAuthEnabled, isSaasMockEnabled } from '@/services/authClient';
+import {
+  getAuthSnapshot,
+  isSaasAuthEnabled,
+  isSaasMockEnabled,
+  signInWithTestInvite,
+} from '@/services/authClient';
 
 export type AdminCreditUsageEvent = {
   createdAt: string | null;
@@ -105,6 +110,27 @@ async function getAdminHeaders(): Promise<Record<string, string>> {
   };
 }
 
+function mergeAdminHeaders(init: RequestInit, adminHeaders: Record<string, string>): RequestInit {
+  const headers = new Headers(init.headers);
+  for (const [name, value] of Object.entries(adminHeaders)) headers.set(name, value);
+  return { ...init, headers };
+}
+
+async function fetchAdmin(input: string, init: RequestInit = {}): Promise<Response> {
+  const response = await fetch(input, mergeAdminHeaders(init, await getAdminHeaders()));
+  if (response.status !== 401 || isLoopbackAdmin()) return response;
+
+  const { session } = await getAuthSnapshot();
+  if (!session?.access_token?.startsWith('test-invite.') || !session.user?.email) return response;
+
+  const refreshedSession = await signInWithTestInvite(session.user.email, '');
+  if (!refreshedSession?.access_token) return response;
+  return fetch(
+    input,
+    mergeAdminHeaders(init, { Authorization: `Bearer ${refreshedSession.access_token}` }),
+  );
+}
+
 async function parseJsonResponse<T>(response: Response): Promise<T> {
   const payload = (await response.json().catch(() => null)) as { error?: { message?: string } } | T | null;
   if (!response.ok) {
@@ -120,33 +146,24 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
 }
 
 export async function fetchAdminCreditDetails(email: string): Promise<AdminCreditDetails> {
-  const headers = await getAdminHeaders();
-  const response = await fetch(`/api/admin/credits?email=${encodeURIComponent(email.trim())}`, {
-    headers,
-  });
+  const response = await fetchAdmin(`/api/admin/credits?email=${encodeURIComponent(email.trim())}`);
   return parseJsonResponse<AdminCreditDetails>(response);
 }
 
 export async function fetchAdminUsageEvents(email = '', limit = 80): Promise<AdminUsageResponse> {
-  const headers = await getAdminHeaders();
   const params = new URLSearchParams();
   if (email.trim()) params.set('email', email.trim());
   params.set('limit', String(limit));
-  const response = await fetch(`/api/admin/usage?${params.toString()}`, {
-    headers,
-  });
+  const response = await fetchAdmin(`/api/admin/usage?${params.toString()}`);
   return parseJsonResponse<AdminUsageResponse>(response);
 }
 
 export async function fetchAdminUsers(email = '', limit = 80, page = 1): Promise<AdminUsersResponse> {
-  const headers = await getAdminHeaders();
   const params = new URLSearchParams();
   if (email.trim()) params.set('email', email.trim());
   params.set('limit', String(limit));
   params.set('page', String(page));
-  const response = await fetch(`/api/admin/users?${params.toString()}`, {
-    headers,
-  });
+  const response = await fetchAdmin(`/api/admin/users?${params.toString()}`);
   return parseJsonResponse<AdminUsersResponse>(response);
 }
 
@@ -156,11 +173,9 @@ export async function updateAdminCredits(
   amount?: number,
   reason?: string,
 ): Promise<AdminCreditDetails> {
-  const headers = await getAdminHeaders();
-  const response = await fetch('/api/admin/credits', {
+  const response = await fetchAdmin('/api/admin/credits', {
     body: JSON.stringify({ action, amount, email: email.trim(), reason: reason?.trim() || undefined }),
     headers: {
-      ...headers,
       'content-type': 'application/json',
     },
     method: 'POST',

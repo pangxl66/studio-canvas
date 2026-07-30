@@ -12,6 +12,7 @@ import {
   isSaasMockEnabled,
   isSupabaseConfigured,
   isTestInviteAuthEnabled,
+  restoreAuthSnapshot,
   sendLoginCode,
   signInWithTestInvite,
   signOut,
@@ -87,7 +88,7 @@ export function AuthGate({ children }: AuthGateProps) {
         });
     };
 
-    getAuthSnapshot()
+    restoreAuthSnapshot()
       .then((snapshot) => {
         if (isMounted) setSession(snapshot.session);
       })

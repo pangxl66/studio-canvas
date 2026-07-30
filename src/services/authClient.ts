@@ -155,6 +155,16 @@ function writeActivatedTestInviteAuth(email: string, accessToken?: string, refre
   window.localStorage.setItem(ACTIVATED_TEST_INVITE_AUTH_KEY, JSON.stringify(stored));
 }
 
+function forgetActivatedTestInviteAuth(email: string): void {
+  if (typeof window === 'undefined') return;
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) return;
+  const stored = readActivatedTestInviteAuths();
+  if (!stored[normalizedEmail]) return;
+  delete stored[normalizedEmail];
+  window.localStorage.setItem(ACTIVATED_TEST_INVITE_AUTH_KEY, JSON.stringify(stored));
+}
+
 function writeStoredLocalAuth(email: string, accessToken?: string, refreshToken?: string): void {
   const normalizedEmail = normalizeEmail(email);
   window.localStorage.setItem(MOCK_AUTH_KEY, JSON.stringify({ email: normalizedEmail, accessToken, refreshToken }));
@@ -224,6 +234,16 @@ export async function getAuthSnapshot(): Promise<AuthSnapshot> {
   return { session: data.session, user: data.session?.user ?? null };
 }
 
+export async function restoreAuthSnapshot(): Promise<AuthSnapshot> {
+  const snapshot = await getAuthSnapshot();
+  if (!snapshot.session?.access_token?.startsWith('test-invite.')) return snapshot;
+
+  const email = normalizeEmail(snapshot.user?.email ?? '');
+  if (!email) return { session: null, user: null };
+  const session = await signInWithTestInvite(email, '');
+  return { session, user: session?.user ?? null };
+}
+
 export async function getTestInviteStatus(): Promise<boolean> {
   try {
     const response = await fetch('/api/auth/test-invite', { headers: { accept: 'application/json' } });
@@ -260,16 +280,6 @@ export async function signInWithTestInvite(email: string, inviteCode: string): P
   const normalizedEmail = normalizeEmail(email);
   const normalizedCode = normalizeInviteCode(inviteCode);
 
-  const activatedAuth = readActivatedTestInviteAuth(normalizedEmail);
-  if (normalizedEmail && activatedAuth) {
-    writeStoredLocalAuth(
-      activatedAuth.email || normalizedEmail,
-      activatedAuth.accessToken,
-      activatedAuth.refreshToken || `test-invite-refresh-${Date.now()}`,
-    );
-    return getLocalAuthSnapshot().session;
-  }
-
   if (!normalizedEmail) throw new Error('请输入邮箱。');
 
   const response = await fetch('/api/auth/test-invite', {
@@ -279,6 +289,9 @@ export async function signInWithTestInvite(email: string, inviteCode: string): P
   });
   const data = await response.json().catch(() => null);
   if (!response.ok) {
+    if (!normalizedCode && [400, 401, 404].includes(response.status)) {
+      forgetActivatedTestInviteAuth(normalizedEmail);
+    }
     throw new Error(data?.error?.message || '测试邀请码验证失败。');
   }
 
