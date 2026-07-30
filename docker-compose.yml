@@ -4,6 +4,7 @@ services:
       context: .
       args:
         VITE_SAAS_MOCK: ${VITE_SAAS_MOCK:-false}
+        VITE_TEST_INVITE_AUTH: ${VITE_TEST_INVITE_AUTH:-false}
         VITE_SUPABASE_URL: ${VITE_SUPABASE_URL}
         VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY}
         VITE_LLM_PROXY_URL: ${VITE_LLM_PROXY_URL:-/api/llm/chat}

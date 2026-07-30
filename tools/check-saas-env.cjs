@@ -52,6 +52,9 @@ const config = readConfig();
 const hasEnvLocal = fs.existsSync(envPath);
 const mockMode = String(config.VITE_SAAS_MOCK ?? '').trim().toLowerCase();
 const configuredMock = mockMode === '1' || mockMode === 'true' || mockMode === 'yes';
+const inviteMode = ['1', 'true', 'yes'].includes(
+  String(config.VITE_TEST_INVITE_AUTH ?? '').trim().toLowerCase(),
+);
 const isMock = configuredMock && !forceProduction;
 
 console.log('Studio Canvas SaaS env check');
@@ -78,9 +81,13 @@ if (!isMock && hasValue(config, 'VITE_LLM_BASE_URL')) {
 
 for (const key of requiredPublic) {
   if (
-    isMock &&
-    (key === 'VITE_SUPABASE_URL' || key === 'VITE_SUPABASE_ANON_KEY' || key === 'VITE_LLM_PROXY_URL')
+    (isMock || inviteMode) &&
+    (key === 'VITE_SUPABASE_URL' || key === 'VITE_SUPABASE_ANON_KEY')
   ) {
+    printCheck(key, true, `skipped in ${isMock ? 'mock' : 'test-invite'} mode`);
+    continue;
+  }
+  if (isMock && key === 'VITE_LLM_PROXY_URL') {
     printCheck(key, true, 'skipped in mock mode');
     continue;
   }
@@ -90,13 +97,21 @@ for (const key of requiredPublic) {
 }
 
 for (const key of requiredServer) {
-  if (isMock && key.startsWith('SUPABASE_')) {
-    printCheck(key, true, 'skipped in mock mode');
+  if ((isMock || inviteMode) && key.startsWith('SUPABASE_')) {
+    printCheck(key, true, `skipped in ${isMock ? 'mock' : 'test-invite'} mode`);
     continue;
   }
   const ok = hasValue(config, key);
   printCheck(key, ok, ok ? 'server-only config present' : 'required by /api routes');
   failed ||= !ok;
+}
+
+if (inviteMode) {
+  for (const key of ['TEST_INVITE_CODES', 'TEST_INVITE_SECRET', 'ADMIN_EMAILS']) {
+    const ok = hasValue(config, key);
+    printCheck(key, ok, ok ? 'test-invite admin config present' : 'required for test-invite production mode');
+    failed ||= !ok;
+  }
 }
 
 const hasUpstream = oneOfServer.some((key) => hasValue(config, key));

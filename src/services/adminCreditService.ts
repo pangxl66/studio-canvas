@@ -87,11 +87,16 @@ async function getAdminHeaders(): Promise<Record<string, string>> {
   if (isLoopbackAdmin()) {
     return {};
   }
+  const { session } = await getAuthSnapshot();
+  if (session?.access_token?.startsWith('test-invite.')) {
+    return {
+      Authorization: `Bearer ${session.access_token}`,
+    };
+  }
   if (!isSaasAuthEnabled() || isSaasMockEnabled()) {
     throw new Error('当前环境未启用管理员数据服务。');
   }
 
-  const { session } = await getAuthSnapshot();
   if (!session?.access_token) {
     throw new Error('请先登录管理员账号。');
   }

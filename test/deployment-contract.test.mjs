@@ -93,6 +93,27 @@ test('local SaaS mock mode does not require a serverless proxy URL', () => {
   );
 });
 
+test('VPS test-invite mode works without Supabase and keeps admin data server-side', () => {
+  const authClient = read('src/services/authClient.ts');
+  const authGate = read('src/components/AuthGate.tsx');
+  const adminClient = read('src/services/adminCreditService.ts');
+  const nodeServer = read('server/index.cjs');
+  const dockerfile = read('Dockerfile');
+  const compose = read('docker-compose.yml');
+  const envExample = read('.env.production.example');
+
+  assert.match(authClient, /VITE_TEST_INVITE_AUTH/);
+  assert.match(authClient, /isTestInviteAuthEnabled\(\)/);
+  assert.match(authGate, /testInviteOnly \? 'invite' : 'email'/);
+  assert.match(adminClient, /access_token\?\.startsWith\('test-invite\.'\)/);
+  assert.match(nodeServer, /if \(auth\.isTestInvite\) \{\s*return auth;/);
+  assert.match(nodeServer, /sendTestInviteAdminUsers\(res, url\)/);
+  assert.match(nodeServer, /sendTestInviteAdminUsage\(res, url\)/);
+  assert.match(dockerfile, /ARG VITE_TEST_INVITE_AUTH=false/);
+  assert.match(compose, /VITE_TEST_INVITE_AUTH: \$\{VITE_TEST_INVITE_AUTH:-false\}/);
+  assert.match(envExample, /VITE_TEST_INVITE_AUTH=true/);
+});
+
 test('Vite development serves the same local API routes as the Node deployment', () => {
   const viteConfig = read('vite.config.ts');
   const nodeServer = read('server/index.cjs');

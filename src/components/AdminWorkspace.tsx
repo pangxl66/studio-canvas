@@ -712,7 +712,7 @@ function SystemPanel({ data }: { data: AdminWorkspaceData }) {
               <Database size={21} weight="duotone" />
               <span>
                 <strong>认证模式</strong>
-                <small>{data.health.authMode === 'test-invite' ? '本地邀请账号' : data.health.authMode}</small>
+                <small>{data.health.authMode === 'test-invite' ? '邀请码账号存储' : data.health.authMode}</small>
               </span>
               <StatusBadge label="已连接" tone="info" />
             </div>
@@ -1085,7 +1085,7 @@ export function AdminWorkspace({ onChanged, onClose }: AdminWorkspaceProps) {
             <span className={`admin-workspace__service-dot ${data.health.ok ? 'is-online' : 'is-offline'}`} />
             <span>
               <strong>{data.health.ok ? '系统运行正常' : '系统需要检查'}</strong>
-              <small>{data.health.authMode === 'test-invite' ? '本地管理模式' : data.health.authMode}</small>
+              <small>{data.health.authMode === 'test-invite' ? '邀请码管理模式' : data.health.authMode}</small>
             </span>
           </div>
           <button type="button" aria-label="返回画布" onClick={onClose}>

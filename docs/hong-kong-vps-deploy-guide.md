@@ -56,15 +56,18 @@ nano .env
 
 ```text
 VITE_SAAS_MOCK=false
-VITE_SUPABASE_URL=/supabase
-VITE_SUPABASE_ANON_KEY=Supabase Publishable key
+VITE_TEST_INVITE_AUTH=true
+VITE_SUPABASE_URL=
+VITE_SUPABASE_ANON_KEY=
 VITE_LLM_PROXY_URL=/api/llm/chat
 VITE_ADMIN_TOOLS=true
 
-SUPABASE_URL=你的 Supabase URL
-SUPABASE_ANON_KEY=Supabase Publishable key
-SUPABASE_SERVICE_ROLE_KEY=Supabase Secret key
+SUPABASE_URL=
+SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_ROLE_KEY=
 ADMIN_EMAILS=你的管理员邮箱
+TEST_INVITE_CODES=你的邀请码
+TEST_INVITE_SECRET=一段独立的高强度随机字符串
 
 LLM_BASE_URL=https://api.openai.com/v1
 LLM_API_KEY=你的模型 API Key
@@ -75,8 +78,9 @@ LLM_DEEP_MODEL=gpt-5.6-terra
 
 不要填写 `VITE_LLM_API_KEY` 或 `VITE_LLM_BASE_URL`，模型密钥只能放在服务端。
 
-这里的 `VITE_SUPABASE_URL=/supabase` 表示浏览器先请求香港服务器，再由香港服务器转发到 Supabase，避免国内浏览器直接访问 `*.supabase.co` 时出现 `Failed to fetch`。
-`ADMIN_EMAILS` 用来控制右上角额度管理入口；多个管理员邮箱可以用英文逗号分隔。
+`VITE_TEST_INVITE_AUTH=true` 会使用服务器 `.data` 目录保存邀请码账号、额度和使用记录，不依赖 Supabase。
+`ADMIN_EMAILS` 用来控制右上角后台入口；多个管理员邮箱可以用英文逗号分隔。
+Docker Compose 已把 `.data` 挂载到宿主机，重建容器后用户和额度数据仍会保留。
 
 ## 6. 启动网站
 

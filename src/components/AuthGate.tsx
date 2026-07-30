@@ -10,6 +10,8 @@ import {
   hasActivatedTestInviteEmail,
   isSaasAuthEnabled,
   isSaasMockEnabled,
+  isSupabaseConfigured,
+  isTestInviteAuthEnabled,
   sendLoginCode,
   signInWithTestInvite,
   signOut,
@@ -46,12 +48,14 @@ function getLoginErrorMessage(error: unknown, fallback: string): string {
 }
 
 export function AuthGate({ children }: AuthGateProps) {
+  const emailAuthEnabled = isSupabaseConfigured() || isSaasMockEnabled();
+  const testInviteOnly = isTestInviteAuthEnabled() && !emailAuthEnabled;
   const [session, setSession] = useState<Session | null>(null);
   const [isLoading, setIsLoading] = useState(isSaasAuthEnabled());
   const [email, setEmail] = useState(() => getRememberedLoginEmail());
   const [verificationCode, setVerificationCode] = useState('');
   const [inviteCode, setInviteCode] = useState('');
-  const [authMode, setAuthMode] = useState<'email' | 'invite'>('email');
+  const [authMode, setAuthMode] = useState<'email' | 'invite'>(testInviteOnly ? 'invite' : 'email');
   const [codeSentTo, setCodeSentTo] = useState('');
   const [sendCooldown, setSendCooldown] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -265,18 +269,20 @@ export function AuthGate({ children }: AuthGateProps) {
           <h1 className="auth-card__title">登录后进入在线工作区</h1>
 
           <div className="auth-card__mode-tabs" role="tablist" aria-label="登录方式">
-            <button
-              aria-selected={authMode === 'email'}
-              className={`auth-card__mode-tab ${authMode === 'email' ? 'is-active' : ''}`}
-              onClick={() => {
-                setAuthMode('email');
-                setMessage('');
-              }}
-              role="tab"
-              type="button"
-            >
-              邮箱验证码
-            </button>
+            {emailAuthEnabled ? (
+              <button
+                aria-selected={authMode === 'email'}
+                className={`auth-card__mode-tab ${authMode === 'email' ? 'is-active' : ''}`}
+                onClick={() => {
+                  setAuthMode('email');
+                  setMessage('');
+                }}
+                role="tab"
+                type="button"
+              >
+                邮箱验证码
+              </button>
+            ) : null}
             <button
               aria-selected={authMode === 'invite'}
               className={`auth-card__mode-tab ${authMode === 'invite' ? 'is-active' : ''}`}
@@ -408,7 +414,9 @@ export function AuthGate({ children }: AuthGateProps) {
                         : '使用测试邀请码进入'}
                 </button>
               </form>
-              <p className="auth-card__hint">测试入口用于临时给朋友体验，不占用邮箱验证码额度；测试用户暂不支持云端保存工程。</p>
+              <p className="auth-card__hint">
+                邀请码账号由当前服务器管理，不依赖第三方用户数据库；请通过文件菜单保存或导出工程。
+              </p>
             </>
           ) : null}
 

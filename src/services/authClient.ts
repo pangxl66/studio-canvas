@@ -3,6 +3,7 @@ import { createClient, type Session, type SupabaseClient, type User } from '@sup
 const rawSupabaseUrl = import.meta.env.VITE_SUPABASE_URL?.trim() ?? '';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim() ?? '';
 const saasMock = import.meta.env.VITE_SAAS_MOCK?.trim().toLowerCase() ?? '';
+const testInviteAuth = import.meta.env.VITE_TEST_INVITE_AUTH?.trim().toLowerCase() ?? '';
 const MOCK_AUTH_KEY = 'studio_canvas_saas_mock_auth_v1';
 const ACTIVATED_TEST_INVITE_AUTH_KEY = 'studio_canvas_saas_test_invite_activations_v1';
 const REMEMBERED_LOGIN_EMAIL_KEY = 'studio_canvas_remembered_login_email_v1';
@@ -53,12 +54,17 @@ export function isSaasMockEnabled(): boolean {
   return !isDesktopRuntime() && (saasMock === '1' || saasMock === 'true' || saasMock === 'yes');
 }
 
+export function isTestInviteAuthEnabled(): boolean {
+  return !isDesktopRuntime()
+    && (testInviteAuth === '1' || testInviteAuth === 'true' || testInviteAuth === 'yes');
+}
+
 export function isSaasHostedMode(): boolean {
   return !isDesktopRuntime() && isSupabaseConfigured() && !isSaasMockEnabled();
 }
 
 export function isSaasAuthEnabled(): boolean {
-  return isSaasHostedMode() || isSaasMockEnabled();
+  return isSaasHostedMode() || isSaasMockEnabled() || isTestInviteAuthEnabled();
 }
 
 export function getSupabaseClient(): SupabaseClient | null {

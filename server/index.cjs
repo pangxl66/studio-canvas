@@ -1092,6 +1092,9 @@ async function getAdminContext(req) {
   if (!isAdminUser(auth.user)) {
     return { error: { status: 403, message: '当前账号不是管理员，无法管理额度。' } };
   }
+  if (auth.isTestInvite) {
+    return auth;
+  }
   if (!auth.serviceClient) {
     try {
       return { ...auth, serviceClient: getServiceClient() };
@@ -1960,10 +1963,6 @@ function normalizeAdminUsageEvent(row, profileById = new Map()) {
   };
 }
 
-function isCurrentTestInviteEmail(auth, email) {
-  return Boolean(auth?.isTestInvite && normalizeEmail(auth.user?.email) === normalizeEmail(email));
-}
-
 function isKnownTestInviteEmail(email) {
   const normalizedEmail = normalizeEmail(email);
   if (!normalizedEmail) return false;
@@ -2422,6 +2421,35 @@ function readCreditAmount(value) {
   return amount;
 }
 
+function sendTestInviteAdminUsers(res, url) {
+  const limit = Math.min(Math.max(Number.parseInt(url.searchParams.get('limit') || '80', 10) || 80, 1), 200);
+  const page = Math.max(Number.parseInt(url.searchParams.get('page') || '1', 10) || 1, 1);
+  const email = normalizeEmail(url.searchParams.get('email'));
+  const allUsers = readAdminTestInviteUsers(email);
+  const users = allUsers.slice((page - 1) * limit, page * limit);
+  sendJson(res, 200, {
+    email: email || null,
+    limit,
+    page,
+    totalAuthUsers: 0,
+    totalReturned: users.length,
+    totalTestInviteUsers: allUsers.length,
+    users,
+  });
+}
+
+function sendTestInviteAdminUsage(res, url) {
+  const limit = Math.min(Math.max(Number.parseInt(url.searchParams.get('limit') || '80', 10) || 80, 1), 200);
+  const email = normalizeEmail(url.searchParams.get('email'));
+  const events = readTestInviteUsageEvents(email, limit);
+  sendJson(res, 200, {
+    email: email || null,
+    events,
+    limit,
+    totalReturned: events.length,
+  });
+}
+
 async function handleAdminUsers(req, res, url) {
   if (req.method !== 'GET') {
     sendJson(res, 405, { error: { message: 'Method not allowed.' } });
@@ -2429,26 +2457,17 @@ async function handleAdminUsers(req, res, url) {
   }
 
   if (isLoopbackRequest(req) && getTestInviteCodes().length > 0) {
-    const limit = Math.min(Math.max(Number.parseInt(url.searchParams.get('limit') || '80', 10) || 80, 1), 200);
-    const page = Math.max(Number.parseInt(url.searchParams.get('page') || '1', 10) || 1, 1);
-    const email = normalizeEmail(url.searchParams.get('email'));
-    const allUsers = readAdminTestInviteUsers(email);
-    const users = allUsers.slice((page - 1) * limit, page * limit);
-    sendJson(res, 200, {
-      email: email || null,
-      limit,
-      page,
-      totalAuthUsers: 0,
-      totalReturned: users.length,
-      totalTestInviteUsers: allUsers.length,
-      users,
-    });
+    sendTestInviteAdminUsers(res, url);
     return;
   }
 
   const auth = await getAdminContext(req);
   if (auth.error) {
     sendJson(res, auth.error.status, { error: { message: auth.error.message } });
+    return;
+  }
+  if (auth.isTestInvite) {
+    sendTestInviteAdminUsers(res, url);
     return;
   }
 
@@ -2472,21 +2491,17 @@ async function handleAdminUsage(req, res, url) {
   }
 
   if (isLoopbackRequest(req) && getTestInviteCodes().length > 0) {
-    const limit = Math.min(Math.max(Number.parseInt(url.searchParams.get('limit') || '80', 10) || 80, 1), 200);
-    const email = normalizeEmail(url.searchParams.get('email'));
-    const events = readTestInviteUsageEvents(email, limit);
-    sendJson(res, 200, {
-      email: email || null,
-      events,
-      limit,
-      totalReturned: events.length,
-    });
+    sendTestInviteAdminUsage(res, url);
     return;
   }
 
   const auth = await getAdminContext(req);
   if (auth.error) {
     sendJson(res, auth.error.status, { error: { message: auth.error.message } });
+    return;
+  }
+  if (auth.isTestInvite) {
+    sendTestInviteAdminUsage(res, url);
     return;
   }
 
@@ -2513,6 +2528,7 @@ async function handleAdminCredits(req, res, url) {
     sendJson(res, auth.error.status, { error: { message: auth.error.message } });
     return;
   }
+  const isTestInviteAdmin = isLocalAdmin || Boolean(auth?.isTestInvite);
 
   try {
     if (req.method === 'GET') {
@@ -2521,15 +2537,11 @@ async function handleAdminCredits(req, res, url) {
         sendJson(res, 400, { error: { message: '请输入要查询的用户邮箱。' } });
         return;
       }
-      if (isLocalAdmin) {
+      if (isTestInviteAdmin) {
         if (!isKnownTestInviteEmail(email)) {
-          sendJson(res, 404, { error: { message: '未找到该本地测试账号。' } });
+          sendJson(res, 404, { error: { message: '未找到该邀请码账号。' } });
           return;
         }
-        sendJson(res, 200, readTestInviteAdminCreditDetails(email));
-        return;
-      }
-      if (isCurrentTestInviteEmail(auth, email)) {
         sendJson(res, 200, readTestInviteAdminCreditDetails(email));
         return;
       }
@@ -2561,21 +2573,11 @@ async function handleAdminCredits(req, res, url) {
       return;
     }
 
-    if (isLocalAdmin) {
+    if (isTestInviteAdmin) {
       if (!isKnownTestInviteEmail(email)) {
-        sendJson(res, 404, { error: { message: '未找到该本地测试账号。' } });
+        sendJson(res, 404, { error: { message: '未找到该邀请码账号。' } });
         return;
       }
-      const result = updateTestInviteAdminCredits(email, action, body.amount);
-      if (result.error) {
-        sendJson(res, result.error.status, { error: { message: result.error.message } });
-        return;
-      }
-      sendJson(res, 200, result.details);
-      return;
-    }
-
-    if (isCurrentTestInviteEmail(auth, email)) {
       const result = updateTestInviteAdminCredits(email, action, body.amount);
       if (result.error) {
         sendJson(res, result.error.status, { error: { message: result.error.message } });
