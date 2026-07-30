@@ -37,6 +37,22 @@ export function sanitizeError(raw: unknown): string {
     .slice(0, 500);
 }
 
+export function describeSupabaseFailure(error: unknown, fallback = '用户数据库暂时不可用。'): string {
+  const candidate = error as { cause?: { code?: unknown }; code?: unknown } | null;
+  const causeCode = String(candidate?.cause?.code ?? candidate?.code ?? '').trim().toUpperCase();
+  const text = sanitizeError(error);
+  if (causeCode === 'ENOTFOUND' || /enotfound|getaddrinfo/i.test(text)) {
+    return '无法解析用户数据库域名：请检查服务器 SUPABASE_URL 是否属于仍然存在的 Supabase 项目。';
+  }
+  if (
+    ['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN'].includes(causeCode)
+    || /fetch failed|network|socket|timed?\s*out|connection/i.test(text)
+  ) {
+    return '无法连接用户数据库：请检查服务器 SUPABASE_URL、网络和 Supabase 项目状态。';
+  }
+  return text || fallback;
+}
+
 export function normalizeEmail(value: unknown): string {
   return String(value ?? '').trim().toLowerCase();
 }
@@ -77,20 +93,30 @@ export async function getAdminContext(req: IncomingMessage): Promise<
     return { error: { status: 503, message: '服务器 Supabase 配置不完整。' } };
   }
 
-  const authClient = createClient(supabaseUrl, supabaseAnonKey, {
-    global: { headers: { Authorization: `Bearer ${token}` } },
-  }) as unknown as AnySupabaseClient;
-  const serviceClient = createClient(supabaseUrl, serviceRoleKey) as unknown as AnySupabaseClient;
-  const { data, error } = await authClient.auth.getUser();
-  if (error || !data.user) {
-    return { error: { status: 401, message: '登录状态已失效，请重新登录。' } };
-  }
+  try {
+    const authClient = createClient(supabaseUrl, supabaseAnonKey, {
+      global: { headers: { Authorization: `Bearer ${token}` } },
+    }) as unknown as AnySupabaseClient;
+    const serviceClient = createClient(supabaseUrl, serviceRoleKey) as unknown as AnySupabaseClient;
+    const { data, error } = await authClient.auth.getUser();
+    if (error || !data.user) {
+      return { error: { status: 401, message: '登录状态已失效，请重新登录。' } };
+    }
 
-  const email = normalizeEmail(data.user.email);
-  if (!email || !admins.includes(email)) {
-    return { error: { status: 403, message: '当前账号不是管理员。' } };
+    const email = normalizeEmail(data.user.email);
+    if (!email || !admins.includes(email)) {
+      return { error: { status: 403, message: '当前账号不是管理员。' } };
+    }
+    return { serviceClient, user: data.user };
+  } catch (error) {
+    console.error('Supabase authentication failed', sanitizeError(error), candidateErrorCode(error));
+    return { error: { status: 503, message: describeSupabaseFailure(error, '服务器鉴权配置缺失。') } };
   }
-  return { serviceClient, user: data.user };
+}
+
+export function candidateErrorCode(error: unknown): string {
+  const candidate = error as { cause?: { code?: unknown }; code?: unknown } | null;
+  return String(candidate?.cause?.code ?? candidate?.code ?? '');
 }
 
 export function normalizeUsageEvent(row: any) {

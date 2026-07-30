@@ -34,6 +34,8 @@ const DEFAULT_MODEL = runtimeDefaults.defaultModel;
 const PRIMARY_MODEL_FAILURE_WINDOW_MS = 5 * 60 * 1000;
 const PRIMARY_MODEL_COOLDOWN_MS = 10 * 60 * 1000;
 const PRIMARY_MODEL_FAILURE_THRESHOLD = 2;
+const SUPABASE_HEALTH_TIMEOUT_MS = parseEnvMs(process.env.SUPABASE_HEALTH_TIMEOUT_MS, 4_000, 1_000, 15_000);
+const SUPABASE_HEALTH_CACHE_MS = parseEnvMs(process.env.SUPABASE_HEALTH_CACHE_MS, 30_000, 5_000, 300_000);
 const DEFAULT_IMAGE_MODEL = 'gemini-3.1-flash-image';
 const IMAGE_GENERATION_QUOTA_COST = 3;
 const BUILTIN_IMAGE_MODELS = new Set([
@@ -55,6 +57,11 @@ let testInviteUsageLoaded = false;
 const modelFailureState = new Map();
 const staticGzipCache = new Map();
 const STATIC_GZIP_CACHE_MAX_ITEMS = 80;
+let supabaseHealthCache = {
+  expiresAt: 0,
+  key: '',
+  result: null,
+};
 
 loadLocalEnvFile(path.join(rootDir, '.env.local'));
 
@@ -600,6 +607,85 @@ function sanitizeError(raw) {
     .slice(0, 500);
 }
 
+function describeSupabaseFailure(error, fallback = '用户数据库暂时不可用。') {
+  const causeCode = String(error?.cause?.code || error?.code || '').trim().toUpperCase();
+  const text = sanitizeError(error);
+  if (causeCode === 'ENOTFOUND' || /enotfound|getaddrinfo/i.test(text)) {
+    return '无法解析用户数据库域名：请检查服务器 SUPABASE_URL 是否属于仍然存在的 Supabase 项目。';
+  }
+  if (
+    ['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN'].includes(causeCode)
+    || /fetch failed|network|socket|timed?\s*out|connection/i.test(text)
+  ) {
+    return '无法连接用户数据库：请检查服务器 SUPABASE_URL、网络和 Supabase 项目状态。';
+  }
+  return text || fallback;
+}
+
+async function probeSupabaseHealth(options = {}) {
+  const supabaseUrl = String(options.url ?? env('SUPABASE_URL')).trim().replace(/\/+$/, '');
+  const anonKey = String(options.anonKey ?? env('SUPABASE_ANON_KEY')).trim();
+  if (!supabaseUrl || !anonKey) {
+    return {
+      checkedAt: new Date().toISOString(),
+      configured: false,
+      error: 'configuration_incomplete',
+      reachable: false,
+      statusCode: null,
+    };
+  }
+
+  const fetchImpl = options.fetchImpl || fetch;
+  const useCache = !options.fetchImpl;
+  const cacheKey = `${supabaseUrl}\n${Boolean(anonKey)}`;
+  if (
+    useCache
+    && supabaseHealthCache.key === cacheKey
+    && supabaseHealthCache.result
+    && supabaseHealthCache.expiresAt > Date.now()
+  ) {
+    return supabaseHealthCache.result;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SUPABASE_HEALTH_TIMEOUT_MS);
+  let result;
+  try {
+    const response = await fetchImpl(`${supabaseUrl}/auth/v1/health`, {
+      headers: { apikey: anonKey },
+      method: 'GET',
+      signal: controller.signal,
+    });
+    result = {
+      checkedAt: new Date().toISOString(),
+      configured: true,
+      error: response.ok ? null : `http_${response.status}`,
+      reachable: response.ok,
+      statusCode: response.status,
+    };
+  } catch (error) {
+    const causeCode = String(error?.cause?.code || error?.code || '').trim().toLowerCase();
+    result = {
+      checkedAt: new Date().toISOString(),
+      configured: true,
+      error: causeCode || (error instanceof Error && error.name === 'AbortError' ? 'timeout' : 'network_error'),
+      reachable: false,
+      statusCode: null,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (useCache) {
+    supabaseHealthCache = {
+      expiresAt: Date.now() + SUPABASE_HEALTH_CACHE_MS,
+      key: cacheKey,
+      result,
+    };
+  }
+  return result;
+}
+
 function parseJsonObject(raw) {
   try {
     const parsed = JSON.parse(String(raw || ''));
@@ -974,7 +1060,8 @@ async function getAuthedContext(req) {
     }
     return { serviceClient, user: data.user, userId: data.user.id };
   } catch (error) {
-    return { error: { status: 500, message: sanitizeError(error) || '服务器鉴权配置缺失。' } };
+    console.error('Supabase authentication failed', sanitizeError(error), error?.cause?.code || '');
+    return { error: { status: 503, message: describeSupabaseFailure(error, '服务器鉴权配置缺失。') } };
   }
 }
 
@@ -1646,11 +1733,21 @@ async function handleHealth(req, res) {
     url: Boolean(env('SUPABASE_URL')),
   };
   const supabaseConfigured = Object.values(supabase).every(Boolean);
+  const supabaseHealth = supabaseConfigured
+    ? await probeSupabaseHealth()
+    : {
+        checkedAt: new Date().toISOString(),
+        configured: false,
+        error: 'configuration_incomplete',
+        reachable: false,
+        statusCode: null,
+      };
   const testInviteEnabled = getTestInviteCodes().length > 0;
   const checks = {
     llmApiKey: hasProviderLlmApiKey('') || hasProviderLlmApiKey('gpt') || hasProviderLlmApiKey('deepseek'),
     llmUpstream: hasLlmUpstream(),
     authBackend: supabaseConfigured || testInviteEnabled,
+    supabaseReachable: supabaseConfigured ? supabaseHealth.reachable : testInviteEnabled,
   };
   const ok = Object.values(checks).every(Boolean);
   const providers = ['', 'gpt', 'deepseek'].map((provider) => {
@@ -1685,7 +1782,10 @@ async function handleHealth(req, res) {
       },
       auth: {
         mode: supabaseConfigured ? 'supabase' : testInviteEnabled ? 'test-invite' : 'unconfigured',
-        supabase,
+        supabase: {
+          ...supabase,
+          ...supabaseHealth,
+        },
         testInviteEnabled,
       },
       staticAssets: {
@@ -2342,7 +2442,8 @@ async function handleAdminUsers(req, res, url) {
     });
     sendJson(res, 200, users);
   } catch (error) {
-    sendJson(res, 500, { error: { message: sanitizeError(error) || '读取用户列表失败。' } });
+    console.error('Admin user list read failed', sanitizeError(error), error?.cause?.code || '');
+    sendJson(res, 503, { error: { message: describeSupabaseFailure(error, '读取用户列表失败。') } });
   }
 }
 
@@ -3663,7 +3764,9 @@ if (require.main === module) {
 module.exports = {
   route,
   __test: {
+    describeSupabaseFailure,
     measureImageBuffer,
+    probeSupabaseHealth,
     resolveUpstreamImageModel,
   },
 };

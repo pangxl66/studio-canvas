@@ -112,3 +112,12 @@ test('Vite development serves the same local API routes as the Node deployment',
   assert.match(nodeServer, /if \(require\.main === module\)/);
   assert.match(nodeServer, /module\.exports = \{[\s\S]*?\broute\b[\s\S]*?\}/);
 });
+
+test('health endpoints verify Supabase reachability instead of env presence only', () => {
+  for (const file of ['server/index.cjs', 'api/health.ts']) {
+    const source = read(file);
+    assert.match(source, /\/auth\/v1\/health/);
+    assert.match(source, /supabaseReachable/);
+    assert.match(source, /SUPABASE_HEALTH_TIMEOUT_MS/);
+  }
+});

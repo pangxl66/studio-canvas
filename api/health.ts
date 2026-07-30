@@ -23,8 +23,27 @@ const DEFAULT_MODEL = runtimeDefaults.defaultModel;
 const PRIMARY_MODEL_FAILURE_WINDOW_MS = 5 * 60 * 1000;
 const PRIMARY_MODEL_COOLDOWN_MS = 10 * 60 * 1000;
 const PRIMARY_MODEL_FAILURE_THRESHOLD = 2;
+const SUPABASE_HEALTH_TIMEOUT_MS = parseEnvMs(env('SUPABASE_HEALTH_TIMEOUT_MS'), 4_000, 1_000, 15_000);
+const SUPABASE_HEALTH_CACHE_MS = parseEnvMs(env('SUPABASE_HEALTH_CACHE_MS'), 30_000, 5_000, 300_000);
 const DEFAULT_MONTHLY_QUOTA = runtimeDefaults.defaultMonthlyQuota;
 const LEGACY_DEFAULT_MONTHLY_QUOTA = runtimeDefaults.legacyDefaultMonthlyQuota;
+let supabaseHealthCache: {
+  expiresAt: number;
+  key: string;
+  result: SupabaseHealthResult | null;
+} = {
+  expiresAt: 0,
+  key: '',
+  result: null,
+};
+
+type SupabaseHealthResult = {
+  checkedAt: string;
+  configured: boolean;
+  error: string | null;
+  reachable: boolean;
+  statusCode: number | null;
+};
 
 function normalizeProvider(value: string): string {
   const raw = String(value || '').trim().toLowerCase();
@@ -129,18 +148,83 @@ function healthProviderDiagnostics(provider: string) {
   };
 }
 
+async function probeSupabaseHealth(): Promise<SupabaseHealthResult> {
+  const supabaseUrl = env('SUPABASE_URL').replace(/\/+$/, '');
+  const anonKey = env('SUPABASE_ANON_KEY');
+  if (!supabaseUrl || !anonKey) {
+    return {
+      checkedAt: new Date().toISOString(),
+      configured: false,
+      error: 'configuration_incomplete',
+      reachable: false,
+      statusCode: null,
+    };
+  }
+
+  const cacheKey = `${supabaseUrl}\n${Boolean(anonKey)}`;
+  if (
+    supabaseHealthCache.key === cacheKey
+    && supabaseHealthCache.result
+    && supabaseHealthCache.expiresAt > Date.now()
+  ) {
+    return supabaseHealthCache.result;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SUPABASE_HEALTH_TIMEOUT_MS);
+  let result: SupabaseHealthResult;
+  try {
+    const response = await fetch(`${supabaseUrl}/auth/v1/health`, {
+      headers: { apikey: anonKey },
+      method: 'GET',
+      signal: controller.signal,
+    });
+    result = {
+      checkedAt: new Date().toISOString(),
+      configured: true,
+      error: response.ok ? null : `http_${response.status}`,
+      reachable: response.ok,
+      statusCode: response.status,
+    };
+  } catch (error) {
+    const candidate = error as { cause?: { code?: unknown }; code?: unknown; name?: unknown } | null;
+    const causeCode = String(candidate?.cause?.code ?? candidate?.code ?? '').trim().toLowerCase();
+    result = {
+      checkedAt: new Date().toISOString(),
+      configured: true,
+      error: causeCode || (candidate?.name === 'AbortError' ? 'timeout' : 'network_error'),
+      reachable: false,
+      statusCode: null,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+  supabaseHealthCache = {
+    expiresAt: Date.now() + SUPABASE_HEALTH_CACHE_MS,
+    key: cacheKey,
+    result,
+  };
+  return result;
+}
+
 export default async function handler(req: IncomingMessage, res: ServerResponse) {
   if (req.method !== 'GET') {
     json(res, 405, { ok: false, error: 'Method not allowed.' });
     return;
   }
 
+  const supabase = {
+    anonKey: Boolean(env('SUPABASE_ANON_KEY')),
+    serviceRoleKey: Boolean(env('SUPABASE_SERVICE_ROLE_KEY')),
+    url: Boolean(env('SUPABASE_URL')),
+  };
+  const supabaseConfigured = Object.values(supabase).every(Boolean);
+  const supabaseHealth = await probeSupabaseHealth();
   const checks = {
     llmApiKey: hasProviderLlmApiKey('') || hasProviderLlmApiKey('gpt') || hasProviderLlmApiKey('deepseek'),
     llmUpstream: hasLlmUpstream(),
-    supabaseAnonKey: Boolean(env('SUPABASE_ANON_KEY')),
-    supabaseServiceRoleKey: Boolean(env('SUPABASE_SERVICE_ROLE_KEY')),
-    supabaseUrl: Boolean(env('SUPABASE_URL')),
+    authBackend: supabaseConfigured,
+    supabaseReachable: supabaseHealth.reachable,
   };
   const ok = Object.values(checks).every(Boolean);
 
@@ -158,6 +242,13 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       quota: {
         defaultMonthlyQuota: DEFAULT_MONTHLY_QUOTA,
         legacyDefaultMonthlyQuota: LEGACY_DEFAULT_MONTHLY_QUOTA,
+      },
+      auth: {
+        mode: supabaseConfigured ? 'supabase' : 'unconfigured',
+        supabase: {
+          ...supabase,
+          ...supabaseHealth,
+        },
       },
       staticAssets: {
         indexCache: 'no-cache, must-revalidate',

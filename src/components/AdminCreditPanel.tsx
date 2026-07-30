@@ -76,6 +76,13 @@ export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) 
   const [isUsersBusy, setIsUsersBusy] = useState(false);
   const [selectedUserKey, setSelectedUserKey] = useState<string | null>(null);
   const [quotaMenu, setQuotaMenu] = useState<QuotaMenuState | null>(null);
+  const parsedUserPage = Math.max(Number.parseInt(userPage, 10) || 1, 1);
+  const hasReachedLastUserPage = Boolean(
+    usersResponse
+    && usersResponse.page === parsedUserPage
+    && usersResponse.totalAuthUsers !== null
+    && parsedUserPage * usersResponse.limit >= usersResponse.totalAuthUsers,
+  );
 
   const userKey = (user: AdminUserRecord) => `${user.source}-${user.userId}`;
 
@@ -294,8 +301,7 @@ export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) 
                 disabled={isUsersBusy}
                 type="button"
                 onClick={() => {
-                  setUserPage('1');
-                  void loadUsers(userEmail, userLimit, '1');
+                  void loadUsers(userEmail, userLimit, userPage);
                 }}
               >
                 刷新用户
@@ -312,7 +318,7 @@ export function AdminCreditPanel({ onChanged, onClose }: AdminCreditPanelProps) 
                 上一页
               </button>
               <button
-                disabled={isUsersBusy}
+                disabled={isUsersBusy || hasReachedLastUserPage}
                 type="button"
                 onClick={() => {
                   const nextPage = String((Number.parseInt(userPage, 10) || 1) + 1);

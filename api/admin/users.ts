@@ -1,6 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   boundedInteger,
+  candidateErrorCode,
+  describeSupabaseFailure,
   emptyUsageSummary,
   getAdminContext,
   json,
@@ -144,6 +146,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       users,
     });
   } catch (error) {
-    json(res, 500, { error: { message: sanitizeError(error) || '读取用户列表失败。' } });
+    console.error('Admin user list read failed', sanitizeError(error), candidateErrorCode(error));
+    json(res, 503, { error: { message: describeSupabaseFailure(error, '读取用户列表失败。') } });
   }
 }
