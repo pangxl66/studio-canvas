@@ -12324,6 +12324,179 @@ body,
   font-size: 10px;
 }
 
+.admin-workspace__invite-generator,
+.admin-workspace__invite-history {
+  margin-top: 14px;
+}
+
+.admin-workspace__invite-controls {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+}
+
+.admin-workspace__invite-controls label {
+  display: grid;
+  gap: 7px;
+  color: #78899d;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.admin-workspace__invite-controls input {
+  width: 132px;
+  height: 42px;
+  box-sizing: border-box;
+  border: 1px solid var(--admin-border);
+  border-radius: 11px;
+  outline: 0;
+  background: rgba(8, 13, 22, 0.82);
+  color: #edf5fb;
+  padding: 0 12px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.admin-workspace__invite-controls input:focus {
+  border-color: rgba(45, 212, 191, 0.42);
+  box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.08);
+}
+
+.admin-workspace__invite-controls > button,
+.admin-workspace__invite-result button {
+  display: inline-flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid rgba(45, 212, 191, 0.34);
+  border-radius: 11px;
+  background: linear-gradient(135deg, rgba(20, 184, 166, 0.2), rgba(59, 130, 246, 0.16));
+  color: #ccfbf1;
+  padding: 0 16px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.admin-workspace__invite-controls > button:hover:not(:disabled),
+.admin-workspace__invite-result button:hover {
+  border-color: rgba(94, 234, 212, 0.58);
+  background: linear-gradient(135deg, rgba(20, 184, 166, 0.28), rgba(59, 130, 246, 0.22));
+}
+
+.admin-workspace__invite-controls > button:disabled {
+  cursor: progress;
+  opacity: 0.58;
+}
+
+.admin-workspace__invite-hint,
+.admin-workspace__invite-loading {
+  margin: 12px 0 0;
+  color: #65758a;
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.admin-workspace__invite-message {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(45, 212, 191, 0.2);
+  border-radius: 10px;
+  background: rgba(20, 184, 166, 0.08);
+  color: #99f6e4;
+  font-size: 10px;
+}
+
+.admin-workspace__invite-result {
+  margin-top: 16px;
+  overflow: hidden;
+  border: 1px solid rgba(94, 234, 212, 0.2);
+  border-radius: 14px;
+  background: rgba(4, 11, 20, 0.72);
+}
+
+.admin-workspace__invite-result > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(132, 157, 184, 0.1);
+  color: #8a9bae;
+  font-size: 10px;
+  font-weight: 850;
+}
+
+.admin-workspace__invite-result button {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 9px;
+}
+
+.admin-workspace__invite-result pre {
+  max-height: 320px;
+  margin: 0;
+  overflow: auto;
+  padding: 16px;
+  color: #d8fff7;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.9;
+  user-select: all;
+}
+
+.admin-workspace__invite-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.admin-workspace__invite-grid > button {
+  display: grid;
+  min-width: 0;
+  min-height: 58px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(132, 157, 184, 0.13);
+  border-radius: 12px;
+  background: rgba(8, 13, 22, 0.66);
+  color: #5eead4;
+  cursor: pointer;
+  text-align: left;
+}
+
+.admin-workspace__invite-grid > button:hover {
+  border-color: rgba(45, 212, 191, 0.34);
+  background: rgba(20, 184, 166, 0.08);
+}
+
+.admin-workspace__invite-grid > button > span {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.admin-workspace__invite-grid strong,
+.admin-workspace__invite-grid small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-workspace__invite-grid strong {
+  color: #dffcf7;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.admin-workspace__invite-grid small {
+  color: #63748a;
+  font-size: 9px;
+}
+
 .admin-workspace__drawer {
   position: fixed;
   z-index: 10035;
@@ -12755,6 +12928,19 @@ body,
 
   .admin-workspace__toolbar-count {
     margin-left: 0;
+  }
+
+  .admin-workspace__invite-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .admin-workspace__invite-controls input {
+    width: 100%;
+  }
+
+  .admin-workspace__invite-grid {
+    grid-template-columns: 1fr;
   }
 }
 

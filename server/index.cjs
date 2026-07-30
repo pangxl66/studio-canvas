@@ -47,12 +47,15 @@ const UPSTREAM_IMAGE_MODEL_ALIASES = new Map([
 ]);
 const TEST_INVITE_TOKEN_PREFIX = 'test-invite';
 const testInviteActivationPath = path.join(rootDir, '.data', 'test-invite-activations.json');
+const testInviteCodesPath = path.join(rootDir, '.data', 'test-invite-codes.json');
 const testInviteUsagePath = path.join(rootDir, '.data', 'test-invite-usage-events.json');
 const testInviteActivations = new Set();
 const testInviteActivationTimes = new Map();
 const testInviteQuotas = new Map();
+let generatedTestInviteCodes = [];
 let testInviteUsageEvents = [];
 let testInviteActivationsLoaded = false;
+let generatedTestInviteCodesLoaded = false;
 let testInviteUsageLoaded = false;
 const modelFailureState = new Map();
 const staticGzipCache = new Map();
@@ -147,12 +150,76 @@ function getTestInviteCode() {
   return normalizeInviteCode(env('TEST_INVITE_CODE'));
 }
 
-function getTestInviteCodes() {
-  const codes = [
+function getConfiguredTestInviteCodes() {
+  return [...new Set([
     ...parseTestInviteCodes(env('TEST_INVITE_CODES')),
     ...parseTestInviteCodes(getTestInviteCode()),
-  ];
-  return [...new Set(codes)];
+  ])];
+}
+
+function ensureGeneratedTestInviteCodesLoaded() {
+  if (generatedTestInviteCodesLoaded) return;
+  generatedTestInviteCodesLoaded = true;
+  try {
+    if (!fs.existsSync(testInviteCodesPath)) return;
+    const raw = fs.readFileSync(testInviteCodesPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    const records = Array.isArray(parsed) ? parsed : parsed?.codes;
+    if (!Array.isArray(records)) return;
+    generatedTestInviteCodes = records
+      .map((record) => {
+        const value = typeof record === 'string' ? { code: record } : record;
+        const code = normalizeInviteCode(value?.code);
+        if (!code) return null;
+        return {
+          code,
+          createdAt: String(value?.createdAt || ''),
+          createdBy: normalizeEmail(value?.createdBy || ''),
+        };
+      })
+      .filter(Boolean);
+  } catch (error) {
+    console.warn('Failed to read generated test invite codes', sanitizeError(error));
+  }
+}
+
+function saveGeneratedTestInviteCodes() {
+  fs.mkdirSync(path.dirname(testInviteCodesPath), { recursive: true });
+  const payload = JSON.stringify(
+    {
+      codes: generatedTestInviteCodes,
+      updatedAt: new Date().toISOString(),
+      version: 1,
+    },
+    null,
+    2,
+  );
+  const tempPath = `${testInviteCodesPath}.tmp`;
+  fs.writeFileSync(tempPath, payload, 'utf8');
+  fs.renameSync(tempPath, testInviteCodesPath);
+}
+
+function getGeneratedTestInviteCodes() {
+  ensureGeneratedTestInviteCodesLoaded();
+  return generatedTestInviteCodes;
+}
+
+function getTestInviteCodes() {
+  return [...new Set([
+    ...getConfiguredTestInviteCodes(),
+    ...getGeneratedTestInviteCodes().map((record) => record.code),
+  ])];
+}
+
+function createRandomTestInviteCode(existingCodes) {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const bytes = crypto.randomBytes(12);
+    const body = [...bytes].map((byte) => alphabet[byte & 31]).join('');
+    const code = `SC-${body.slice(0, 4)}-${body.slice(4, 8)}-${body.slice(8, 12)}`;
+    if (!existingCodes.has(code)) return code;
+  }
+  throw new Error('无法生成不重复的邀请码，请稍后重试。');
 }
 
 function getTestInviteSecret() {
@@ -2450,6 +2517,71 @@ function sendTestInviteAdminUsage(res, url) {
   });
 }
 
+function testInviteAdminSnapshot() {
+  const configuredCodes = getConfiguredTestInviteCodes();
+  const generatedCodes = getGeneratedTestInviteCodes();
+  return {
+    codes: [...generatedCodes].reverse(),
+    configuredCount: configuredCodes.length,
+    generatedCount: generatedCodes.length,
+    totalCount: getTestInviteCodes().length,
+  };
+}
+
+async function handleAdminInvites(req, res) {
+  if (req.method !== 'GET' && req.method !== 'POST') {
+    sendJson(res, 405, { error: { message: 'Method not allowed.' } });
+    return;
+  }
+
+  const isLocalAdmin = isLoopbackRequest(req) && getTestInviteCodes().length > 0;
+  const auth = isLocalAdmin ? null : await getAdminContext(req);
+  if (auth?.error) {
+    sendJson(res, auth.error.status, { error: { message: auth.error.message } });
+    return;
+  }
+
+  if (req.method === 'GET') {
+    sendJson(res, 200, testInviteAdminSnapshot());
+    return;
+  }
+
+  let body;
+  try {
+    body = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: { message: '请求体不是合法 JSON。' } });
+    return;
+  }
+
+  const count = Number.parseInt(String(body?.count || ''), 10);
+  if (!Number.isFinite(count) || count < 1 || count > 50) {
+    sendJson(res, 400, { error: { message: '每次可生成 1 至 50 个邀请码。' } });
+    return;
+  }
+
+  try {
+    const createdAt = new Date().toISOString();
+    const createdBy = normalizeEmail(auth?.user?.email || '') || (isLocalAdmin ? 'local-admin' : '');
+    const existingCodes = new Set(getTestInviteCodes());
+    const created = [];
+    for (let index = 0; index < count; index += 1) {
+      const code = createRandomTestInviteCode(existingCodes);
+      existingCodes.add(code);
+      created.push({ code, createdAt, createdBy });
+    }
+    generatedTestInviteCodes.push(...created);
+    saveGeneratedTestInviteCodes();
+    sendJson(res, 201, {
+      ...testInviteAdminSnapshot(),
+      created,
+    });
+  } catch (error) {
+    console.error('Admin invite generation failed', sanitizeError(error));
+    sendJson(res, 500, { error: { message: sanitizeError(error) || '邀请码生成失败。' } });
+  }
+}
+
 async function handleAdminUsers(req, res, url) {
   if (req.method !== 'GET') {
     sendJson(res, 405, { error: { message: 'Method not allowed.' } });
@@ -3749,6 +3881,10 @@ async function route(req, res) {
     }
     if (url.pathname === '/api/admin/credits') {
       await handleAdminCredits(req, res, url);
+      return;
+    }
+    if (url.pathname === '/api/admin/invites') {
+      await handleAdminInvites(req, res);
       return;
     }
     if (url.pathname === '/api/admin/usage') {

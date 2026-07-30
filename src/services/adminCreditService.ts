@@ -83,6 +83,20 @@ export type AdminUsersResponse = {
   users: AdminUserRecord[];
 };
 
+export type AdminInviteCodeRecord = {
+  code: string;
+  createdAt: string;
+  createdBy: string;
+};
+
+export type AdminInvitesResponse = {
+  codes: AdminInviteCodeRecord[];
+  configuredCount: number;
+  created?: AdminInviteCodeRecord[];
+  generatedCount: number;
+  totalCount: number;
+};
+
 function isLoopbackAdmin(): boolean {
   if (typeof window === 'undefined') return false;
   return ['127.0.0.1', 'localhost', '::1'].includes(window.location.hostname);
@@ -165,6 +179,22 @@ export async function fetchAdminUsers(email = '', limit = 80, page = 1): Promise
   params.set('page', String(page));
   const response = await fetchAdmin(`/api/admin/users?${params.toString()}`);
   return parseJsonResponse<AdminUsersResponse>(response);
+}
+
+export async function fetchAdminInvites(): Promise<AdminInvitesResponse> {
+  const response = await fetchAdmin('/api/admin/invites');
+  return parseJsonResponse<AdminInvitesResponse>(response);
+}
+
+export async function generateAdminInvites(count: number): Promise<AdminInvitesResponse> {
+  const response = await fetchAdmin('/api/admin/invites', {
+    body: JSON.stringify({ count }),
+    headers: {
+      'content-type': 'application/json',
+    },
+    method: 'POST',
+  });
+  return parseJsonResponse<AdminInvitesResponse>(response);
 }
 
 export async function updateAdminCredits(

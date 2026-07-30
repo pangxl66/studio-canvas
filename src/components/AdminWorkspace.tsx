@@ -7,18 +7,22 @@ import {
   CheckCircle,
   Clock,
   Coins,
+  CopySimple,
   Database,
   FolderOpen,
   Gauge,
   HardDrives,
   Heartbeat,
   ImageSquare,
+  Key,
   MagnifyingGlass,
+  Plus,
   Pulse,
   Queue,
   Robot,
   ShieldCheck,
   SlidersHorizontal,
+  Ticket,
   UserCircle,
   UsersThree,
   WarningCircle,
@@ -26,8 +30,11 @@ import {
 } from '@phosphor-icons/react';
 import {
   fetchAdminCreditDetails,
+  fetchAdminInvites,
+  generateAdminInvites,
   updateAdminCredits,
   type AdminCreditDetails,
+  type AdminInvitesResponse,
   type AdminUserRecord,
 } from '@/services/adminCreditService';
 import {
@@ -45,11 +52,12 @@ interface AdminWorkspaceProps {
   onClose: () => void;
 }
 
-type AdminSection = 'jobs' | 'overview' | 'projects' | 'system' | 'usage' | 'users';
+type AdminSection = 'invites' | 'jobs' | 'overview' | 'projects' | 'system' | 'usage' | 'users';
 
 const sectionItems = [
   { id: 'overview' as const, label: '运营总览', icon: Gauge },
   { id: 'users' as const, label: '用户与权限', icon: UsersThree },
+  { id: 'invites' as const, label: '邀请码', icon: Ticket },
   { id: 'jobs' as const, label: '任务与生成', icon: Queue },
   { id: 'projects' as const, label: '工程与存储', icon: FolderOpen },
   { id: 'usage' as const, label: '用量与额度', icon: ChartBar },
@@ -421,6 +429,176 @@ function UsersPanel({
           </div>
         )}
       </div>
+    </>
+  );
+}
+
+async function copyInviteCodes(codes: string[]): Promise<void> {
+  const text = codes.filter(Boolean).join('\n');
+  if (!text) return;
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand('copy');
+  textarea.remove();
+}
+
+function InvitesPanel({ enabled }: { enabled: boolean }) {
+  const [count, setCount] = useState(10);
+  const [data, setData] = useState<AdminInvitesResponse | null>(null);
+  const [generatedNow, setGeneratedNow] = useState<string[]>([]);
+  const [isLoading, setIsLoading] = useState(enabled);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [message, setMessage] = useState('');
+
+  const loadInvites = useCallback(async () => {
+    if (!enabled) return;
+    setIsLoading(true);
+    setMessage('');
+    try {
+      setData(await fetchAdminInvites());
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '邀请码数据读取失败。');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [enabled]);
+
+  useEffect(() => {
+    void loadInvites();
+  }, [loadInvites]);
+
+  const generate = async () => {
+    if (!enabled || isGenerating) return;
+    const safeCount = Math.min(Math.max(Math.floor(count), 1), 50);
+    setIsGenerating(true);
+    setGeneratedNow([]);
+    setMessage('');
+    try {
+      const next = await generateAdminInvites(safeCount);
+      const codes = (next.created || []).map((record) => record.code);
+      setData(next);
+      setGeneratedNow(codes);
+      setMessage(`已生成 ${codes.length} 个邀请码，立即生效并已保存到服务器。`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '邀请码生成失败。');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  if (!enabled) {
+    return (
+      <>
+        <SectionTitle
+          eyebrow="INVITE ACCESS"
+          title="邀请码"
+          description="服务器邀请码模式下可在这里批量签发并持久化邀请码。"
+        />
+        <div className="admin-workspace__empty admin-workspace__empty--wide">
+          <Key size={32} weight="duotone" />
+          <strong>当前认证模式未启用邀请码管理</strong>
+          <span>启用 VITE_TEST_INVITE_AUTH 并配置管理员后即可使用。</span>
+        </div>
+      </>
+    );
+  }
+
+  const storedCodes = data?.codes || [];
+  return (
+    <>
+      <SectionTitle
+        eyebrow="INVITE ACCESS"
+        title="邀请码"
+        description="批量生成高强度邀请码。新码会与环境变量中的旧码合并，并持久化到服务器数据目录。"
+      />
+      <div className="admin-workspace__mini-metrics">
+        <div><span>全部有效码</span><strong>{data?.totalCount ?? '—'}</strong></div>
+        <div><span>环境配置</span><strong>{data?.configuredCount ?? '—'}</strong></div>
+        <div><span>后台生成</span><strong>{data?.generatedCount ?? '—'}</strong></div>
+        <div><span>单次上限</span><strong>50</strong></div>
+      </div>
+
+      <section className="admin-workspace__panel admin-workspace__invite-generator">
+        <div className="admin-workspace__panel-heading">
+          <div><span>CREATE INVITES</span><h3>生成新邀请码</h3></div>
+          <Ticket size={22} weight="duotone" />
+        </div>
+        <div className="admin-workspace__invite-controls">
+          <label>
+            <span>生成数量</span>
+            <input
+              aria-label="邀请码生成数量"
+              disabled={isGenerating}
+              max={50}
+              min={1}
+              onChange={(event) => setCount(Number(event.target.value) || 1)}
+              type="number"
+              value={count}
+            />
+          </label>
+          <button disabled={isGenerating || isLoading} type="button" onClick={() => void generate()}>
+            <Plus size={18} weight="bold" />
+            {isGenerating ? '正在生成…' : `生成 ${Math.min(Math.max(Math.floor(count), 1), 50)} 个`}
+          </button>
+        </div>
+        <p className="admin-workspace__invite-hint">格式为 SC-XXXX-XXXX-XXXX；生成后立即可用于新账号激活。</p>
+        {message ? <p className="admin-workspace__invite-message">{message}</p> : null}
+
+        {generatedNow.length > 0 ? (
+          <div className="admin-workspace__invite-result">
+            <div>
+              <span>本次生成</span>
+              <button type="button" onClick={() => void copyInviteCodes(generatedNow)}>
+                <CopySimple size={16} /> 复制本批
+              </button>
+            </div>
+            <pre>{generatedNow.join('\n')}</pre>
+          </div>
+        ) : null}
+      </section>
+
+      <section className="admin-workspace__panel admin-workspace__invite-history">
+        <div className="admin-workspace__panel-heading">
+          <div><span>GENERATED HISTORY</span><h3>后台生成记录</h3></div>
+          {storedCodes.length ? (
+            <button type="button" onClick={() => void copyInviteCodes(storedCodes.map((record) => record.code))}>
+              复制全部
+            </button>
+          ) : null}
+        </div>
+        {isLoading ? <p className="admin-workspace__invite-loading">正在读取邀请码…</p> : null}
+        {!isLoading && storedCodes.length ? (
+          <div className="admin-workspace__invite-grid">
+            {storedCodes.map((record) => (
+              <button
+                key={`${record.code}-${record.createdAt}`}
+                title="点击复制"
+                type="button"
+                onClick={() => void copyInviteCodes([record.code])}
+              >
+                <Key size={16} weight="duotone" />
+                <span><strong>{record.code}</strong><small>{formatDate(record.createdAt)} · {record.createdBy || '管理员'}</small></span>
+                <CopySimple size={15} />
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {!isLoading && !storedCodes.length ? (
+          <div className="admin-workspace__empty">
+            <Ticket size={30} weight="duotone" />
+            <strong>还没有后台生成记录</strong>
+            <span>环境变量中的邀请码不会在此处显示明文。</span>
+          </div>
+        ) : null}
+      </section>
     </>
   );
 }
@@ -1129,6 +1307,7 @@ export function AdminWorkspace({ onChanged, onClose }: AdminWorkspaceProps) {
             <>
               {activeSection === 'overview' ? <OverviewPanel data={data} onNavigate={selectSection} /> : null}
               {activeSection === 'users' ? <UsersPanel data={data} onSelectUser={setSelectedUser} /> : null}
+              {activeSection === 'invites' ? <InvitesPanel enabled={data.health.authMode === 'test-invite'} /> : null}
               {activeSection === 'jobs' ? <JobsPanel data={data} onSelectTask={setSelectedTask} /> : null}
               {activeSection === 'projects' ? <ProjectsPanel data={data} onSelectProject={setSelectedProject} /> : null}
               {activeSection === 'usage' ? <UsagePanel data={data} /> : null}
