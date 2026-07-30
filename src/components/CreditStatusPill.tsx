@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { AdminCreditPanel } from '@/components/AdminCreditPanel';
+import { AdminWorkspace } from '@/components/AdminWorkspace';
 import {
   fetchCreditStatus,
   STUDIO_CREDIT_REFRESH_EVENT,
@@ -124,7 +124,7 @@ export function CreditStatusPill() {
         {error ? <span className="credit-status-pill__error">!</span> : null}
       </div>
       {isAdminPanelOpen ? (
-        <AdminCreditPanel onChanged={() => void refresh()} onClose={() => setIsAdminPanelOpen(false)} />
+        <AdminWorkspace onChanged={() => void refresh()} onClose={() => setIsAdminPanelOpen(false)} />
       ) : null}
       {isRechargePanelOpen
         ? createPortal(

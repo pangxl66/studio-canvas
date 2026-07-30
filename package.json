@@ -26,6 +26,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@phosphor-icons/react": "^2.1.10",
     "@supabase/supabase-js": "^2.105.3",
     "@xyflow/react": "^12.4.4",
     "dagre": "^0.8.5",

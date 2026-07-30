@@ -2428,6 +2428,24 @@ async function handleAdminUsers(req, res, url) {
     return;
   }
 
+  if (isLoopbackRequest(req) && getTestInviteCodes().length > 0) {
+    const limit = Math.min(Math.max(Number.parseInt(url.searchParams.get('limit') || '80', 10) || 80, 1), 200);
+    const page = Math.max(Number.parseInt(url.searchParams.get('page') || '1', 10) || 1, 1);
+    const email = normalizeEmail(url.searchParams.get('email'));
+    const allUsers = readAdminTestInviteUsers(email);
+    const users = allUsers.slice((page - 1) * limit, page * limit);
+    sendJson(res, 200, {
+      email: email || null,
+      limit,
+      page,
+      totalAuthUsers: 0,
+      totalReturned: users.length,
+      totalTestInviteUsers: allUsers.length,
+      users,
+    });
+    return;
+  }
+
   const auth = await getAdminContext(req);
   if (auth.error) {
     sendJson(res, auth.error.status, { error: { message: auth.error.message } });
@@ -2450,6 +2468,19 @@ async function handleAdminUsers(req, res, url) {
 async function handleAdminUsage(req, res, url) {
   if (req.method !== 'GET') {
     sendJson(res, 405, { error: { message: 'Method not allowed.' } });
+    return;
+  }
+
+  if (isLoopbackRequest(req) && getTestInviteCodes().length > 0) {
+    const limit = Math.min(Math.max(Number.parseInt(url.searchParams.get('limit') || '80', 10) || 80, 1), 200);
+    const email = normalizeEmail(url.searchParams.get('email'));
+    const events = readTestInviteUsageEvents(email, limit);
+    sendJson(res, 200, {
+      email: email || null,
+      events,
+      limit,
+      totalReturned: events.length,
+    });
     return;
   }
 
@@ -2476,8 +2507,9 @@ async function handleAdminCredits(req, res, url) {
     return;
   }
 
-  const auth = await getAdminContext(req);
-  if (auth.error) {
+  const isLocalAdmin = isLoopbackRequest(req) && getTestInviteCodes().length > 0;
+  const auth = isLocalAdmin ? null : await getAdminContext(req);
+  if (auth?.error) {
     sendJson(res, auth.error.status, { error: { message: auth.error.message } });
     return;
   }
@@ -2487,6 +2519,14 @@ async function handleAdminCredits(req, res, url) {
       const email = normalizeEmail(url.searchParams.get('email'));
       if (!email) {
         sendJson(res, 400, { error: { message: '请输入要查询的用户邮箱。' } });
+        return;
+      }
+      if (isLocalAdmin) {
+        if (!isKnownTestInviteEmail(email)) {
+          sendJson(res, 404, { error: { message: '未找到该本地测试账号。' } });
+          return;
+        }
+        sendJson(res, 200, readTestInviteAdminCreditDetails(email));
         return;
       }
       if (isCurrentTestInviteEmail(auth, email)) {
@@ -2518,6 +2558,20 @@ async function handleAdminCredits(req, res, url) {
     const action = String(body.action || '').trim();
     if (!email) {
       sendJson(res, 400, { error: { message: '请输入要操作的用户邮箱。' } });
+      return;
+    }
+
+    if (isLocalAdmin) {
+      if (!isKnownTestInviteEmail(email)) {
+        sendJson(res, 404, { error: { message: '未找到该本地测试账号。' } });
+        return;
+      }
+      const result = updateTestInviteAdminCredits(email, action, body.amount);
+      if (result.error) {
+        sendJson(res, result.error.status, { error: { message: result.error.message } });
+        return;
+      }
+      sendJson(res, 200, result.details);
       return;
     }
 

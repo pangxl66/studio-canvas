@@ -78,16 +78,26 @@ export type AdminUsersResponse = {
   users: AdminUserRecord[];
 };
 
-async function getAccessToken(): Promise<string> {
+function isLoopbackAdmin(): boolean {
+  if (typeof window === 'undefined') return false;
+  return ['127.0.0.1', 'localhost', '::1'].includes(window.location.hostname);
+}
+
+async function getAdminHeaders(): Promise<Record<string, string>> {
+  if (isLoopbackAdmin()) {
+    return {};
+  }
   if (!isSaasAuthEnabled() || isSaasMockEnabled()) {
-    throw new Error('管理员额度管理只在网站登录模式下可用。');
+    throw new Error('当前环境未启用管理员数据服务。');
   }
 
   const { session } = await getAuthSnapshot();
   if (!session?.access_token) {
     throw new Error('请先登录管理员账号。');
   }
-  return session.access_token;
+  return {
+    Authorization: `Bearer ${session.access_token}`,
+  };
 }
 
 async function parseJsonResponse<T>(response: Response): Promise<T> {
@@ -105,38 +115,32 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
 }
 
 export async function fetchAdminCreditDetails(email: string): Promise<AdminCreditDetails> {
-  const token = await getAccessToken();
+  const headers = await getAdminHeaders();
   const response = await fetch(`/api/admin/credits?email=${encodeURIComponent(email.trim())}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
+    headers,
   });
   return parseJsonResponse<AdminCreditDetails>(response);
 }
 
 export async function fetchAdminUsageEvents(email = '', limit = 80): Promise<AdminUsageResponse> {
-  const token = await getAccessToken();
+  const headers = await getAdminHeaders();
   const params = new URLSearchParams();
   if (email.trim()) params.set('email', email.trim());
   params.set('limit', String(limit));
   const response = await fetch(`/api/admin/usage?${params.toString()}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
+    headers,
   });
   return parseJsonResponse<AdminUsageResponse>(response);
 }
 
 export async function fetchAdminUsers(email = '', limit = 80, page = 1): Promise<AdminUsersResponse> {
-  const token = await getAccessToken();
+  const headers = await getAdminHeaders();
   const params = new URLSearchParams();
   if (email.trim()) params.set('email', email.trim());
   params.set('limit', String(limit));
   params.set('page', String(page));
   const response = await fetch(`/api/admin/users?${params.toString()}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
+    headers,
   });
   return parseJsonResponse<AdminUsersResponse>(response);
 }
@@ -145,12 +149,13 @@ export async function updateAdminCredits(
   email: string,
   action: 'add' | 'reset' | 'set',
   amount?: number,
+  reason?: string,
 ): Promise<AdminCreditDetails> {
-  const token = await getAccessToken();
+  const headers = await getAdminHeaders();
   const response = await fetch('/api/admin/credits', {
-    body: JSON.stringify({ action, amount, email: email.trim() }),
+    body: JSON.stringify({ action, amount, email: email.trim(), reason: reason?.trim() || undefined }),
     headers: {
-      Authorization: `Bearer ${token}`,
+      ...headers,
       'content-type': 'application/json',
     },
     method: 'POST',
