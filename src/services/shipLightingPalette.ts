@@ -10,6 +10,8 @@ import {
 
 export {
   buildShipLightingPalettePrompt,
+  lightingPaletteTitle,
+  normalizeLightingPaletteSceneName,
   SHIP_LIGHTING_PALETTE_OUTPUT_HEIGHT,
   SHIP_LIGHTING_PALETTE_OUTPUT_WIDTH,
   SHIP_LIGHTING_PALETTE_REQUEST_SIZE,

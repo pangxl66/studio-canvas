@@ -93,13 +93,22 @@ export async function invokeLlmJsonObject(params: {
   }
 }
 
+export type LlmJsonStreamPhase =
+  | 'connecting'
+  | 'streaming'
+  | 'fallback'
+  | 'repairing'
+  | 'validating';
+
 export async function invokeLlmJsonObjectStream(params: {
   systemPrompt: string;
   userPrompt: string;
   temperature?: number;
   model?: string;
+  feature?: string;
   onDelta?: (delta: string, accumulated: string) => void;
   onComplete?: (fullText: string) => void;
+  onPhase?: (phase: LlmJsonStreamPhase) => void;
   signal?: AbortSignal;
 }): Promise<unknown> {
   const config = getResolvedLlmGatewayConfig();
@@ -108,14 +117,21 @@ export async function invokeLlmJsonObjectStream(params: {
   }
 
   const { requestLLM, requestLLMStream } = await import('@/services/ModelGateway');
+  let streamStarted = false;
+  params.onPhase?.('connecting');
   const streamResult = await requestLLMStream(config, {
     systemPrompt: params.systemPrompt,
     userPrompt: params.userPrompt,
     temperature: params.temperature ?? 0.35,
     jsonMode: true,
+    feature: params.feature,
     model: params.model,
     signal: params.signal,
     onDelta: (delta, accumulated) => {
+      if (!streamStarted) {
+        streamStarted = true;
+        params.onPhase?.('streaming');
+      }
       params.onDelta?.(delta, accumulated);
     },
     onComplete: (fullText) => {
@@ -125,13 +141,16 @@ export async function invokeLlmJsonObjectStream(params: {
 
   if (streamResult.ok) {
     try {
+      params.onPhase?.('validating');
       return parseModelJson(streamResult.content);
     } catch {
+      params.onPhase?.('repairing');
       const repairResult = await requestLLM(config, {
         systemPrompt: params.systemPrompt,
         userPrompt: buildJsonRepairUserPrompt(params.userPrompt, streamResult.content),
         temperature: 0.1,
         jsonMode: true,
+        feature: params.feature,
         model: params.model,
         signal: params.signal,
       });
@@ -158,11 +177,13 @@ export async function invokeLlmJsonObjectStream(params: {
     throw new Error(streamResult.error.message);
   }
 
+  params.onPhase?.('fallback');
   const result = await requestLLM(config, {
     systemPrompt: params.systemPrompt,
     userPrompt: params.userPrompt,
     temperature: params.temperature ?? 0.35,
     jsonMode: true,
+    feature: params.feature,
     model: params.model,
     signal: params.signal,
   });
@@ -173,13 +194,16 @@ export async function invokeLlmJsonObjectStream(params: {
 
   params.onComplete?.(result.content);
   try {
+    params.onPhase?.('validating');
     return parseModelJson(result.content);
   } catch {
+    params.onPhase?.('repairing');
     const repairResult = await requestLLM(config, {
       systemPrompt: params.systemPrompt,
       userPrompt: buildJsonRepairUserPrompt(params.userPrompt, result.content),
       temperature: 0.1,
       jsonMode: true,
+      feature: params.feature,
       model: params.model,
       signal: params.signal,
     });

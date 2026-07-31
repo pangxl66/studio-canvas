@@ -19,6 +19,7 @@ export type StudioProjectRestorePolicyInput = {
   activeRecord: StudioProjectRecord | null;
   autosave: StudioProjectFilePayload | null;
   diskSnapshot?: StudioProjectFilePayload | null;
+  recoveryDraft?: StudioProjectFilePayload | null;
   fallbackProjectName: string;
 };
 
@@ -33,6 +34,7 @@ export function chooseStudioProjectRestoreCandidate({
   activeRecord,
   autosave,
   diskSnapshot,
+  recoveryDraft,
   fallbackProjectName,
 }: StudioProjectRestorePolicyInput): StudioProjectRestoreCandidate | null {
   let restorePayload: RestorePayload | null = null;
@@ -70,15 +72,34 @@ export function chooseStudioProjectRestoreCandidate({
     restoreSource = 'disk';
   }
 
+  const currentTimestamp =
+    restorePayload && 'updatedAt' in restorePayload
+      ? restorePayload.updatedAt
+      : restorePayload?.savedAt ?? 0;
+  const activeProjectId = activeRecord?.projectId ?? activeRef?.projectId;
+  const recoveryMatchesActiveProject =
+    !activeProjectId || recoveryDraft?.projectId === activeProjectId;
+  if (
+    recoveryDraft
+    && hasCanvasContent(recoveryDraft)
+    && recoveryMatchesActiveProject
+    && recoveryDraft.savedAt >= currentTimestamp
+  ) {
+    restorePayload = recoveryDraft;
+    restoreSource = 'recovery';
+  }
+
   if (!restorePayload) return null;
 
   const projectName = restorePayload.projectName ?? activeRef?.projectName ?? fallbackProjectName;
   const broadcastText =
     restoreSource === 'disk'
       ? `已从磁盘工程库恢复“${projectName}”。`
-      : restoreSource === 'autosave'
-        ? `已恢复上次自动存档“${projectName}”。`
-        : `已恢复上次工程“${projectName}”。`;
+      : restoreSource === 'recovery'
+        ? `已恢复刷新前的临时工作稿“${projectName}”。`
+        : restoreSource === 'autosave'
+          ? `已恢复上次自动存档“${projectName}”。`
+          : `已恢复上次工程“${projectName}”。`;
 
   return {
     payload: restorePayload,

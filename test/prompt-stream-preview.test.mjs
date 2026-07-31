@@ -24,9 +24,28 @@ test('Prompt model chunks update the preview during the real request without fak
   const store = read('src/store/useStudioStore.ts');
 
   assert.match(store, /onModelStreamChunk: \(_delta: string, accumulated: string\)/);
-  assert.match(store, /window\.requestAnimationFrame\(publishModelStreamPreview\)/);
+  assert.match(store, /window\.setTimeout\(publishModelStreamPreview, 120\)/);
+  assert.match(store, /limitModelStreamPreview\(pendingModelStreamText\)/);
   assert.match(store, /hasModelStreamOutput \|\|= Boolean\(accumulated\.trim\(\)\)/);
-  assert.match(store, /if \(!\(kind === 'prompt' && hasModelStreamOutput\)\)/);
+  assert.match(
+    store,
+    /kind === 'writing' \|\| \(kind === 'prompt' && !hasModelStreamOutput\)/,
+  );
+});
+
+test('Storyboard streaming exposes real phases and skips the fake replay', () => {
+  const store = read('src/store/useStudioStore.ts');
+  const jsonClient = read('src/services/llmJsonClient.ts');
+  const detail = read('src/components/DetailPanel.tsx');
+
+  assert.match(store, /onModelPhaseChange: kind === 'storyboard' \? publishStoryboardPhase/);
+  assert.match(store, /else if \(kind === 'storyboard'\)/);
+  assert.match(store, /storyboardGenerationPhaseCopy\('finalizing'\)/);
+  assert.doesNotMatch(store, /afterEmployee\.sourceSceneCount = emp\.narrativeBeatCount/);
+  assert.match(jsonClient, /params\.onPhase\?\.\('repairing'\)/);
+  assert.match(jsonClient, /params\.onPhase\?\.\('fallback'\)/);
+  assert.match(jsonClient, /params\.onPhase\?\.\('validating'\)/);
+  assert.match(detail, /if \(isPipe && node\.status === 'IN_PROGRESS'\)/);
 });
 
 test('both local and hosted LLM proxies forward upstream SSE without buffering', () => {

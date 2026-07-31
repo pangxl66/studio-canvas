@@ -206,10 +206,6 @@ export function createPipelineStoreSlice(
           Boolean(current) &&
           (!aiSnapshot || JSON.stringify(current) !== JSON.stringify(aiSnapshot));
         if (child && hasManualChanges) {
-          const confirmed = window.confirm(
-            '当前分镜表包含手工修改。继续后会先创建一份独立备份，再用新生成结果更新当前分镜表。是否继续？',
-          );
-          if (!confirmed) return;
           const [backupId] = get().duplicateNodesByIds([child.id]);
           if (backupId) {
             get().patchNodeData(

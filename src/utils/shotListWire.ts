@@ -26,6 +26,28 @@ export function isShotListItemOutputHandleId(handleId: string | null | undefined
   return parseShotListItemOutputHandleId(handleId) != null;
 }
 
+function mergedMemberWireSignature(shot: StoryboardShot): string {
+  return (shot.mergedMembers ?? [])
+    .map((member) => member.wireId ?? '')
+    .filter(Boolean)
+    .sort()
+    .join('|');
+}
+
+export function hasSameShotListWireTopology(
+  previousShots: StoryboardShot[],
+  nextShots: StoryboardShot[],
+): boolean {
+  if (previousShots.length !== nextShots.length) return false;
+  for (let index = 0; index < previousShots.length; index += 1) {
+    const previous = previousShots[index];
+    const next = nextShots[index];
+    if ((previous.wireId ?? '') !== (next.wireId ?? '')) return false;
+    if (mergedMemberWireSignature(previous) !== mergedMemberWireSignature(next)) return false;
+  }
+  return true;
+}
+
 export function reconcileShotListOutputEdges(
   edges: Edge[],
   shotListId: string,

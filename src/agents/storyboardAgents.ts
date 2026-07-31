@@ -2,19 +2,21 @@ import type { StoryboardOutput, StoryboardShot, WritingOutput } from '@/types/st
 import {
   STORYBOARD_DEPT_AGENT_SYSTEM,
   STORYBOARD_DEPT_OUTPUT_SHAPE,
-  STORYBOARD_LEADER_SPEC,
 } from '@/agents/storyboardDeptSpec';
-import { invokeLlmJsonObjectStream, invokeLlmLeaderReview } from '@/services/llmJsonClient';
+import {
+  invokeLlmJsonObjectStream,
+  type LlmJsonStreamPhase,
+} from '@/services/llmJsonClient';
 import { createStoryboardShotWireId } from '@/utils/shotListWire';
 import {
   applyProjectConstraintsToStoryboardOutput,
   extractProjectConstraintsFromTaggedText,
 } from '@/utils/textNodeContext';
+import { countStoryboardInputScenes } from '@/utils/storyboardSceneScope';
 
 export {
   STORYBOARD_DEPT_AGENT_SYSTEM,
   STORYBOARD_DEPT_OUTPUT_SHAPE,
-  STORYBOARD_LEADER_SPEC,
 } from '@/agents/storyboardDeptSpec';
 
 export function getStoryboardDeptSystemPrompt(): string {
@@ -30,9 +32,10 @@ export function cloneStoryboardOutput(o: StoryboardOutput): StoryboardOutput {
 }
 
 export function reindexStoryboardShotIds(shots: StoryboardShot[]): StoryboardShot[] {
-  return shots.map((s, i) => ({ ...s, id: i + 1 }));
+  return shots.map((shot, index) =>
+    shot.id === index + 1 ? shot : { ...shot, id: index + 1 },
+  );
 }
-
 export function splitScriptIntoSceneBlocks(raw: string): string[] {
   const t = raw.trim();
   if (!t) return [];
@@ -40,7 +43,7 @@ export function splitScriptIntoSceneBlocks(raw: string): string[] {
     .split(/\n-{3,}\n|\n\*{3,}\n/)
     .map((s) => s.trim())
     .filter(Boolean);
-  if (byDelim.length > 1) return byDelim.slice(0, 24);
+  if (byDelim.length > 1) return byDelim;
   const lines = t.split('\n').map((l) => l.trim());
   const scenes: string[] = [];
   let buf: string[] = [];
@@ -55,7 +58,11 @@ export function splitScriptIntoSceneBlocks(raw: string): string[] {
   }
   if (buf.length) scenes.push(buf.join('\n').trim());
   if (scenes.length === 0) return [t];
-  return scenes.slice(0, 24);
+  return scenes;
+}
+
+export function countStoryboardSourceScenes(raw: string): number {
+  return countStoryboardInputScenes(raw);
 }
 
 function deriveNarrativeBeatsFromShots(shots: StoryboardShot[]): string[] {
@@ -240,7 +247,7 @@ export function tryParseStoryboardOutput(x: unknown): StoryboardOutput | null {
 }
 
 function buildStoryboardUserPromptFromWriting(script: WritingOutput): string {
-  return `以下为结构化场次表（WritingOutput JSON）。请严格按“徐克式导演分镜流程”处理：先判断场面命题、主次机制、空间结构、人物功能、势能递进与英雄画面，再把这些判断落实到镜头表里，但最终只输出合法 JSON。
+  return `以下为当前单场次数据（WritingOutput JSON）。请严格按“徐克式导演分镜流程”处理：先判断场面命题、主次机制、空间结构、人物功能、势能递进与英雄画面，再把这些判断落实到镜头表里，但最终只输出合法 JSON。禁止新增第二场或跨场扩写。
 
 硬性要求：
 1. narrativeBeats 尽量写成“蓄势 / 转势 / 爆发 / 收束”式节奏摘要，而不是单纯复述剧情。
@@ -257,7 +264,7 @@ ${JSON.stringify(script)}`;
 }
 
 function buildStoryboardUserPromptFromRawText(t: string): string {
-  return `以下为剧本或剧情文本。请先自行提炼场面命题，再分析主次机制、空间结构、人物功能、势能递进与英雄画面，然后把这些判断落实为镜头表，但最终只输出合法 JSON。
+  return `以下为当前单场次的剧本或剧情文本。请先自行提炼场面命题，再分析主次机制、空间结构、人物功能、势能递进与英雄画面，然后把这些判断落实为镜头表，但最终只输出合法 JSON。禁止新增第二场或跨场扩写，所有镜头必须使用同一个 sceneRef。
 
 硬性要求：
 1. 不得跳过场面机制分析后直接切镜。
@@ -281,13 +288,16 @@ export async function runStoryboardDesigner(
   executionSystemPrompt?: string,
   onDelta?: (delta: string, accumulated: string) => void,
   signal?: AbortSignal,
+  onPhase?: (phase: LlmJsonStreamPhase) => void,
 ): Promise<StoryboardOutput> {
   const sys = `${(executionSystemPrompt ?? STORYBOARD_DEPT_AGENT_SYSTEM).trim()}\n\n【输出 JSON 形状参考】\n${STORYBOARD_DEPT_OUTPUT_SHAPE}`;
   const parsed = await invokeLlmJsonObjectStream({
     systemPrompt: sys,
     userPrompt: buildStoryboardUserPromptFromWriting(script),
     temperature: 0.35,
+    feature: 'storyboard-generate',
     onDelta,
+    onPhase,
     signal,
   });
   return applyProjectConstraintsToStoryboardOutput(assertStoryboardOutput(parsed));
@@ -312,10 +322,11 @@ export async function runStoryboardDesignerFromScriptText(
   executionSystemPrompt: string,
   onDelta?: (delta: string, accumulated: string) => void,
   signal?: AbortSignal,
+  onPhase?: (phase: LlmJsonStreamPhase) => void,
 ): Promise<StoryboardOutput> {
   const script = tryParseWritingOutput(raw);
   if (script) {
-    return runStoryboardDesigner(script, executionSystemPrompt, onDelta, signal);
+    return runStoryboardDesigner(script, executionSystemPrompt, onDelta, signal, onPhase);
   }
   const t = raw.trim();
   if (!t) {
@@ -326,31 +337,12 @@ export async function runStoryboardDesignerFromScriptText(
     systemPrompt: sys,
     userPrompt: buildStoryboardUserPromptFromRawText(t),
     temperature: 0.35,
+    feature: 'storyboard-generate',
     onDelta,
+    onPhase,
     signal,
   });
   const output = assertStoryboardOutput(parsed);
   const inputConstraints = extractProjectConstraintsFromTaggedText(t);
   return applyProjectConstraintsToStoryboardOutput(output, inputConstraints);
-}
-
-export type LeaderDecision = { approved: true } | { approved: false; feedback: string };
-
-export async function runStoryboardLeaderReview(
-  output: StoryboardOutput,
-  sourceSceneCount: number,
-  signal?: AbortSignal,
-): Promise<LeaderDecision> {
-  const userPrompt = [
-    sourceSceneCount > 0 ? `参考场次数（用于节奏对齐）：${sourceSceneCount}\n` : '',
-    '以下为员工产出的分镜 JSON，请按徐克式分镜总监规范审核，重点检查场面机制、空间层次、环境参与、势能递进、英雄画面与徐克误区。\n\n',
-    JSON.stringify(output, null, 2),
-  ].join('');
-  const res = await invokeLlmLeaderReview({
-    systemPrompt: STORYBOARD_LEADER_SPEC,
-    userPrompt,
-    temperature: 0.2,
-    signal,
-  });
-  return res.approved ? { approved: true } : { approved: false, feedback: res.feedback ?? '请按审核意见强化场面机制、空间关系与势能设计。' };
 }

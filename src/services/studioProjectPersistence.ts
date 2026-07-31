@@ -64,7 +64,7 @@ export type StudioRecentProjectRef = {
   projectId: string;
   projectName: string;
   openedAt: number;
-  source: 'workspace' | 'file' | 'autosave' | 'disk';
+  source: 'workspace' | 'file' | 'autosave' | 'disk' | 'recovery';
 };
 
 export type StudioProjectRecoveryBundle = {
@@ -958,6 +958,7 @@ export async function listStudioRecentProjects(): Promise<StudioRecentProjectRef
           || item.source === 'file'
           || item.source === 'autosave'
           || item.source === 'disk'
+          || item.source === 'recovery'
         )
       );
     })

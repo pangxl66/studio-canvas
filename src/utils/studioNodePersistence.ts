@@ -104,6 +104,15 @@ function normalizeTransientNodeData(data: StudioNodeData): StudioNodeData {
       generation_error: hasStoryboardOutput ? undefined : data.generation_error,
     };
   }
+  if (data.type === 'image_node' && data.imageGenerationStatus === 'generating') {
+    return {
+      ...data,
+      imageGenerationStatus: 'idle',
+      imageGenerationTask: undefined,
+      status: data.imageDataUrl ? 'APPROVED' : 'NOT_STARTED',
+      generation_error: '上一次图片生成被中断，请重新生成。',
+    };
+  }
   if (data.status !== 'IN_PROGRESS') return data;
   if (data.type === 'text_node') {
     return {
@@ -184,6 +193,22 @@ export function normalizeRestoredStudioNode(node: StudioRFNode): StudioRFNode {
   }
   if (safeNode.type === 'videoNode' && safeNode.data.type === 'video_node') {
     return safeNode;
+  }
+  if (safeNode.type === 'textNode' && safeNode.data.type === 'text_node') {
+    const imageMode = safeNode.data.text_image_task_mode;
+    return {
+      ...safeNode,
+      data: {
+        ...safeNode.data,
+        text_image_task_mode:
+          imageMode === 'skill_analysis' || imageMode === 'continue_shot'
+            ? imageMode
+            : 'extract_shot',
+        text_storyboard_skill_id: normalizeFilmStoryboardSkillId(
+          safeNode.data.text_storyboard_skill_id,
+        ),
+      },
+    };
   }
   if (safeNode.type === 'aiFilmStoryboard' && safeNode.data.type === 'film_storyboard_node') {
     return {

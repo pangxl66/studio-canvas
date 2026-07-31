@@ -94,7 +94,6 @@ const SEEDANCE_PROMPT_SECTION_INDEX = 9;
 const SEEDANCE_OPTIONAL_SECTION_INDICES = new Set<number>();
 const MOUNT_TOKEN_RE = /\|@=([^|\n]+)\|/g;
 const MAX_STUDIO_CANVAS_V26_MOUNT_ITEMS = 15;
-const MAX_STUDIO_CANVAS_V27_MOUNT_ITEMS = 30;
 const STRUCTURED_FIELD_NOISE_RE = /文字生成版|无素材|角色资产|场景资产|半空中袖|口一翻/;
 const ACTION_FRAGMENT_TOKEN_RE =
   /^(?:探头|探身|回头|转身|抬手|收枪|落锁|关门|开口|低声|沉声|冷声|停在|停住|看见|看向|望向|闪身|逼近|后撤|甩袖|翻腕)$/;
@@ -884,13 +883,12 @@ function assertStudioCanvasV26Card(
         `Prompt 模型返回：镜头 ${shotId} 的 Studio Canvas ${versionLabel} 挂载必须使用无空格连续格式，例如“|@=角色||@=道具||@=场景|”。`,
       );
     }
-    const maxMountItems =
-      versionLabel === '2.7'
-        ? MAX_STUDIO_CANVAS_V27_MOUNT_ITEMS
-        : MAX_STUDIO_CANVAS_V26_MOUNT_ITEMS;
-    if (mountTokens.length > maxMountItems) {
+    if (
+      versionLabel !== '2.7' &&
+      mountTokens.length > MAX_STUDIO_CANVAS_V26_MOUNT_ITEMS
+    ) {
       throw new Error(
-        `Prompt 模型返回：镜头 ${shotId} 的 Studio Canvas ${versionLabel} 挂载超过${maxMountItems}项，请删除不影响执行的装饰元素。`,
+        `Prompt 模型返回：镜头 ${shotId} 的 Studio Canvas ${versionLabel} 挂载超过${MAX_STUDIO_CANVAS_V26_MOUNT_ITEMS}项，请删除不影响执行的装饰元素。`,
       );
     }
     if (
@@ -2400,11 +2398,11 @@ function buildStudioCanvasV27RuntimeRules(sourceStoryboard: StoryboardOutput | n
     .replace(STUDIO_CANVAS_V26_MARKER, STUDIO_CANVAS_V27_MARKER)
     .replace(
       '普通镜头建议挂载5至12项，复杂群像、载具或大型场景最多15项',
-      '普通镜头建议挂载5至15项，复杂群像、载具或大型场景最多30项',
+      '普通镜头建议挂载5至15项；复杂群像、载具或大型场景不设固定数量上限，但每项都必须有明确来源并具有执行价值',
     );
   return [
     inheritedV26Rules,
-    '【Studio Canvas 2.7 挂载容量修订】单镜挂载硬上限为30项，覆盖旧版15项限制；不得仅因超过15项删除有明确来源并影响执行、构图、光线、路径、状态或连续性的实体。',
+    '【Studio Canvas 2.7 挂载容量修订】单镜挂载不设数量硬上限，覆盖旧版数量限制；不得仅因挂载项较多而删除有明确来源并影响执行、构图、光线、路径、状态或连续性的实体。',
     '【Studio Canvas 2.7 摄影机参数匹配】',
     '每个镜头先依次判断六项：主体任务、景别、空间任务、摄影机运动、光线环境、焦点职责；完成判断后再选择摄影机机型、主镜头体系、焦段、光圈、景深和焦点变化。',
     '若 Project Bible 或用户已指定摄影机与镜头体系，必须优先继承；未指定时才可自动匹配。自动选择属于 SOFT 技术建议，不得伪装成用户提供的项目事实。',

@@ -197,6 +197,7 @@ export function connectedImageNodesForDepartment(
   nodes: StudioRFNode[],
   edges: Edge[],
 ): StudioRFNode[] {
+  const nodeById = new Map(nodes.map((node) => [node.id, node] as const));
   const incoming = edges.filter(
     (e) =>
       e.target === deptId &&
@@ -204,7 +205,7 @@ export function connectedImageNodesForDepartment(
       (e.sourceHandle == null || e.sourceHandle === DEPT_OUTPUT_HANDLE_ID),
   );
   return incoming
-    .map((edge) => nodes.find((node) => node.id === edge.source))
+    .map((edge) => nodeById.get(edge.source))
     .filter((node): node is StudioRFNode => {
       if (!node) return false;
       return node.type === 'imageNode' && node.data.type === 'image_node';
@@ -250,7 +251,8 @@ export function mergedTextInputForDepartment(
   nodes: StudioRFNode[],
   edges: Edge[],
 ): string | null {
-  const consumerNode = nodes.find((n) => n.id === deptId);
+  const nodeById = new Map(nodes.map((node) => [node.id, node] as const));
+  const consumerNode = nodeById.get(deptId);
   const consumerKind: NodeKind | null =
     consumerNode?.type === 'department' ? consumerNode.data.type : null;
   const incoming = edges.filter(
@@ -261,7 +263,7 @@ export function mergedTextInputForDepartment(
   const hasPromptShotListSource =
     consumerKind === 'prompt' &&
     sorted.some((e) => {
-      const src = nodes.find((n) => n.id === e.source);
+      const src = nodeById.get(e.source);
       return (
         src?.type === 'shotList' &&
         src.data.type === 'shot_list_node' &&
@@ -271,6 +273,10 @@ export function mergedTextInputForDepartment(
 
   const promptShotSelections = new Map<string, string[]>();
   const parts: string[] = [];
+  const imageRefs =
+    consumerKind === 'storyboard' || consumerKind === 'prompt'
+      ? connectedImageNodesForDepartment(deptId, nodes, edges)
+      : [];
   const textContext = serializeTextNodeContext(
     collectTextNodeContextForDepartment(deptId, nodes, edges),
   );
@@ -283,13 +289,12 @@ export function mergedTextInputForDepartment(
     );
   }
   for (const e of sorted) {
-    const src = nodes.find((n) => n.id === e.source);
+    const src = nodeById.get(e.source);
     if (!src) continue;
     if (src.type === 'textNode') {
       continue;
     } else if (src.type === 'imageNode') {
       if (e.sourceHandle != null && e.sourceHandle !== DEPT_OUTPUT_HANDLE_ID) continue;
-      const imageRefs = connectedImageNodesForDepartment(deptId, nodes, edges);
       const index = Math.max(0, imageRefs.findIndex((item) => item.id === src.id));
       const block =
         consumerKind === 'storyboard'
@@ -306,14 +311,15 @@ export function mergedTextInputForDepartment(
       if (src.data.type !== 'shot_list_node') continue;
       const parentId = src.data.sourceStoryboardNodeId;
       const parent = parentId
-        ? nodes.find(
-            (node) =>
-              node.id === parentId &&
-              node.type === 'department' &&
-              node.data.type === 'storyboard',
-          )
+        ? nodeById.get(parentId)
         : null;
-      if (parent && parent.data.status !== 'APPROVED') continue;
+      if (
+        parent?.type === 'department' &&
+        parent.data.type === 'storyboard' &&
+        parent.data.status !== 'APPROVED'
+      ) {
+        continue;
+      }
       const pickedWireId = parseShotListItemOutputHandleId(e.sourceHandle);
       if (consumerKind === 'prompt' && pickedWireId) {
         const bucket = promptShotSelections.get(src.id) ?? [];
@@ -333,7 +339,7 @@ export function mergedTextInputForDepartment(
   }
   if (consumerKind === 'prompt' && promptShotSelections.size > 0) {
     for (const [shotListNodeId, selectedWireIds] of promptShotSelections) {
-      const src = nodes.find((n) => n.id === shotListNodeId);
+      const src = nodeById.get(shotListNodeId);
       if (!src || src.type !== 'shotList') continue;
       const block = buildPromptSelectionFromShotList(src.data, selectedWireIds);
       if (block != null && block.length > 0) parts.push(block);

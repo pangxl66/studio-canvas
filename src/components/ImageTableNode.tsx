@@ -33,11 +33,13 @@ import {
 } from '@/services/imageGenerationModels';
 import {
   buildShipLightingPalettePrompt,
+  lightingPaletteTitle,
   normalizeShipLightingPaletteImage,
   prepareShipLightingPaletteReferences,
   SHIP_LIGHTING_PALETTE_REQUEST_SIZE,
   SHIP_LIGHTING_PALETTE_SKILL_ID,
 } from '@/services/shipLightingPalette';
+import { identifyLightingPaletteScene } from '@/services/lightingPaletteScene';
 import { useStudioStore } from '@/store/useStudioStore';
 import { useStudioGraphContentNodes } from '@/hooks/useStudioGraphContent';
 import type { StoryboardGridImagePage, StudioNodeData } from '@/types/studio';
@@ -51,6 +53,8 @@ type ImageRF = Node<StudioNodeData, 'imageNode'>;
 
 function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
   const patchNodeData = useStudioStore((state) => state.patchNodeData);
+  const addImageNode = useStudioStore((state) => state.addImageNode);
+  const focusNode = useStudioStore((state) => state.focusNode);
   const pushMessage = useStudioStore((state) => state.pushMessage);
   const nodes = useStudioGraphContentNodes();
   const edges = useStudioStore((state) => state.edges);
@@ -58,6 +62,7 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
   const inputRef = useRef<HTMLInputElement>(null);
   const modelMenuRef = useRef<HTMLDivElement>(null);
   const generationAbortRef = useRef<AbortController | null>(null);
+  const generationInFlightRef = useRef(false);
   const [imageSize, setImageSize] = useState<{ width: number; height: number } | null>(null);
   const [previewPageIndex, setPreviewPageIndex] = useState(0);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
@@ -203,6 +208,7 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
   );
 
   const generateGrid = useCallback(async () => {
+    if (generationInFlightRef.current && !isGenerating) return;
     if (isGenerating) {
       generationAbortRef.current?.abort();
       pushMessage({ role: 'system', text: '正在停止分镜宫格图片生成……', nodeId: id });
@@ -217,6 +223,7 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
 
     const sourcePages = paginateStoryboardGridSources(source.shotSources);
     const abortController = new AbortController();
+    generationInFlightRef.current = true;
     generationAbortRef.current = abortController;
     patchNodeData(
       id,
@@ -354,11 +361,13 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
       );
       pushMessage({ role: 'system', text: message, nodeId: id });
     } finally {
+      generationInFlightRef.current = false;
       if (generationAbortRef.current === abortController) generationAbortRef.current = null;
     }
   }, [currentProjectId, data.imageDataUrl, data.imageGenerationPrompt, data.label, id, isGenerating, patchNodeData, pushMessage, selectedModel, selectedModelOption.label, source]);
 
   const generateEdit = useCallback(async () => {
+    if (generationInFlightRef.current && !isGenerating) return;
     if (isGenerating) {
       generationAbortRef.current?.abort();
       pushMessage({ role: 'system', text: '正在停止图片编辑……', nodeId: id });
@@ -379,6 +388,7 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
     }
 
     const abortController = new AbortController();
+    generationInFlightRef.current = true;
     generationAbortRef.current = abortController;
     patchNodeData(
       id,
@@ -482,6 +492,7 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
       );
       pushMessage({ role: 'system', text: message, nodeId: id });
     } finally {
+      generationInFlightRef.current = false;
       if (generationAbortRef.current === abortController) generationAbortRef.current = null;
     }
   }, [
@@ -505,6 +516,7 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
   ]);
 
   const generatePalette = useCallback(async () => {
+    if (generationInFlightRef.current && !isGenerating) return;
     if (isGenerating) {
       if (data.imageGenerationTask === 'palette') {
         generationAbortRef.current?.abort();
@@ -527,20 +539,10 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
     const sourceLabel = hasStoredPaletteSource
       ? data.imagePaletteSourceFileName?.trim() || '色表来源图'
       : editSource.label;
-    const sourceMimeType = hasStoredPaletteSource
-      ? data.imagePaletteSourceMimeType
-      : editSource.mimeType;
-    const sourceWidth = hasStoredPaletteSource
-      ? data.imagePaletteSourceWidth
-      : editSource.width;
-    const sourceHeight = hasStoredPaletteSource
-      ? data.imagePaletteSourceHeight
-      : editSource.height;
-    const sourceSignature = hasStoredPaletteSource
-      ? data.imagePaletteSourceSignature
-      : editSource.signature;
+    const sourceStatusBeforeGeneration = data.status;
 
     const abortController = new AbortController();
+    generationInFlightRef.current = true;
     generationAbortRef.current = abortController;
     patchNodeData(
       id,
@@ -554,13 +556,28 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
     );
     pushMessage({
       role: 'system',
-      text: `正在使用 ${selectedModelOption.label} 读取“${sourceLabel}”并生成飞船内景灯光色表……`,
+      text: `正在读取“${sourceLabel}”，将先识别场景，再使用 ${selectedModelOption.label} 生成对应场景色表……`,
       nodeId: id,
     });
 
     try {
+      pushMessage({
+        role: 'system',
+        text: `正在识别“${sourceLabel}”对应的场景……`,
+        nodeId: id,
+      });
+      const sceneName = await identifyLightingPaletteScene({
+        imageDataUrl: sourceDataUrl,
+        signal: abortController.signal,
+      });
+      const paletteTitle = lightingPaletteTitle(sceneName);
+      pushMessage({
+        role: 'system',
+        text: `已识别场景为“${sceneName}”，正在生成“${paletteTitle}”……`,
+        nodeId: id,
+      });
       const references = await prepareShipLightingPaletteReferences(sourceDataUrl, sourceLabel);
-      const prompt = buildShipLightingPalettePrompt(sourceLabel);
+      const prompt = buildShipLightingPalettePrompt(sourceLabel, sceneName);
       const rawResult = await generateStoryboardGridImage(
         prompt,
         currentProjectId,
@@ -571,15 +588,29 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
       );
       const result = await normalizeShipLightingPaletteImage(rawResult);
       const completedAt = Date.now();
-      patchNodeData(
-        id,
+      const sourceNode = nodes.find((node) => node.id === id);
+      const paletteNodeId = addImageNode(
+        {
+          x: (sourceNode?.position.x ?? 320) + 700,
+          y: sourceNode?.position.y ?? 240,
+        },
         {
           imageDataUrl: result.imageDataUrl,
           imageMimeType: 'image/png',
-          imageFileName: `飞船内景灯光色表-${completedAt}.png`,
+          imageFileName: `${paletteTitle}-${completedAt}.png`,
+          label: paletteTitle,
+          silent: true,
+        },
+      );
+      patchNodeData(
+        paletteNodeId,
+        {
+          imageDataUrl: result.imageDataUrl,
+          imageMimeType: 'image/png',
+          imageFileName: `${paletteTitle}-${completedAt}.png`,
           imageWidth: result.width,
           imageHeight: result.height,
-          imageAnalysisSummary: '按原图主导色与真实高光区域生成的 20+4 色灯光分析板。',
+          imageAnalysisSummary: `${sceneName}场景 · 按原图主导色与真实高光区域生成的 20+4 色灯光分析板。`,
           imageColorAnalysisSummary: undefined,
           imageNodeMode: 'palette',
           imageGenerationModel: result.model,
@@ -588,18 +619,12 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
           imageGenerationReferenceCount: result.referenceImageCount ?? references.length,
           imageGenerationReferenceLabels: [
             `颜色来源:${sourceLabel}`,
-            '版式:ship-interior-lighting-palette@1.0.0',
+            `版式:${SHIP_LIGHTING_PALETTE_SKILL_ID}`,
           ],
           imageGenerationCompletedAt: completedAt,
           imageGenerationStatus: 'idle',
           imageGenerationTask: undefined,
           storyboardGridImages: undefined,
-          imagePaletteSourceDataUrl: sourceDataUrl,
-          imagePaletteSourceMimeType: sourceMimeType,
-          imagePaletteSourceFileName: sourceLabel,
-          imagePaletteSourceWidth: sourceWidth,
-          imagePaletteSourceHeight: sourceHeight,
-          imagePaletteSourceSignature: sourceSignature,
           imagePaletteCompletedAt: completedAt,
           generation_error: undefined,
           status: 'APPROVED',
@@ -610,18 +635,29 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
             size: result.size,
             sourceImageNodeId: id,
             sourceImageLabel: sourceLabel,
+            sceneName,
+            paletteTitle,
             referenceImageCount: result.referenceImageCount ?? references.length,
             completedAt,
           },
         },
         true,
       );
-      setImageSize({ width: result.width ?? 1920, height: result.height ?? 1080 });
-      setPreviewPageIndex(0);
+      patchNodeData(
+        id,
+        {
+          imageGenerationStatus: 'idle',
+          imageGenerationTask: undefined,
+          generation_error: undefined,
+          status: sourceStatusBeforeGeneration,
+        },
+        false,
+      );
+      focusNode(paletteNodeId, { openDetail: false });
       pushMessage({
         role: 'system',
-        text: `已按 ${SHIP_LIGHTING_PALETTE_SKILL_ID} 规范生成 1920×1080 PNG 色表；来源图已保留，可随时恢复或重新生成。`,
-        nodeId: id,
+        text: `已识别“${sceneName}”并新建“${paletteTitle}”图片节点，输出为 1920×1080（16:9）PNG；来源图片未被覆盖。`,
+        nodeId: paletteNodeId,
       });
     } catch (error) {
       const cancelled = abortController.signal.aborted;
@@ -636,28 +672,29 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
           imageGenerationStatus: 'idle',
           imageGenerationTask: undefined,
           generation_error: cancelled ? undefined : message,
-          status: data.imageDataUrl ? 'APPROVED' : cancelled ? 'NOT_STARTED' : 'REJECTED',
+          status: sourceStatusBeforeGeneration,
         },
         false,
       );
       pushMessage({ role: 'system', text: message, nodeId: id });
     } finally {
+      generationInFlightRef.current = false;
       if (generationAbortRef.current === abortController) generationAbortRef.current = null;
     }
   }, [
+    addImageNode,
     currentProjectId,
     data.imageDataUrl,
     data.imageGenerationTask,
     data.imageNodeMode,
     data.imagePaletteSourceDataUrl,
     data.imagePaletteSourceFileName,
-    data.imagePaletteSourceHeight,
-    data.imagePaletteSourceMimeType,
-    data.imagePaletteSourceSignature,
-    data.imagePaletteSourceWidth,
+    data.status,
     editSource,
+    focusNode,
     id,
     isGenerating,
+    nodes,
     patchNodeData,
     pushMessage,
     selectedModel,
@@ -896,19 +933,17 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
               <span className="image-table-node__composer-chip image-table-node__composer-chip--active">
                 参考 {editSource.dataUrl ? '1' : '0'}
               </span>
-              <button
-                type="button"
-                className={`image-table-node__composer-chip image-table-node__composer-chip--button ${data.imageNodeMode === 'palette' ? 'image-table-node__composer-chip--palette-active' : ''}`}
-                onClick={generatePalette}
-                disabled={isGenerating && !isPaletteGenerating}
-                title="按 ship-interior-lighting-palette Skill 生成 1920×1080 灯光色表"
-              >
-                {isPaletteGenerating
-                  ? '停止色表'
-                  : data.imageNodeMode === 'palette'
-                    ? '重新生成色表'
-                    : '生成色表'}
-              </button>
+              {data.imageNodeMode !== 'palette' ? (
+                <button
+                  type="button"
+                  className="image-table-node__composer-chip image-table-node__composer-chip--button"
+                  onClick={generatePalette}
+                  disabled={isGenerating && !isPaletteGenerating}
+                  title="先识别场景，再新建 1920×1080（16:9）场景色表图片节点"
+                >
+                  {isPaletteGenerating ? '停止色表' : '生成色表'}
+                </button>
+              ) : null}
               <span className="image-table-node__composer-chip">标记</span>
               <span className="image-table-node__composer-chip">风格</span>
             </div>

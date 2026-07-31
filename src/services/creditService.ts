@@ -65,20 +65,26 @@ export async function fetchCreditStatus(): Promise<CreditStatus | null> {
     return null;
   }
 
-  if (isSaasMockEnabled()) {
-    return readMockCredit();
-  }
-
+  const mockEnabled = isSaasMockEnabled();
   const { session } = await getAuthSnapshot();
   if (!session?.access_token) {
-    return null;
+    return mockEnabled ? readMockCredit() : null;
   }
 
-  const response = await fetch('/api/credits/status', {
-    headers: {
-      Authorization: `Bearer ${session.access_token}`,
-    },
-  });
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${session.access_token}`,
+  };
+  if (mockEnabled && session.user?.email) {
+    headers['X-Studio-Mock-Email'] = session.user.email;
+  }
+
+  let response: Response;
+  try {
+    response = await fetch('/api/credits/status', { headers });
+  } catch (error) {
+    if (mockEnabled) return readMockCredit();
+    throw error;
+  }
 
   const payload = (await response.json().catch(() => null)) as
     | { error?: { message?: string } }
@@ -86,10 +92,13 @@ export async function fetchCreditStatus(): Promise<CreditStatus | null> {
     | null;
 
   if (!response.ok) {
+    if (mockEnabled) return readMockCredit();
     const message =
       payload && 'error' in payload && payload.error?.message ? payload.error.message : '读取额度失败。';
     throw new Error(message);
   }
 
-  return payload as CreditStatus;
+  const status = payload as CreditStatus;
+  if (mockEnabled && status) writeMockCredit(status);
+  return status;
 }

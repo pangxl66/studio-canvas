@@ -125,10 +125,10 @@ function applyRuntimeSkillCompatibility(instruction: string, id: string): string
   return instruction
     .replace(
       '一般单镜建议挂载5至12项；复杂群像、载具或大型场景可增加至15项',
-      '一般单镜建议挂载5至15项；复杂群像、载具或大型场景可增加至30项',
+      '一般单镜建议挂载5至15项；复杂群像、载具或大型场景不设固定数量上限，但每项都必须有明确来源并具有执行价值',
     )
     .concat(
-      '\n\n【本地运行时容量修订】Studio Canvas 2.7 单镜挂载硬上限为30项；本条覆盖技能正文中的旧版15项限制。',
+      '\n\n【本地运行时容量修订】Studio Canvas 2.7 单镜挂载不设数量硬上限；本条覆盖技能正文中的旧版数量限制。不得虚构、重复或堆叠不影响执行的装饰项。',
     );
 }
 

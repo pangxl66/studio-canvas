@@ -12,18 +12,19 @@ import { appendProjectContextForConsumer } from '@/services/ProjectContext';
 import { PromptAgent } from '@/services/agents/PromptAgent';
 import { PromptLeaderAgent } from '@/services/agents/PromptLeaderAgent';
 import { StoryboardAgent } from '@/services/agents/StoryboardAgent';
-import { StoryboardLeaderAgent } from '@/services/agents/StoryboardLeaderAgent';
 import { WritingAgent } from '@/services/agents/WritingAgent';
 import { WritingLeaderAgent } from '@/services/agents/WritingLeaderAgent';
 import {
   runRulePromptFromStoryboard,
   runRulePromptLeaderReview,
   runRuleStoryboardFromText,
-  runRuleStoryboardLeaderReview,
 } from '@/services/rulePipeline';
 import { resolveAndComposeMountedSkills } from '@/services/skillLoader';
+import type { LlmJsonStreamPhase } from '@/services/llmJsonClient';
 import type { StudioRFNode } from '@/types/reactFlow';
 import type { ApprovedAsset, PromptOutput, StoryboardOutput, WritingOutput } from '@/types/studio';
+import { countStoryboardSourceScenes } from '@/agents/storyboardAgents';
+import { hasMultipleStoryboardOutputScenes } from '@/utils/storyboardSceneScope';
 
 export type DepartmentPipelineKind = 'writing' | 'storyboard' | 'prompt';
 
@@ -44,6 +45,7 @@ export type ExecuteTaskParams = {
     currentVersionContent: string;
   };
   onModelStreamChunk?: (delta: string, accumulated: string) => void;
+  onModelPhaseChange?: (phase: LlmJsonStreamPhase) => void;
   signal?: AbortSignal;
 };
 
@@ -58,7 +60,11 @@ export type ExecuteTaskSuccess = {
 
 export type ExecuteTaskFailure = {
   ok: false;
-  reason: 'empty_input' | 'storyboard_no_beats' | 'exception';
+  reason:
+    | 'empty_input'
+    | 'storyboard_no_beats'
+    | 'storyboard_multiple_scenes'
+    | 'exception';
   message?: string;
 };
 
@@ -70,6 +76,7 @@ export type EmployeePhaseResult =
       inputUsed: string;
       output: WritingOutput | StoryboardOutput | PromptOutput;
       narrativeBeatCount?: number;
+      sourceSceneCount?: number;
       skillWarnings?: string[];
     }
   | ExecuteTaskFailure;
@@ -229,6 +236,23 @@ export async function executeEmployeePhase(params: ExecuteTaskParams): Promise<E
             `以下挂载技能未找到或与分镜节点不匹配，已忽略：${resolved.invalidIds.join('、')}`,
           );
         }
+        const storyboardSourceSceneCount = countStoryboardSourceScenes(
+          resolveBaseTaskInput(params),
+        );
+        if (storyboardSourceSceneCount === 0) {
+          return {
+            ok: false,
+            reason: 'storyboard_no_beats',
+            message: '当前结构化输入没有可用场次。请先补充一个完整场次；本次未调用分镜模型，也未消耗分镜生成额度。',
+          };
+        }
+        if (storyboardSourceSceneCount > 1) {
+          return {
+            ok: false,
+            reason: 'storyboard_multiple_scenes',
+            message: `分镜节点定位为单场次工作台，当前输入识别到 ${storyboardSourceSceneCount} 个场次。请只保留一个场次后再生成；本次未调用分镜模型，也未消耗分镜生成额度。`,
+          };
+        }
 
         if (executionMode === 'rule') {
           skillWarnings.push('当前使用本地规则兜底：分镜节点没有调用 API。');
@@ -238,6 +262,7 @@ export async function executeEmployeePhase(params: ExecuteTaskParams): Promise<E
             inputUsed,
             output,
             narrativeBeatCount: output.narrativeBeats.length,
+            sourceSceneCount: storyboardSourceSceneCount,
             skillWarnings,
           };
         }
@@ -255,6 +280,7 @@ export async function executeEmployeePhase(params: ExecuteTaskParams): Promise<E
           systemPrompt,
           params.onModelStreamChunk,
           params.signal,
+          params.onModelPhaseChange,
         );
 
         if (!output.shots?.length) {
@@ -264,12 +290,20 @@ export async function executeEmployeePhase(params: ExecuteTaskParams): Promise<E
             message: '分镜输出为空：没有解析到有效 shots，请检查输入文本或模型返回结果。',
           };
         }
+        if (hasMultipleStoryboardOutputScenes(output)) {
+          return {
+            ok: false,
+            reason: 'storyboard_multiple_scenes',
+            message: '模型返回了多个 sceneRef，与单场次分镜约束冲突。请重试，或在任务补充要求中明确当前场次名称。',
+          };
+        }
 
         return {
           ok: true,
           inputUsed,
           output,
           narrativeBeatCount: output.narrativeBeats.length,
+          sourceSceneCount: storyboardSourceSceneCount,
           skillWarnings: skillWarnings.length ? skillWarnings : undefined,
         };
       }
@@ -351,32 +385,7 @@ export async function executeLeaderPhase(args: {
       }
 
       case 'storyboard': {
-        const output = args.output as StoryboardOutput;
-        if (executionMode === 'rule') {
-          return runRuleStoryboardLeaderReview(output);
-        }
-        if (!isGatewayReady()) {
-          return {
-            approved: false,
-            feedback: '当前为 Deep 模式：分镜审核需要通过 API 执行，但当前未配置可用 API。',
-          };
-        }
-        try {
-          const decision = await StoryboardLeaderAgent.selfReview(
-            output,
-            args.sourceSceneCount ?? output.narrativeBeats.length,
-            args.signal,
-          );
-          return {
-            approved: decision.approved,
-            feedback: decision.approved ? null : decision.feedback,
-          };
-        } catch (error) {
-          return {
-            approved: false,
-            feedback: `Deep 模式下分镜审核调用 API 失败：${error instanceof Error ? error.message : String(error)}`,
-          };
-        }
+        return { approved: true, feedback: null };
       }
 
       case 'prompt': {

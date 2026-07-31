@@ -55,6 +55,7 @@ function sourceLabel(source: StudioRecentProjectRef['source']): string {
   if (source === 'disk') return '磁盘工程';
   if (source === 'file') return '文件导入';
   if (source === 'autosave') return '自动存档';
+  if (source === 'recovery') return '临时恢复稿';
   return '工作区';
 }
 

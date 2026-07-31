@@ -334,7 +334,7 @@ function checkStoryboardShotScopeGuards() {
   );
   assertOccurrenceAtLeast(
     studioStore,
-    '请从镜头表里的逐镜头 Output 端口拖出连接。',
+    '请从分镜表里的逐镜头 Output 端口拖出连接。',
     2,
     'StudioStore should reject whole shot-list output for downstream prompt/storyboard creation',
   );

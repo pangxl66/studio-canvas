@@ -14,7 +14,12 @@ import {
 } from 'react';
 import { useStudioStore } from '@/store/useStudioStore';
 import { useStudioGraphContentNodes } from '@/hooks/useStudioGraphContent';
-import type { StudioNodeData } from '@/types/studio';
+import {
+  DEFAULT_STORYBOARD_SKILL_ID,
+  listSkillsInFolder,
+  normalizeFilmStoryboardSkillId,
+} from '@/services/skillLoader';
+import type { StudioNodeData, TextImageTaskMode } from '@/types/studio';
 import {
   collectTextNodeContextForNode,
   inferTextNodeSemanticRole,
@@ -112,6 +117,15 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
   );
   const plainMode = data.text_view_mode === 'plain';
   const polishMode = data.text_polish_mode === 'simple' ? 'simple' : 'deep';
+  const imageTaskMode: TextImageTaskMode =
+    data.text_image_task_mode === 'skill_analysis' ||
+    data.text_image_task_mode === 'continue_shot'
+      ? data.text_image_task_mode
+      : 'extract_shot';
+  const storyboardSkills = useMemo(() => listSkillsInFolder('storyboard'), []);
+  const storyboardSkillId = normalizeFilmStoryboardSkillId(
+    data.text_storyboard_skill_id ?? DEFAULT_STORYBOARD_SKILL_ID,
+  );
   const hasText = Boolean(displayText.trim());
   const hasImages = imageReferences.length > 0;
   const hasVideos = videoReferences.length > 0;
@@ -245,6 +259,13 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
     [id, patchNodeData],
   );
 
+  const onImageTaskModeChange = useCallback(
+    (nextMode: TextImageTaskMode) => {
+      patchNodeData(id, { text_image_task_mode: nextMode }, false);
+    },
+    [id, patchNodeData],
+  );
+
   const commitLabel = useCallback(
     (value = labelDraft) => {
       const normalized = value.replace(/[\r\n]+/g, ' ').trim().slice(0, 80) || '文本卡片';
@@ -313,9 +334,30 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
       }
       commitDraft();
       const nextInstruction = instruction.trim();
-      void runTextPolish(id, nextInstruction ? { instruction: nextInstruction, mode: polishMode } : { mode: polishMode });
+      void runTextPolish(id, {
+        ...(nextInstruction ? { instruction: nextInstruction } : {}),
+        mode: polishMode,
+        ...(hasImages && !hasVideos
+          ? {
+              imageMode: imageTaskMode,
+              storyboardSkillId,
+            }
+          : {}),
+      });
     },
-    [busy, commitDraft, id, instruction, onStop, polishMode, runTextPolish],
+    [
+      busy,
+      commitDraft,
+      hasImages,
+      hasVideos,
+      id,
+      imageTaskMode,
+      instruction,
+      onStop,
+      polishMode,
+      runTextPolish,
+      storyboardSkillId,
+    ],
   );
 
   return (
@@ -461,37 +503,119 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
               {visualReferences.length > 4 ? <span className="text-node__workspace-more">+{visualReferences.length - 4}</span> : null}
             </div>
           ) : null}
+          {hasImages && !hasVideos ? (
+            <div className="text-node__image-task-panel">
+              <div className="text-node__image-task-head">
+                <strong>图片任务</strong>
+                <span>连线只挂载图片，点击生成后才执行所选任务</span>
+              </div>
+              <div
+                className="text-node__image-task-modes"
+                role="group"
+                aria-label="图片分析任务"
+              >
+                <button
+                  type="button"
+                  className={imageTaskMode === 'extract_shot' ? 'is-active' : ''}
+                  disabled={busy}
+                  onClick={() => onImageTaskModeChange('extract_shot')}
+                  title="只提取当前图片中的场景、景别、机位、构图、表演、光影和连续性，不生成下一镜"
+                >
+                  提取当前分镜
+                </button>
+                <button
+                  type="button"
+                  className={imageTaskMode === 'skill_analysis' ? 'is-active' : ''}
+                  disabled={busy}
+                  onClick={() => onImageTaskModeChange('skill_analysis')}
+                  title="按选择的分镜 Skill 分析当前图片的场面机制、空间结构与英雄画面"
+                >
+                  分镜 Skill 分析
+                </button>
+                <button
+                  type="button"
+                  className={imageTaskMode === 'continue_shot' ? 'is-active' : ''}
+                  disabled={busy}
+                  onClick={() => onImageTaskModeChange('continue_shot')}
+                  title="把图片作为首帧，并根据文本内容推算后续动作与镜头发展"
+                >
+                  下一镜推算
+                </button>
+              </div>
+              {imageTaskMode === 'skill_analysis' ? (
+                <label className="text-node__image-skill">
+                  <span>分镜 Skill</span>
+                  <select
+                    value={storyboardSkillId}
+                    disabled={busy}
+                    onChange={(event) =>
+                      patchNodeData(
+                        id,
+                        { text_storyboard_skill_id: event.target.value },
+                        true,
+                      )
+                    }
+                    aria-label="图片分析分镜 Skill"
+                  >
+                    {storyboardSkills.map((skill) => (
+                      <option key={skill.id} value={skill.id}>
+                        {skill.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+            </div>
+          ) : null}
           <textarea
             className="text-node__workspace-input"
             value={instruction}
             onChange={onInstructionChange}
             onKeyDown={stopKeyboardPropagation}
             onKeyUp={stopKeyboardPropagation}
-            placeholder=""
+            placeholder={
+              hasImages && !hasVideos
+                ? imageTaskMode === 'continue_shot'
+                  ? '补充下一镜要发生的动作、情绪或镜头意图（可选）'
+                  : imageTaskMode === 'skill_analysis'
+                    ? '补充分镜导演要求或需要重点分析的内容（可选）'
+                    : '补充场景名称、人物身份或需要核对的信息（可选）'
+                : '输入本次优化要求（可选）'
+            }
             spellCheck={false}
             disabled={busy}
           />
           <div className="text-node__workspace-footer">
-            <div className="text-node__polish-mode" role="group" aria-label="文本优化模式">
-              <button
-                type="button"
-                className={`text-node__polish-mode-btn ${polishMode === 'simple' ? 'text-node__polish-mode-btn--active' : ''}`}
-                disabled={busy}
-                onClick={() => onPolishModeChange('simple')}
-                title="简单优化：贴近原文，只做轻量润色"
-              >
-                简单
-              </button>
-              <button
-                type="button"
-                className={`text-node__polish-mode-btn ${polishMode === 'deep' ? 'text-node__polish-mode-btn--active' : ''}`}
-                disabled={busy}
-                onClick={() => onPolishModeChange('deep')}
-                title="深度优化：补充影视级运镜、构图、灯光和表演细节"
-              >
-                深度
-              </button>
-            </div>
+            {hasImages && !hasVideos ? (
+              <span className="text-node__image-task-summary">
+                {imageTaskMode === 'continue_shot'
+                  ? '将推算下一镜'
+                  : imageTaskMode === 'skill_analysis'
+                    ? '只分析当前画面 · 使用 Skill'
+                    : '默认安全模式 · 不推算下一镜'}
+              </span>
+            ) : (
+              <div className="text-node__polish-mode" role="group" aria-label="文本优化模式">
+                <button
+                  type="button"
+                  className={`text-node__polish-mode-btn ${polishMode === 'simple' ? 'text-node__polish-mode-btn--active' : ''}`}
+                  disabled={busy}
+                  onClick={() => onPolishModeChange('simple')}
+                  title="简单优化：贴近原文，只做轻量润色"
+                >
+                  简单
+                </button>
+                <button
+                  type="button"
+                  className={`text-node__polish-mode-btn ${polishMode === 'deep' ? 'text-node__polish-mode-btn--active' : ''}`}
+                  disabled={busy}
+                  onClick={() => onPolishModeChange('deep')}
+                  title="深度优化：补充影视级运镜、构图、灯光和表演细节"
+                >
+                  深度
+                </button>
+              </div>
+            )}
             <div className="text-node__workspace-actions">
               <button
                 type="button"

@@ -3,7 +3,20 @@ import {
   TEXT_POLISH_TIMEOUT_MESSAGE,
   TEXT_POLISH_TIMEOUT_MS,
 } from '@/services/textPolishLifecycle';
+import {
+  DEFAULT_STORYBOARD_SKILL_ID,
+  getSkillById,
+  normalizeFilmStoryboardSkillId,
+} from '@/services/skillLoader';
+import {
+  buildImageShotExtractionSystemPrompt,
+  buildImageShotExtractionUserPrompt,
+  buildStoryboardSkillImageAnalysisSystemPrompt,
+  buildStoryboardSkillImageAnalysisUserPrompt,
+  imageTaskLabel,
+} from '@/services/textImageTaskPrompts';
 import type { StudioRFNode } from '@/types/reactFlow';
+import type { TextImageTaskMode } from '@/types/studio';
 import type { StudioState } from '../useStudioStore';
 
 type StudioSet = (
@@ -252,6 +265,23 @@ export function createTextStoreSlice(
       const nodeText = (node.data.raw_text ?? node.data.input ?? '').trim();
       const instruction = opts?.instruction?.trim() || '';
       const mode: TextPolishMode = opts?.mode === 'simple' ? 'simple' : node.data.text_polish_mode === 'simple' ? 'simple' : 'deep';
+      const imageTaskMode: TextImageTaskMode =
+        opts?.imageMode === 'skill_analysis' || opts?.imageMode === 'continue_shot'
+          ? opts.imageMode
+          : opts?.imageMode === 'extract_shot'
+            ? 'extract_shot'
+            : node.data.text_image_task_mode === 'skill_analysis' ||
+                node.data.text_image_task_mode === 'continue_shot'
+              ? node.data.text_image_task_mode
+              : 'extract_shot';
+      const storyboardSkillId = normalizeFilmStoryboardSkillId(
+        opts?.storyboardSkillId ??
+          node.data.text_storyboard_skill_id ??
+          DEFAULT_STORYBOARD_SKILL_ID,
+      );
+      const storyboardSkill =
+        getSkillById(storyboardSkillId) ??
+        getSkillById(DEFAULT_STORYBOARD_SKILL_ID);
       const sourceText = nodeText || instruction;
       const instructionForPrompt = nodeText ? instruction : '';
       const imageRefs = connectedImageReferences(nodeId, get().nodes, get().edges);
@@ -263,6 +293,12 @@ export function createTextStoreSlice(
 
       if (!sourceText && !hasImageContext && !hasVideoContext) {
         get().pushMessage({ role: 'system', text: '文本卡片没有可润色的内容。', nodeId });
+        return;
+      }
+      if (hasImageContext && !hasVideoContext && !primaryImage?.imageDataUrl) {
+        const message = '连接的图片节点还没有可读取的图片数据，请等待图片加载完成后再提交。';
+        get().patchNodeData(nodeId, { generation_error: message }, true);
+        get().pushMessage({ role: 'system', text: message, nodeId });
         return;
       }
       if (hasVideoContext && !primaryVideo?.frameDataUrl) {
@@ -300,7 +336,11 @@ export function createTextStoreSlice(
           streaming_preview: hasVideoContext
             ? 'LLM 正在读取连接的视频抽帧，并分析构图、元素、景别与运镜...'
             : hasImageContext
-            ? 'LLM 正在读取连接的图片节点，并生成影视级画面提示词...'
+            ? imageTaskMode === 'skill_analysis'
+              ? `LLM 正在读取图片，并按“${storyboardSkill?.name ?? '分镜 Skill'}”分析当前画面...`
+              : imageTaskMode === 'continue_shot'
+                ? 'LLM 正在读取图片首帧，并推算下一镜的动作与镜头发展...'
+                : 'LLM 正在读取图片，只提取当前画面的分镜事实...'
             : mode === 'simple'
               ? 'LLM 正在以简单模式轻量优化文本...\n\n完成后会自动写回正文。'
               : 'LLM 正在以深度模式按影视剧本规范润色文本...\n\n完成后会自动写回正文。',
@@ -312,7 +352,7 @@ export function createTextStoreSlice(
         text: hasVideoContext
           ? '文本节点正在结合视频节点调用 LLM 分析构图、元素和运镜。'
           : hasImageContext
-            ? '文本节点正在结合图片节点调用 LLM 生成影视级提示词。'
+            ? `文本节点正在执行“${imageTaskLabel(imageTaskMode)}”；图片连线本身不会自动推算。`
             : '文本节点正在调用 LLM 按剧本格式润色正文。',
         nodeId,
       });
@@ -343,12 +383,43 @@ export function createTextStoreSlice(
                 model,
                 imageDataUrl: primaryImage.imageDataUrl,
                 imageDetail: 'auto',
-                systemPrompt: buildImageAwareSystemPrompt(),
-                userPrompt: buildImageAwareUserPrompt(sourceText, imageRefs, instructionForPrompt),
-                temperature: 0.28,
+                systemPrompt:
+                  imageTaskMode === 'skill_analysis'
+                    ? buildStoryboardSkillImageAnalysisSystemPrompt(
+                        storyboardSkill?.name ?? '默认分镜 Skill',
+                        storyboardSkill?.system_instruction ?? '',
+                      )
+                    : imageTaskMode === 'continue_shot'
+                      ? buildImageAwareSystemPrompt()
+                      : buildImageShotExtractionSystemPrompt(),
+                userPrompt:
+                  imageTaskMode === 'skill_analysis'
+                    ? buildStoryboardSkillImageAnalysisUserPrompt(
+                        sourceText,
+                        imageRefs,
+                        instructionForPrompt,
+                      )
+                    : imageTaskMode === 'continue_shot'
+                      ? buildImageAwareUserPrompt(sourceText, imageRefs, instructionForPrompt)
+                      : buildImageShotExtractionUserPrompt(
+                          sourceText,
+                          imageRefs,
+                          instructionForPrompt,
+                        ),
+                temperature:
+                  imageTaskMode === 'continue_shot'
+                    ? 0.28
+                    : imageTaskMode === 'skill_analysis'
+                      ? 0.22
+                      : 0.12,
                 jsonMode: false,
-                feature: 'image-text-polish',
-                maxOutputTokens: 2200,
+                feature:
+                  imageTaskMode === 'skill_analysis'
+                    ? 'image-storyboard-skill-analysis'
+                    : imageTaskMode === 'continue_shot'
+                      ? 'image-next-shot'
+                      : 'image-shot-extraction',
+                maxOutputTokens: imageTaskMode === 'skill_analysis' ? 3600 : 2600,
                 signal: controller.signal,
               })
             : await requestLLM(config, {
@@ -452,7 +523,7 @@ export function createTextStoreSlice(
             review_result: hasVideoContext
               ? `已结合 ${videoRefs.length} 个视频节点完成构图、元素和运镜分析。`
               : hasImageContext
-                ? `已结合 ${imageRefs.length} 个图片节点生成影视级提示词。`
+                ? `已结合 ${imageRefs.length} 个图片节点完成“${imageTaskLabel(imageTaskMode)}”。`
                 : undefined,
           },
           true,
@@ -462,7 +533,7 @@ export function createTextStoreSlice(
           text: hasVideoContext
             ? '文本节点已结合视频完成构图、元素和运镜分析，并已写回正文。'
             : hasImageContext
-              ? '文本节点已结合图片生成影视级提示词，并已写回正文。'
+              ? `文本节点“${imageTaskLabel(imageTaskMode)}”已完成，并已写回正文。`
               : `文本节点 LLM ${mode === 'simple' ? '简单优化' : '深度优化'}已完成，并已写回正文。`,
           nodeId,
         });

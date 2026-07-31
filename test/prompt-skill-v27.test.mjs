@@ -69,17 +69,23 @@ test('Studio Canvas 2.7 has a dedicated runtime, schema, validator, and output f
   assert.match(engine, /STUDIO_CANVAS_PROMPT_V27_SKILL_ID/);
 });
 
-test('Studio Canvas 2.7 allows up to 30 mounted execution items', () => {
+test('Studio Canvas 2.7 has no mounted execution item limit', () => {
   const agents = read('src/agents/promptAgents.ts');
   const brain = read('src/services/agents/PromptBrain.ts');
   const loader = read('src/services/skillLoader.ts');
+  const skill = read('src/skills/prompt/generate-storyboard-prompts/无根提示词SKILL.md');
 
-  assert.match(agents, /MAX_STUDIO_CANVAS_V27_MOUNT_ITEMS = 30/);
-  assert.match(agents, /versionLabel === '2\.7'/);
-  assert.match(agents, /单镜挂载硬上限为30项/);
-  assert.match(brain, /V2\.7 单镜挂载硬上限放宽为30项/);
-  assert.match(loader, /复杂群像、载具或大型场景可增加至30项/);
-  assert.match(loader, /旧版15项限制/);
+  assert.doesNotMatch(agents, /MAX_STUDIO_CANVAS_V27_MOUNT_ITEMS/);
+  assert.match(agents, /versionLabel !== '2\.7'/);
+  assert.match(agents, /单镜挂载不设数量硬上限/);
+  assert.match(brain, /V2\.7 单镜挂载不设数量硬上限/);
+  assert.match(loader, /复杂群像、载具或大型场景不设固定数量上限/);
+  assert.match(loader, /旧版数量限制/);
+  assert.match(skill, /复杂镜头不设固定数量上限/);
+  assert.doesNotMatch(
+    [agents, brain, loader, skill].join('\n'),
+    /(?:硬上限为|最多|增加至)30项/,
+  );
 });
 
 test('V2.7 keeps V2.6 adjacent detailed mount normalization', () => {

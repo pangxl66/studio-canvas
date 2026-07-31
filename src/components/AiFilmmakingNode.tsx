@@ -75,7 +75,7 @@ const NODE_META: Record<
   },
   film_storyboard_node: {
     eyebrow: 'STORYBOARD',
-    title: '影视分镜',
+    title: '影视分镜图',
     action: '生成宫格提示词',
     empty: '可只连接提示词节点生成分镜宫格；图片节点可作为角色、场景或道具参考图。',
     accent: 'storyboard',
@@ -84,7 +84,7 @@ const NODE_META: Record<
     eyebrow: 'SEEDANCE',
     title: '影视分镜提示词',
     action: '生成视频提示词',
-    empty: '连接文本、角色设定、影视分镜或图片参考后，自动识别 A/B/C 模式。',
+    empty: '连接文本、角色设定、影视分镜图或图片参考后，自动识别 A/B/C 模式。',
     accent: 'video',
   },
 };
@@ -215,7 +215,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
     if (!isStoryboardNode || !storyboardSource.shots.length) return;
     if (
       data.generation_error ===
-      '请先连接分镜表、分镜部门，或镜头表中的逐镜头 Output，再生成分镜宫格图片。'
+      '请先连接分镜表、分镜部，或分镜表中的逐镜头 Output，再生成影视分镜图。'
     ) {
       patchNodeData(id, { generation_error: undefined }, false);
     }
@@ -340,7 +340,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
       patchNodeData(id, { film_storyboard_skill_id: nextId, generation_error: undefined }, false);
       pushMessage({
         role: 'system',
-        text: `影视分镜 Skill 已切换为：${skill?.name ?? nextId}。`,
+        text: `影视分镜图 Skill 已切换为：${skill?.name ?? nextId}。`,
         nodeId: id,
       });
     },
@@ -437,7 +437,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
     if (!storyboardSource.shots.length) {
       const message = storyboardPromptSource.sourceNodeIds.length
         ? '已连接提示词节点，但还没有可用的逐镜头提示词。请先运行提示词节点，再生成分镜宫格图片。'
-        : '请先连接提示词节点，或连接分镜表、分镜部门、镜头表中的逐镜头 Output，再生成分镜宫格图片。';
+        : '请先连接提示词节点，或连接分镜表、分镜部、分镜表中的逐镜头 Output，再生成影视分镜图。';
       patchNodeData(id, { generation_error: message }, false);
       pushMessage({ role: 'system', text: message, nodeId: id });
       return;
@@ -847,7 +847,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
         id={FILM_INPUT_HANDLE_ID}
         className="ai-film-node__handle ai-film-node__handle--in"
         title={isStoryboardNode
-          ? 'Input：可只接提示词节点，并接图片作为参考图；也兼容分镜或镜头表来源。'
+          ? 'Input：可只接提示词节点，并接图片作为参考图；也兼容分镜部或分镜表来源。'
           : 'Input：接入文本、图片、角色设定或分镜提示词。'}
       />
       <header className="ai-film-node__head">
@@ -880,7 +880,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
           <div className="ai-film-node__grid-gallery">
             {embeddedStoryboardPages.map((page) => (
               <figure key={page.id} className="ai-film-node__grid-preview">
-                <img src={page.imageDataUrl} alt={`影视分镜宫格第 ${page.pageIndex} 页`} />
+                <img src={page.imageDataUrl} alt={`影视分镜图第 ${page.pageIndex} 页`} />
                 <figcaption>
                   第 {page.pageIndex}/{page.totalPages} 张 · {page.panelCount} 个镜头 · 目标 {selectedStoryboardAspectRatio} · 实际 {page.size.replace('x', '×')} · 合并提示词单次生成
                 </figcaption>
@@ -889,7 +889,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
           </div>
         ) : isStoryboardNode && data.imageDataUrl ? (
           <figure className="ai-film-node__grid-preview">
-            <img src={data.imageDataUrl} alt={data.imageFileName || '影视分镜宫格'} />
+            <img src={data.imageDataUrl} alt={data.imageFileName || '影视分镜图'} />
             <figcaption>{data.imageGenerationSourceShotIds?.length ?? 0} 个镜头 · 旧版单图结果</figcaption>
           </figure>
         ) : null}
@@ -948,7 +948,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
                   <div className="image-table-node__model-menu" role="listbox" aria-label="选择影视分镜图片模型">
                     <div className="image-table-node__model-menu-head">
                       <strong>图片模型</strong>
-                      <span>影视分镜宫格</span>
+                      <span>影视分镜图</span>
                     </div>
                     {STORYBOARD_GRID_IMAGE_MODELS.map((model) => {
                       const active = model.id === selectedStoryboardModel;
@@ -1041,7 +1041,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
                               onChange={(event) =>
                                 onReferenceEntityChange(reference.imageNodeId, reference.kind, event.target.value)
                               }
-                              aria-label="对应分解表对象"
+                              aria-label="对应分镜表对象"
                               disabled={anyBusy || !entities.length}
                             >
                               <option value="">{entities.length ? '选择角色/场景/道具' : '未识别到表格数据'}</option>
@@ -1059,7 +1059,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
                 </div>
                 <p>
                   {storyboardReferenceContext.entities.length
-                    ? `已从${storyboardReferenceContext.entitySource === 'connected' ? '连入的分镜/分解表' : '当前项目分解表'}识别 ${storyboardReferenceContext.entities.length} 个角色、场景或道具；生成时会把原图传给 ${selectedStoryboardModelOption.label}。`
+                    ? `已从${storyboardReferenceContext.entitySource === 'connected' ? '连入的分镜部/分镜表' : '当前项目分镜表'}识别 ${storyboardReferenceContext.entities.length} 个角色、场景或道具；生成时会把原图传给 ${selectedStoryboardModelOption.label}。`
                     : '尚未识别到角色、场景或道具。请确认分镜表包含场景、角色、道具列，或先运行剧本拆解。'}
                   {storyboardReferenceContext.references.length > storyboardBusinessReferenceLimit
                     ? ` 单次最多读取 ${storyboardBusinessReferenceLimit} 张业务参考图，并固定保留 1 张宫格布局参考图。`

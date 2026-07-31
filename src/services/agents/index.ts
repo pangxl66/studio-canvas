@@ -2,7 +2,6 @@ export { WritingAgent } from '@/services/agents/WritingAgent';
 export { StoryboardAgent } from '@/services/agents/StoryboardAgent';
 export { PromptAgent } from '@/services/agents/PromptAgent';
 export { WritingLeaderAgent } from '@/services/agents/WritingLeaderAgent';
-export { StoryboardLeaderAgent } from '@/services/agents/StoryboardLeaderAgent';
 export { PromptLeaderAgent } from '@/services/agents/PromptLeaderAgent';
 export {
   executeTask,

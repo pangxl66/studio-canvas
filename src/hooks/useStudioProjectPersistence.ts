@@ -12,7 +12,15 @@ import {
 } from '@/services/studioProjectPersistence';
 import { getActiveDiskProjectSnapshot } from '@/services/localProjectDiskService';
 import { chooseStudioProjectRestoreCandidate } from '@/services/studioProjectRestorePolicy';
+import {
+  clearStudioRecoveryDraft,
+  mergeStudioRecoveryDraftVisuals,
+  readStudioRecoveryDraft,
+  writeStudioRecoveryDraft,
+} from '@/services/studioProjectRecoveryDraft';
 import { useStudioStore } from '@/store/useStudioStore';
+
+const RECOVERY_DRAFT_DEBOUNCE_MS = 600;
 
 type UseStudioProjectPersistenceOptions = {
   rememberRecent: (
@@ -36,6 +44,7 @@ export function useStudioProjectPersistence({
 }: UseStudioProjectPersistenceOptions): StudioProjectPersistenceController {
   const persistenceReadyRef = useRef(false);
   const dirtyRevisionRef = useRef(0);
+  const recoveryDraftTimerRef = useRef<number | null>(null);
   const [saveStatus, setSaveStatus] = useState<StudioProjectSaveStatus>('idle');
   const saveStatusRef = useRef<StudioProjectSaveStatus>('idle');
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
@@ -46,6 +55,30 @@ export function useStudioProjectPersistence({
     if (saveStatusRef.current === next) return;
     saveStatusRef.current = next;
     setSaveStatus(next);
+  }, []);
+
+  const flushRecoveryDraft = useCallback(() => {
+    if (!persistenceReadyRef.current) return;
+    if (recoveryDraftTimerRef.current != null) {
+      window.clearTimeout(recoveryDraftTimerRef.current);
+      recoveryDraftTimerRef.current = null;
+    }
+    const {
+      nodes: liveNodes,
+      edges: liveEdges,
+      currentProjectId: liveProjectId,
+      currentProjectName: liveProjectName,
+    } = useStudioStore.getState();
+    if (liveNodes.length === 0 && liveEdges.length === 0 && !liveProjectId) {
+      clearStudioRecoveryDraft();
+      return;
+    }
+    writeStudioRecoveryDraft(
+      createStudioProjectPayload(liveNodes, liveEdges, {
+        projectId: liveProjectId ?? undefined,
+        projectName: liveProjectName,
+      }),
+    );
   }, []);
 
   const persistCurrentProjectSnapshot = useCallback(async () => {
@@ -68,16 +101,20 @@ export function useStudioProjectPersistence({
       });
       await queueStudioProjectSnapshot(payload);
       setLastSavedAt(payload.savedAt);
-      updateSaveStatus(
-        dirtyRevisionRef.current === revisionAtSaveStart ? 'saved' : 'dirty',
-      );
+      if (dirtyRevisionRef.current === revisionAtSaveStart) {
+        clearStudioRecoveryDraft();
+        updateSaveStatus('saved');
+      } else {
+        flushRecoveryDraft();
+        updateSaveStatus('dirty');
+      }
     } catch (saveError) {
       const message = saveError instanceof Error ? saveError.message : '工程保存失败';
       setError(message);
       updateSaveStatus('error');
       throw saveError;
     }
-  }, [updateSaveStatus]);
+  }, [flushRecoveryDraft, updateSaveStatus]);
 
   useEffect(() => {
     let previousNodes = useStudioStore.getState().nodes;
@@ -94,8 +131,15 @@ export function useStudioProjectPersistence({
       ) {
         updateSaveStatus('dirty');
       }
+      if (recoveryDraftTimerRef.current != null) {
+        window.clearTimeout(recoveryDraftTimerRef.current);
+      }
+      recoveryDraftTimerRef.current = window.setTimeout(() => {
+        recoveryDraftTimerRef.current = null;
+        flushRecoveryDraft();
+      }, RECOVERY_DRAFT_DEBOUNCE_MS);
     });
-  }, [updateSaveStatus]);
+  }, [flushRecoveryDraft, updateSaveStatus]);
 
   useEffect(() => {
     let cancelled = false;
@@ -108,6 +152,9 @@ export function useStudioProjectPersistence({
           return;
         }
 
+        const rawRecoveryDraft = parseStudioProjectPayload(
+          readStudioRecoveryDraft(),
+        );
         const [activeRef, autosave, rawDiskSnapshot] = await Promise.all([
           getActiveStudioProjectRef(),
           getStudioAutosave(),
@@ -117,12 +164,20 @@ export function useStudioProjectPersistence({
         const diskSnapshot = await hydrateStudioProjectPayloadImages(
           parseStudioProjectPayload(rawDiskSnapshot),
         );
+        const recoveryDraft = rawRecoveryDraft
+          ? mergeStudioRecoveryDraftVisuals(rawRecoveryDraft, [
+              activeRecord,
+              autosave,
+              diskSnapshot,
+            ])
+          : null;
 
         const restore = chooseStudioProjectRestoreCandidate({
           activeRef,
           activeRecord,
           autosave,
           diskSnapshot,
+          recoveryDraft,
           fallbackProjectName: useStudioStore.getState().currentProjectName,
         });
 
@@ -163,6 +218,7 @@ export function useStudioProjectPersistence({
   useEffect(() => {
     const flushSnapshot = () => {
       if (!persistenceReadyRef.current) return;
+      flushRecoveryDraft();
       void persistCurrentProjectSnapshot().catch((error) => {
         console.warn('IndexedDB autosave failed', error);
       });
@@ -182,7 +238,15 @@ export function useStudioProjectPersistence({
       window.removeEventListener('beforeunload', flushSnapshot);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [persistCurrentProjectSnapshot]);
+  }, [flushRecoveryDraft, persistCurrentProjectSnapshot]);
+
+  useEffect(() => {
+    return () => {
+      if (recoveryDraftTimerRef.current != null) {
+        window.clearTimeout(recoveryDraftTimerRef.current);
+      }
+    };
+  }, []);
 
   return {
     error,

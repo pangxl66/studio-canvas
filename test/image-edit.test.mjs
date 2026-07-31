@@ -87,3 +87,37 @@ test('selected image node opens an in-place editor and keeps a restorable baseli
   assert.match(styles, /\.image-table-node__body--edit\s*\{[\s\S]*?position:\s*absolute/);
   assert.match(styles, /\.image-table-node__body--edit\s*\{[\s\S]*?top:\s*calc\(100% \+ 24px\)/);
 });
+
+test('image generation state is not blocked by the department workflow guard', () => {
+  const component = read('src/components/ImageTableNode.tsx');
+  const store = read('src/store/useStudioStore.ts');
+  const persistence = read('src/utils/studioNodePersistence.ts');
+
+  assert.match(
+    store,
+    /target\.data\.type !== 'text_node'\s*&&\s*target\.data\.type !== 'image_node'/,
+  );
+  assert.match(component, /const generationInFlightRef = useRef\(false\)/);
+  assert.match(component, /generationInFlightRef\.current && !isGenerating/);
+  assert.match(component, /generationInFlightRef\.current = true/);
+  assert.match(component, /generationInFlightRef\.current = false/);
+  assert.match(
+    persistence,
+    /data\.type === 'image_node' && data\.imageGenerationStatus === 'generating'/,
+  );
+  assert.match(persistence, /imageGenerationStatus:\s*'idle'/);
+});
+
+test('credit refresh requests preserve the local mock user identity', () => {
+  const creditService = read('src/services/creditService.ts');
+
+  assert.doesNotMatch(
+    creditService,
+    /if \(isSaasMockEnabled\(\)\) \{\s*return readMockCredit\(\);\s*\}/,
+  );
+  assert.match(creditService, /const mockEnabled = isSaasMockEnabled\(\)/);
+  assert.match(creditService, /mockEnabled && session\.user\?\.email/);
+  assert.match(creditService, /headers\['X-Studio-Mock-Email'\] = session\.user\.email/);
+  assert.match(creditService, /fetch\('\/api\/credits\/status', \{\s*headers\s*\}\)/);
+  assert.match(creditService, /if \(mockEnabled && status\) writeMockCredit\(status\)/);
+});

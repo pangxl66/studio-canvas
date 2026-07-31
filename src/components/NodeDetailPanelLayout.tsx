@@ -86,10 +86,10 @@ export function NodeDetailPanelLayout(props: {
   const fb = leaderFeedback?.trim() ?? '';
   const preview = fb.length > 160 ? `${fb.slice(0, 160)}…` : fb;
   const statusLabel =
-    kind === 'prompt' &&
+    (kind === 'prompt' || kind === 'storyboard') &&
     (status === 'WAITING_REVIEW' || status === 'REVIEWED' || status === 'APPROVED')
       ? '已生成'
-      : kind === 'prompt' && status === 'IN_PROGRESS'
+      : (kind === 'prompt' || kind === 'storyboard') && status === 'IN_PROGRESS'
         ? '生成中'
         : STATUS_LABEL[status] ?? status;
 

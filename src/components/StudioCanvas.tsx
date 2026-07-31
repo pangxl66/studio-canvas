@@ -234,6 +234,11 @@ type NodeGalleryItem = {
 };
 
 const CONNECTION_MAGNET_HOVER_PX = 56;
+const STUDIO_CONNECTION_LINE_STYLE: CSSProperties = {
+  stroke: '#c084fc',
+  strokeWidth: 3,
+  filter: 'drop-shadow(0 0 5px rgba(192, 132, 252, 0.72))',
+};
 
 const PANE_GALLERY_ITEMS_BASE: NodeGalleryItem[] = [
   {
@@ -257,8 +262,8 @@ const PANE_GALLERY_ITEMS_BASE: NodeGalleryItem[] = [
   {
     id: 'storyboard',
     kind: 'storyboard',
-    title: '分镜节点',
-    subtitle: '把剧本拆成镜头，并自动生成镜头表。',
+    title: '分镜部',
+    subtitle: '把单场次拆成镜头，并自动生成分镜表。',
     badge: '镜头设计',
     accentClass: 'node-picker__card--storyboard',
     icon: '镜',
@@ -311,7 +316,7 @@ const PANE_GALLERY_ITEMS_BASE: NodeGalleryItem[] = [
   {
     id: 'film_storyboard_node',
     kind: 'film_storyboard_node',
-    title: '分镜宫格',
+    title: '影视分镜图',
     subtitle: '读取文本或分镜表镜头，按镜头数量生成宫格分镜提示词。',
     badge: '新模式',
     accentClass: 'node-picker__card--film',
@@ -320,7 +325,7 @@ const PANE_GALLERY_ITEMS_BASE: NodeGalleryItem[] = [
   {
     id: 'film_video_prompt_node',
     kind: 'film_video_prompt_node',
-    title: '分镜提示词',
+    title: '影视分镜提示词',
     subtitle: '自动识别 A/B/C 输入模式，生成 Seedance 视频提示词。',
     badge: '新模式',
     accentClass: 'node-picker__card--film',
@@ -338,7 +343,7 @@ const PANE_GALLERY_ITEMS_BASE: NodeGalleryItem[] = [
   {
     id: 'shot_list',
     kind: 'shot_list_node',
-    title: '镜头表',
+    title: '分镜表',
     subtitle: '由分镜执行后自动生成，也可以作为 Prompt 的上游资产。',
     badge: '自动生成',
     accentClass: 'node-picker__card--shot-list',
@@ -1071,7 +1076,7 @@ export function StudioCanvas() {
           importedFileName: file.name,
           importedSheetName: parsed.sheetName,
           importedRowCount: parsed.rowCount,
-          label: `${parsed.sheetName || '镜头表'} · ${file.name.replace(/\.xlsx$/i, '')}`,
+          label: `${parsed.sheetName || '分镜表'} · ${file.name.replace(/\.xlsx$/i, '')}`,
         });
         focusNode(nodeId, { openDetail: true });
       } catch (error) {
@@ -1171,6 +1176,7 @@ export function StudioCanvas() {
         onConnectStart={onConnectStart}
         onConnectEnd={onConnectEndOuter}
         connectionMode={ConnectionMode.Loose}
+        connectionLineStyle={STUDIO_CONNECTION_LINE_STYLE}
         connectionDragThreshold={0}
         isValidConnection={(edge) => {
           const state = useStudioStore.getState();
@@ -1258,7 +1264,7 @@ export function StudioCanvas() {
         >
           <div className="node-picker__title">
             {shotListOutputPanePicker
-              ? '镜头表 Output · 创建下游节点并连线'
+              ? '分镜表 Output · 创建下游节点并连线'
               : promptOutputPanePicker
                 ? 'Prompt Output · 创建下游审核节点'
               : '拉线至空白 · 创建节点并连线'}

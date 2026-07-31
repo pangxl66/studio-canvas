@@ -46,6 +46,8 @@ import {
   departmentNodeHasInputWire,
 } from '@/utils/departmentInputWire';
 import { formatPrompt, formatSeedanceCards } from '@/utils/promptFormat';
+import { storyboardGenerationPhaseCopy } from '@/utils/generationPreview';
+import { countStoryboardInputScenes } from '@/utils/storyboardSceneScope';
 
 function isWritingOutput(o: unknown): o is WritingOutput {
   if (!o || typeof o !== 'object') return false;
@@ -198,6 +200,11 @@ export function DetailPanel() {
     };
   }, [edges, node, rfNodes, selectedId]);
 
+  const storyboardInputSceneCount = useMemo(() => {
+    if (!node || node.type !== 'storyboard') return 0;
+    return countStoryboardInputScenes(node.input ?? '');
+  }, [node?.id, node?.input, node?.type]);
+
   const patchDepartmentOrShotList = useCallback(
     (nid: string, patch: Partial<StudioNodeData>, bump?: boolean) => {
       const row = useStudioStore.getState().nodes.find((x) => x.id === nid)?.data;
@@ -255,6 +262,7 @@ export function DetailPanel() {
 
   const detailPanelRootRef = useRef<HTMLElement | null>(null);
   const layoutBodyRef = useRef<HTMLDivElement>(null);
+  const shouldAutoScrollRef = useRef(true);
 
   const scrollDetailContentToBottom = useCallback(() => {
     const run = () => {
@@ -267,9 +275,23 @@ export function DetailPanel() {
     });
   }, []);
 
+  useEffect(() => {
+    const layoutBody = layoutBodyRef.current;
+    if (!detailOpen || !layoutBody) return;
+    shouldAutoScrollRef.current = true;
+    const handleScroll = () => {
+      const distanceToBottom =
+        layoutBody.scrollHeight - layoutBody.scrollTop - layoutBody.clientHeight;
+      shouldAutoScrollRef.current = distanceToBottom <= 72;
+    };
+    layoutBody.addEventListener('scroll', handleScroll, { passive: true });
+    return () => layoutBody.removeEventListener('scroll', handleScroll);
+  }, [detailOpen, node?.id]);
+
   useLayoutEffect(() => {
     if (!detailOpen || !node) return;
     if (node.status !== 'IN_PROGRESS') return;
+    if (!shouldAutoScrollRef.current) return;
     scrollDetailContentToBottom();
     const t = window.setTimeout(scrollDetailContentToBottom, 80);
     return () => window.clearTimeout(t);
@@ -282,30 +304,6 @@ export function DetailPanel() {
     node?.streaming_preview,
     scrollDetailContentToBottom,
   ]);
-
-  useEffect(() => {
-    if (
-      !detailOpen ||
-      !selectedId ||
-      node?.type !== 'storyboard' ||
-      node.status !== 'IN_PROGRESS' ||
-      node.generation_phase !== 'leader' ||
-      !tryParseStoryboardOutput(node.output)
-    ) {
-      return;
-    }
-    patchNodeData(
-      selectedId,
-      {
-        status: 'APPROVED',
-        generation_phase: undefined,
-        streaming_preview: undefined,
-        generation_error: undefined,
-        review_result: null,
-      },
-      true,
-    );
-  }, [detailOpen, node, patchNodeData, selectedId]);
 
   useEffect(() => {
     if (
@@ -359,7 +357,7 @@ export function DetailPanel() {
         ? '执行任务'
         : '按当前输入重新生成并覆盖当前结果';
     const items: DetailPanelHeaderActionItem[] = [];
-    if (isPipe && node.type !== 'storyboard' && node.status === 'IN_PROGRESS') {
+    if (isPipe && node.status === 'IN_PROGRESS') {
       items.push({
         id: 'stop',
         label: '停止生成',
@@ -441,7 +439,7 @@ export function DetailPanel() {
               disabled={!canPromptAct || node.status === 'IN_PROGRESS'}
               title={
                 canPromptAct
-                  ? '创建影视分镜宫格节点，并把当前 Prompt 输出自动连入'
+                  ? '创建影视分镜图节点，并把当前 Prompt 输出自动连入'
                   : '请先生成 Prompt 输出'
               }
               onClick={() => {
@@ -783,6 +781,10 @@ export function DetailPanel() {
     pipelineKind &&
     node.status === 'IN_PROGRESS' &&
     (Boolean(node.streaming_preview?.trim()) || node.generation_phase != null);
+  const storyboardPhaseCopy =
+    node.type === 'storyboard'
+      ? storyboardGenerationPhaseCopy(node.generation_phase)
+      : null;
 
   const streamingSection = showStreamingBlock ? (
     node.type === 'prompt' ? (
@@ -810,7 +812,7 @@ export function DetailPanel() {
         <p className="prompt-run-progress__note">
           {node.generation_phase === 'leader'
             ? '正在校验镜头覆盖、结构字段与下游可用性。'
-            : '正在根据镜头表与参考信息生成逐镜提示词。'}
+            : '正在根据分镜表与参考信息生成逐镜提示词。'}
           每次执行按 1 次任务额度计费。
         </p>
         <details className="prompt-run-progress__raw">
@@ -824,9 +826,7 @@ export function DetailPanel() {
       <div className="detail-panel__section">
         <div className="detail-panel__hint">
           {node.type === 'storyboard'
-            ? node.generation_phase === 'leader'
-              ? '分镜生成进度 · 校验整理'
-              : '分镜生成进度 · 生成镜头'
+            ? storyboardPhaseCopy?.title
             : node.generation_phase === 'leader'
               ? '总监大脑 · 审核/流式'
               : '员工大脑 · 流式预览'}
@@ -835,9 +835,7 @@ export function DetailPanel() {
           {node.streaming_preview?.trim()
             ? node.streaming_preview
             : node.type === 'storyboard'
-              ? node.generation_phase === 'leader'
-                ? '（正在校验镜头结构并准备分解表节点…）'
-                : '（正在连接分镜生成 API…）'
+              ? storyboardPhaseCopy?.message
               : node.generation_phase === 'leader'
                 ? '（正在连接总监审核 API…）'
                 : '…'}
@@ -1013,12 +1011,15 @@ export function DetailPanel() {
                 disabled={
                   node.status === 'IN_PROGRESS' ||
                   (node.status !== 'NOT_STARTED' && node.status !== 'REJECTED') ||
+                  storyboardInputSceneCount > 1 ||
                   (!Boolean(node.input?.trim()) &&
                     !(selectedId != null && departmentNodeHasInputWire(selectedId, edges, rfNodes)))
                 }
                 title={
                   node.status === 'IN_PROGRESS'
                     ? '生成中'
+                    : storyboardInputSceneCount > 1
+                      ? `当前识别到 ${storyboardInputSceneCount} 个场次，请只保留一个场次`
                     : !Boolean(node.input?.trim()) &&
                         !(selectedId != null && departmentNodeHasInputWire(selectedId, edges, rfNodes))
                       ? '请先连接文本卡片，或在下方填写剧本正文'
@@ -1029,9 +1030,15 @@ export function DetailPanel() {
                 执行生成
               </button>
             </div>
-            <p className="detail-panel__tip detail-panel__tip--tight">
-              这里不重复展示上游文本卡片全文；请用左侧 Input 连线，或在下框手动粘贴剧本正文。
-            </p>
+            {storyboardInputSceneCount > 1 ? (
+              <p className="detail-panel__feedback" style={{ marginTop: 8 }}>
+                当前识别到 {storyboardInputSceneCount} 个场次。请在上游或下方输入框中只保留一个场次，再执行生成。
+              </p>
+            ) : (
+              <p className="detail-panel__tip detail-panel__tip--tight">
+                单场次模式：一次只处理一个场次。多场次输入会在调用模型前拦截，不消耗分镜生成额度。
+              </p>
+            )}
             {storyboardLegacyHint ? (
               <p className="detail-panel__feedback" style={{ marginTop: 8 }}>
                 {storyboardLegacyHint}
@@ -1069,9 +1076,9 @@ export function DetailPanel() {
           {streamingSection}
           {storyboardParsed && !hasShotListChild ? (
             <div className="detail-panel__section detail-panel__section--table-preview">
-              <div className="detail-panel__hint">分解表恢复预览</div>
+              <div className="detail-panel__hint">分镜表恢复预览</div>
               <p className="detail-panel__tip detail-panel__tip--tight">
-                正在补建缺失的分解表节点；补建完成后会自动打开。
+                正在补建缺失的分镜表节点；补建完成后会自动打开。
                 {node.status === 'IN_PROGRESS' ? '（生成中不可编辑）' : ''}
               </p>
               <div className="detail-panel__table-preview-frame">
@@ -1080,7 +1087,7 @@ export function DetailPanel() {
                   preview
                   nodeId={node.id}
                   patchNodeData={patchNodeData}
-                  editable={node.status !== 'IN_PROGRESS'}
+                  editable={false}
                   storyboardAiSnapshot={node.storyboard_ai_snapshot ?? null}
                 />
               </div>
@@ -1093,14 +1100,14 @@ export function DetailPanel() {
               disabled={!storyboardShotListChildId}
               title={
                 storyboardShotListChildId
-                  ? '在画布上定位并打开分解表节点'
-                  : '执行生成成功后将自动创建并打开分解表节点'
+                  ? '在画布上定位并打开分镜表节点'
+                  : '执行生成成功后将自动创建并打开分镜表节点'
               }
               onClick={() => {
                 if (!storyboardShotListChildId) {
                   pushMessage({
                     role: 'system',
-                    text: '暂无关联的分解表节点：请先成功执行生成。',
+                    text: '暂无关联的分镜表节点：请先成功执行生成。',
                     nodeId: node.id,
                   });
                   return;
@@ -1108,7 +1115,7 @@ export function DetailPanel() {
                 focusNode(storyboardShotListChildId, { openDetail: true });
               }}
             >
-              打开分解表节点
+              打开分镜表节点
             </button>
           </div>
         </>
@@ -1143,7 +1150,7 @@ export function DetailPanel() {
               <pre className="detail-panel__script detail-panel__script--source">
                 {node.input?.trim()
                   ? node.input
-                  : '（暂无输入：请从镜头表子节点右侧 Output 或文本卡片连到 Input）'}
+                  : '（暂无输入：请从分镜表子节点右侧 Output 或文本卡片连到 Input）'}
               </pre>
             </details>
           </div>

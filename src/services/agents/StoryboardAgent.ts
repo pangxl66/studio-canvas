@@ -1,5 +1,6 @@
 import { STORYBOARD_DEPT_AGENT_SYSTEM } from '@/agents/storyboardDeptSpec';
 import { runStoryboardDesignerFromScriptText } from '@/agents/storyboardAgents';
+import type { LlmJsonStreamPhase } from '@/services/llmJsonClient';
 import type { StoryboardOutput } from '@/types/studio';
 
 /** 分镜员工策略 */
@@ -11,7 +12,14 @@ export class StoryboardAgent {
     executionSystemPrompt: string,
     onDelta?: (delta: string, accumulated: string) => void,
     signal?: AbortSignal,
+    onPhase?: (phase: LlmJsonStreamPhase) => void,
   ): Promise<StoryboardOutput> {
-    return runStoryboardDesignerFromScriptText(scriptText, executionSystemPrompt, onDelta, signal);
+    return runStoryboardDesignerFromScriptText(
+      scriptText,
+      executionSystemPrompt,
+      onDelta,
+      signal,
+      onPhase,
+    );
   }
 }

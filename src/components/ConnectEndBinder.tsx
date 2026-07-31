@@ -79,10 +79,13 @@ export function ConnectEndBinder({
       dragStartRef.current = null;
 
       if (cs.isValid === true) return;
-      if (cs.toNode != null) return;
-
       const fromNode = cs.fromNode;
       if (!fromNode?.id) return;
+
+      // A shot-list row handle sits inside a wide source node. Releasing after
+      // a short outward drag can still geometrically land on that same node;
+      // treat it like a pane drop instead of silently discarding the gesture.
+      if (cs.toNode != null && cs.toNode.id !== fromNode.id) return;
 
       const hid = started?.handleId ?? cs.fromHandle?.id ?? null;
       const ht = (started?.handleType ?? cs.fromHandle?.type ?? null) as 'source' | 'target' | null;

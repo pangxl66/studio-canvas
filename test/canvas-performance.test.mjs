@@ -89,6 +89,9 @@ test('project persistence does not save on graph changes or a five minute interv
   );
   assert.match(persistence, /window\.addEventListener\('pagehide', flushSnapshot\)/);
   assert.match(persistence, /document\.addEventListener\('visibilitychange', onVisibilityChange\)/);
+  assert.match(persistence, /RECOVERY_DRAFT_DEBOUNCE_MS/);
+  assert.match(persistence, /writeStudioRecoveryDraft/);
+  assert.match(persistence, /flushRecoveryDraft\(\);[\s\S]*?persistCurrentProjectSnapshot/);
   assert.match(persistence, /const saveStatusRef = useRef<StudioProjectSaveStatus>\('idle'\)/);
   assert.match(persistence, /saveStatusRef\.current !== 'dirty'/);
   assert.doesNotMatch(persistence, /setSaveStatus\(\(current\)/);

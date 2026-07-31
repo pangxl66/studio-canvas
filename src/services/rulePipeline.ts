@@ -591,38 +591,6 @@ export function runRulePromptFromStoryboard(inputText: string): PromptOutput {
   };
 }
 
-export function runRuleStoryboardLeaderReview(output: StoryboardOutput): {
-  approved: boolean;
-  feedback: string | null;
-} {
-  if (!output.shots?.length) {
-    return { approved: false, feedback: '规则审核未通过：分镜结果为空。' };
-  }
-  const noDescription = output.shots.filter((shot) => !shot.description.trim()).map((shot) => shot.id);
-  if (noDescription.length) {
-    return { approved: false, feedback: `规则审核未通过：镜头 ${noDescription.join('、')} 缺少画面描述。` };
-  }
-  const envHits = output.shots.filter((shot) =>
-    /(门|窗|帘|屏风|楼梯|栏杆|桥|火|水|烟|屋檐|通道|高位|低位)/.test(
-      `${shot.description} ${shot.sound ?? ''} ${shot.note ?? ''}`,
-    ),
-  ).length;
-  if (envHits < Math.max(1, Math.floor(output.shots.length / 3))) {
-    return {
-      approved: false,
-      feedback: '规则审核未通过：环境参与不足。请加强高低差、遮挡、危险源或可借力物，让空间真正卷入动作。',
-    };
-  }
-  const beatsText = output.narrativeBeats.join('\n');
-  if (!/蓄势/.test(beatsText) || !/爆发/.test(beatsText)) {
-    return {
-      approved: false,
-      feedback: '规则审核未通过：narrativeBeats 缺少“蓄势 / 爆发”节奏信息，请补足势能递进。',
-    };
-  }
-  return { approved: true, feedback: null };
-}
-
 export function runRulePromptLeaderReview(output: PromptOutput): {
   approved: boolean;
   feedback: string | null;

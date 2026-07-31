@@ -25,7 +25,8 @@ const ALLOWED_TRANSITIONS: Record<NodeStatus, NodeStatus[]> = {
   WAITING_REVIEW: ['APPROVED', 'REJECTED', 'IN_PROGRESS'],
   /** 已阅：优化迭代回到生成中，或终审通过 / 打回 */
   REVIEWED: ['IN_PROGRESS', 'APPROVED', 'REJECTED'],
-  APPROVED: [],
+  /** 已通过结果仍允许由用户主动重新生成。 */
+  APPROVED: ['IN_PROGRESS'],
   REJECTED: ['IN_PROGRESS', 'NOT_STARTED'],
 };
 

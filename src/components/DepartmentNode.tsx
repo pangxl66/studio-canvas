@@ -153,6 +153,7 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
   const hasInputFeed = useStudioStore(
     useCallback((s) => departmentNodeHasInputWire(id, s.edges, s.nodes), [id]),
   );
+  const hasRunnableInput = hasInputFeed || Boolean(data.input?.trim());
 
   const displayStatus = data.status;
   const promptHasGenerated =
@@ -160,10 +161,12 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
     (data.status === 'WAITING_REVIEW' ||
       data.status === 'REVIEWED' ||
       data.status === 'APPROVED');
+  const storyboardHasGenerated =
+    data.type === 'storyboard' && data.status === 'APPROVED';
   const statusDisplay =
-    promptHasGenerated
+    promptHasGenerated || storyboardHasGenerated
       ? '已生成'
-      : displayStatus === 'NOT_STARTED' && hasInputFeed
+      : displayStatus === 'NOT_STARTED' && hasRunnableInput
         ? '输入已挂载'
         : displayStatus;
 
@@ -351,12 +354,12 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
             <button
               type="button"
               className="dept-node__play nodrag nopan"
-              disabled={!hasInputFeed}
+              disabled={!hasRunnableInput}
               onPointerDown={(e) => e.stopPropagation()}
               onMouseDown={(e) => e.stopPropagation()}
               onClick={handlePlay}
-              title={hasInputFeed ? '执行任务' : '请先连接输入源'}
-              aria-label={hasInputFeed ? '执行任务' : '请先连接输入源'}
+              title={hasRunnableInput ? '执行任务' : '请先连接输入源或填写输入内容'}
+              aria-label={hasRunnableInput ? '执行任务' : '请先连接输入源或填写输入内容'}
             >
               <PlayIcon />
             </button>
@@ -389,7 +392,7 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
           ) : null}
           <span
             className={`dept-node__status dept-node__status--${displayStatus}${
-              displayStatus === 'NOT_STARTED' && hasInputFeed ? ' dept-node__status--feed' : ''
+              displayStatus === 'NOT_STARTED' && hasRunnableInput ? ' dept-node__status--feed' : ''
             }`}
           >
             {statusDisplay}
@@ -506,7 +509,7 @@ function DepartmentNodeInner({ id, data, selected }: NodeProps<DeptRF>) {
           position={Position.Bottom}
           id={SHOT_LIST_LINK_HANDLE_ID}
           className="dept-handle dept-handle--shot-list-link"
-          title="分解表节点：生成完成后会自动在下方创建、连线并打开。"
+          title="分镜表节点：生成完成后会自动在下方创建、连线并打开。"
         />
       ) : null}
 

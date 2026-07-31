@@ -75,3 +75,36 @@ test('newer disk snapshot wins and an older disk snapshot never rolls the projec
   });
   assert.equal(olderDisk?.source, 'workspace');
 });
+
+test('newer same-project session recovery draft wins after refresh', () => {
+  const restored = chooseStudioProjectRestoreCandidate({
+    activeRef: { projectId: 'project-a', projectName: 'Project A' },
+    activeRecord: record({ updatedAt: 200 }),
+    autosave: payload({ savedAt: 201 }),
+    diskSnapshot: payload({ savedAt: 202 }),
+    recoveryDraft: payload({
+      savedAt: 203,
+      nodes: [{ id: 'refresh-only-node' }],
+    }),
+    fallbackProjectName: 'Untitled',
+  });
+  assert.equal(restored?.source, 'recovery');
+  assert.equal(restored?.payload.nodes[0].id, 'refresh-only-node');
+  assert.match(restored?.broadcastText ?? '', /刷新前的临时工作稿/);
+});
+
+test('session recovery draft from another project is ignored', () => {
+  const restored = chooseStudioProjectRestoreCandidate({
+    activeRef: { projectId: 'project-a', projectName: 'Project A' },
+    activeRecord: record({ updatedAt: 200 }),
+    autosave: null,
+    recoveryDraft: payload({
+      projectId: 'project-b',
+      savedAt: 999,
+      nodes: [{ id: 'wrong-project-node' }],
+    }),
+    fallbackProjectName: 'Untitled',
+  });
+  assert.equal(restored?.source, 'workspace');
+  assert.equal(restored?.projectName, 'Project A');
+});

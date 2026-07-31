@@ -57,6 +57,7 @@ import {
   SHOT_LIST_LINK_HANDLE_ID,
   SHOT_LIST_PARENT_HANDLE_ID,
   createStoryboardShotWireId,
+  hasSameShotListWireTopology,
   isShotListItemOutputHandleId,
   makeShotListItemOutputHandleId,
   parseShotListItemOutputHandleId,
@@ -68,6 +69,7 @@ import {
   type ApprovedAsset,
   type ChatMessage,
   type Department,
+  type GenerationPhase,
   type NodeKind,
   type NodeStatus,
   type PromptOutput,
@@ -77,6 +79,7 @@ import {
   REVIEW_RESULT_APPROVE_AS_IS,
   REVIEW_RESULT_MANUAL_PASS,
 } from '@/types/studio';
+import type { LlmJsonStreamPhase } from '@/services/llmJsonClient';
 import { flushShotListPendingEdits } from '@/utils/shotListPendingEdits';
 import {
   normalizeRestoredStudioNode,
@@ -86,6 +89,10 @@ import {
 import { findRecoverableStoryboardShotListId } from '@/utils/storyboardLegacyRecovery';
 import { formatReviewOptimizationPayload } from '@/utils/pipelineReviewContentPreview';
 import { formatPipelineOutputPreview, typewriterStream } from '@/utils/streamPreview';
+import {
+  limitModelStreamPreview,
+  storyboardGenerationPhaseCopy,
+} from '@/utils/generationPreview';
 import {
   canTransitionPipelineStatus,
   PIPELINE_INITIAL_STATUS,
@@ -131,13 +138,13 @@ function deptLabel(d: Department): string {
   if (d === 'WRITING') return '编剧部';
   if (d === 'STORYBOARD') return '分镜部';
   if (d === 'TEXT') return '文本卡片';
-  if (d === 'SHOT_LIST') return '镜头表';
+  if (d === 'SHOT_LIST') return '分镜表';
   if (d === 'STORYBOARD_FILE') return '分镜表文件';
   if (d === 'PROMPT_REVIEW') return '提示词审核';
   if (d === 'IMAGE') return '图片表格';
   if (d === 'VIDEO') return '视频节点';
   if (d === 'FILM_CHARACTER') return '角色设定';
-  if (d === 'FILM_STORYBOARD') return '影视分镜';
+  if (d === 'FILM_STORYBOARD') return '影视分镜图';
   if (d === 'FILM_VIDEO_PROMPT') return '影视分镜提示词';
   if (d === 'SCRIPT_INPUT') return '剧本输入';
   if (d === 'SCRIPT_SCENE') return '场景拆解';
@@ -366,7 +373,7 @@ async function prepareStoryboardImageReferencesForExecution(args: {
       args.deptId,
       {
         streaming_preview: `正在读取场景参考图“${label}”，分析场景、空间、光影与美术基调...`,
-        generation_phase: 'employee',
+        generation_phase: 'preparing',
       },
       false,
     );
@@ -484,6 +491,8 @@ function makeTextNodeData(id: string, text = '', positionLabel?: string): Studio
     version: 0,
     label: positionLabel ?? '文本卡片',
     text_node_role: 'auto',
+    text_image_task_mode: 'extract_shot',
+    text_storyboard_skill_id: DEFAULT_STORYBOARD_SKILL_ID,
     assistant_preferences: '',
     assistant_task_instruction: '',
   };
@@ -638,7 +647,7 @@ function aiFilmDepartmentForKind(kind: AiFilmNodeKind): Department {
 
 function aiFilmLabelForKind(kind: AiFilmNodeKind): string {
   if (kind === 'film_character_node') return '角色设定';
-  if (kind === 'film_storyboard_node') return '影视分镜';
+  if (kind === 'film_storyboard_node') return '影视分镜图';
   return '影视分镜提示词';
 }
 
@@ -832,7 +841,10 @@ export type StudioState = {
   /** 閸掑棝鏆呴崨妯轰紣娴溠冨毉閺堝鏅ラ梹婊冦仈閸氬函绱伴懛顏勫З閸︺劋绗呴弬鐟板灡瀵ゆ椽鏆呮径纾嬨€冪€涙劘濡悙鐟拌嫙鏉╃偟鍤庨敍灞惧灗閸掗攱鏌婂鍙夋箒鐎涙劘濡悙瑙勬殶閹?*/
   ensureShotListForStoryboard: (storyboardNodeId: string) => string | undefined;
   /** 鐏忓棗缍嬮崜宥呭瀻闂€?output 閹恒劑鈧礁鍩屽鑼拨鐎规氨娈戦梹婊冦仈鐞涖劌鐡欓懞鍌滃仯閿涘牅绗夐崘娆忔礀閻栨儼濡悙鐧哥礆 */
-  syncShotListNodesFromStoryboard: (storyboardNodeId: string) => void;
+  syncShotListNodesFromStoryboard: (
+    storyboardNodeId: string,
+    opts?: { force?: boolean },
+  ) => void;
   ensureShotListForStoryboardFile: (storyboardFileNodeId: string) => void;
   syncShotListNodesFromStoryboardFile: (storyboardFileNodeId: string) => void;
   setStatus: (id: string, next: NodeStatus) => boolean;
@@ -953,7 +965,15 @@ export type StudioState = {
   /** 閸欐牗绉烽幍瀣З鐟曞棛娲婇敍灞肩矤鏉╃偟鍤庨柌宥嗘煀閸氬牆鑻?input */
   syncDepartmentInputFromGraph: (deptId: string) => void;
   syncPromptReviewInputFromGraph: (nodeId: string) => void;
-  runTextPolish: (nodeId: string, opts?: { instruction?: string; mode?: 'simple' | 'deep' }) => Promise<void>;
+  runTextPolish: (
+    nodeId: string,
+    opts?: {
+      instruction?: string;
+      mode?: 'simple' | 'deep';
+      imageMode?: import('@/types/studio').TextImageTaskMode;
+      storyboardSkillId?: string;
+    },
+  ) => Promise<void>;
   savePromptReviewSnapshot: (nodeId: string, label?: string) => boolean;
   restorePromptReviewSnapshot: (nodeId: string, snapshotId: string) => boolean;
   runPromptReviewLlm: (nodeId: string, instruction?: string) => Promise<void>;
@@ -1084,7 +1104,8 @@ function refreshDownstreamAfterDepartmentOutputChange(
   options?: { ignoreManualInput?: boolean },
 ) {
   const { nodes, edges } = get();
-  const sourceNode = nodes.find((node) => node.id === departmentId);
+  const nodeById = new Map(nodes.map((node) => [node.id, node] as const));
+  const sourceNode = nodeById.get(departmentId);
   const outgoing = edges.filter(
     (e) => {
       if (e.source !== departmentId) return false;
@@ -1098,7 +1119,7 @@ function refreshDownstreamAfterDepartmentOutputChange(
   for (const e of outgoing) {
     if (seen.has(e.target)) continue;
     seen.add(e.target);
-    const tn = nodes.find((n) => n.id === e.target);
+    const tn = nodeById.get(e.target);
     if (tn?.type === 'department') {
       if (!options?.ignoreManualInput && shouldPreferManualInput(tn.data)) continue;
       const merged = mergedTextInputForDepartment(e.target, nodes, edges);
@@ -1107,7 +1128,6 @@ function refreshDownstreamAfterDepartmentOutputChange(
       }
     }
   }
-  resyncConsumersAfterEdgeMutation(get);
 }
 
 function edgeIdentity(edge: Pick<Edge, 'source' | 'target' | 'sourceHandle' | 'targetHandle'>): string {
@@ -1714,7 +1734,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         });
         get().pushMessage({
           role: 'assistant',
-          text: '已根据当前编剧结果新建分镜节点，并开始生成镜头表。你可以等它完成，或稍后继续调整分镜。',
+          text: '已根据当前编剧结果新建分镜部节点，并开始生成分镜表。你可以等它完成，或稍后继续调整分镜。',
           nodeId: storyboardNodeId,
         });
         return;
@@ -1754,7 +1774,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       if (!targetId) {
         get().pushMessage({
           role: 'assistant',
-          text: '当前还没有可调整的分镜结果。请先完成分镜生成，或选中已有分镜/镜头表节点。',
+          text: '当前还没有可调整的分镜结果。请先完成分镜生成，或选中已有分镜部/分镜表节点。',
         });
         return;
       }
@@ -1785,7 +1805,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       if (!storyboardPayload) {
         get().pushMessage({
           role: 'assistant',
-          text: '当前还没有可确认的分镜结果。请先生成分镜或镜头表，再继续到 Prompt 阶段。',
+          text: '当前还没有可确认的分镜结果。请先生成分镜表，再继续到 Prompt 阶段。',
         });
         return;
       }
@@ -1852,7 +1872,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     ) {
       get().pushMessage({
         role: 'system',
-        text: '当前选中的节点还不支持节点助手。请先选择文本卡片、编剧、分镜、镜头表或 Prompt 节点。',
+        text: '当前选中的节点还不支持节点助手。请先选择文本卡片、编剧、分镜部、分镜表或 Prompt 节点。',
         nodeId: selectedId,
       });
       return;
@@ -1993,11 +2013,11 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         const hasStoryboardDiff = previousStoryboardKey !== nextStoryboardKey;
 
         if (outputNode.type === 'shotList') {
-          resultTargetLabel = '当前镜头表，并同步回上层分镜节点';
+          resultTargetLabel = '当前分镜表，并同步回上层分镜部节点';
           if (hasStoryboardDiff) {
             get().pushMessage({
               role: 'assistant',
-              text: '模型已返回分镜修改结果，正在写回当前镜头表，并同步到上层分镜节点...',
+              text: '模型已返回分镜修改结果，正在写回当前分镜表，并同步到上层分镜部节点...',
               nodeId: selectedId,
             });
             get().patchShotListNodeOutput(outputNode.id, result.updatedOutput as StoryboardOutput, true);
@@ -2155,6 +2175,14 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       } else if (patch.input !== undefined && patch.raw_text === undefined) {
         patchEff = { ...patch, raw_text: patch.input };
       }
+      if (patchEff.text_storyboard_skill_id !== undefined) {
+        patchEff = {
+          ...patchEff,
+          text_storyboard_skill_id: normalizeFilmStoryboardSkillId(
+            patchEff.text_storyboard_skill_id,
+          ),
+        };
+      }
     }
     if (
       targetPre?.type === 'department' &&
@@ -2185,6 +2213,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       if (
         patchEff.status !== undefined &&
         target.data.type !== 'text_node' &&
+        target.data.type !== 'image_node' &&
         target.data.type !== 'shot_list_node' &&
         target.data.type !== 'storyboard_file_node' &&
         target.data.type !== 'prompt_review_node' &&
@@ -2234,20 +2263,12 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       refreshDownstreamAfterDepartmentOutputChange(get, id);
     }
 
-    if (
-      updated?.type === 'department' &&
-      updated.data.type === 'storyboard' &&
-      patchEff.output !== undefined &&
-      updated.data.status !== 'IN_PROGRESS'
-    ) {
-      get().syncShotListNodesFromStoryboard(id);
-    }
     if (updated?.type === 'storyboardFile' && patchEff.output !== undefined) {
       get().ensureShotListForStoryboardFile(id);
     }
   },
 
-  syncShotListNodesFromStoryboard: (storyboardId) => {
+  syncShotListNodesFromStoryboard: (storyboardId, opts) => {
     const sb = get().nodes.find((n) => n.id === storyboardId);
     if (!sb || sb.type !== 'department' || sb.data.type !== 'storyboard') return;
     if (sb.data.status === 'IN_PROGRESS') return;
@@ -2263,6 +2284,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       )
       .map((e) => e.target);
     if (childIds.length === 0) return;
+    if (opts?.force !== true) return;
     const parsedKey = storyboardOutputFingerprint(parsed);
     const hasAnyDiff = get().nodes.some((n) => {
       if (!childIds.includes(n.id) || n.type !== 'shotList') return false;
@@ -2437,7 +2459,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     }));
     get().pushMessage({
       role: 'broadcast',
-      text: '已根据当前分镜自动生成分解表节点，可以继续编辑后再连接 Prompt。',
+      text: '已根据当前分镜自动生成分镜表节点，可以继续编辑后再连接 Prompt。',
       nodeId: slId,
     });
     return slId;
@@ -2541,12 +2563,16 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     const storyboardParentId = sl.data.sourceStoryboardNodeId;
     const storyboardFileParentId = sl.data.sourceStoryboardFileNodeId;
     const previousOutput = sl.data.output ? tryParseStoryboardOutput(sl.data.output) : null;
-    const reconciledEdges = reconcileShotListOutputEdges(
-      get().edges,
-      shotListId,
-      previousOutput?.shots ?? [],
-      output.shots,
-    );
+    const currentEdges = get().edges;
+    const previousShots = previousOutput?.shots ?? [];
+    const reconciledEdges = hasSameShotListWireTopology(previousShots, output.shots)
+      ? { edges: currentEdges, removedCount: 0, migratedCount: 0 }
+      : reconcileShotListOutputEdges(
+          currentEdges,
+          shotListId,
+          previousShots,
+          output.shots,
+        );
     const parentBefore = storyboardParentId
       ? get().nodes.find(
           (node) =>
@@ -2927,7 +2953,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         get().pushMessage({ role: 'system', text: '已创建分镜节点，并接入图片节点作为九宫格来源。', nodeId: id });
         return id;
       }
-      return pushErr('图片节点 Input 支持分镜表文件、分镜部门或镜头表的逐镜头 Output。');
+      return pushErr('图片节点 Input 支持分镜表文件、分镜部或分镜表的逐镜头 Output。');
     }
 
     if (feedingAiFilm) {
@@ -2963,7 +2989,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         const id = get().addImageNode(upstreamPos);
         connectToAiFilmNode(id, from.id, 'out');
         if (from.type === 'aiFilmStoryboard') {
-          get().pushMessage({ role: 'system', text: '已创建图片节点，并接入影视分镜作为角色、场景或道具参考图。', nodeId: id });
+          get().pushMessage({ role: 'system', text: '已创建图片节点，并接入影视分镜图作为角色、场景或道具参考图。', nodeId: id });
         }
         return id;
       }
@@ -2978,7 +3004,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       if (isAiFilmPick(p.pick)) {
         return pushErr('当前新模式节点 Input 不支持这种上游新模式组合。');
       }
-      return pushErr('当前新模式节点 Input 建议接入文本、图片、角色设定或影视分镜节点。');
+      return pushErr('当前新模式节点 Input 建议接入文本、图片、角色设定或影视分镜图节点。');
     }
 
     if (feedingDept) {
@@ -3361,7 +3387,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       }
 
       if (from.type === 'shotList') {
-        if (from.data.type !== 'shot_list_node') return pushErr('当前镜头表节点类型不支持该操作。');
+        if (from.data.type !== 'shot_list_node') return pushErr('当前分镜表节点类型不支持该操作。');
         if (p.pick === 'image_node') {
           const id = get().addImageNode(downstreamPos);
           const sourceHandles = resolveShotListSourceHandlesForConnect(
@@ -3369,7 +3395,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
             from.id,
             hid,
           );
-          if (sourceHandles.length === 0) return pushErr('请从镜头表里的逐镜头 Output 端口拖出连接。');
+          if (sourceHandles.length === 0) return pushErr('请从分镜表里的逐镜头 Output 端口拖出连接。');
           set((s) => ({
             edges: addUniqueAnimatedEdges(
               s.edges,
@@ -3387,7 +3413,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         }
         if (isAiFilmPick(p.pick)) {
           if (p.pick !== 'film_storyboard_node') {
-            return pushErr('镜头表 Output 目前只支持直接接入分镜宫格节点；视频提示词请先由分镜宫格节点生成后再连接。');
+            return pushErr('分镜表 Output 目前只支持直接接入影视分镜图节点；视频提示词请先由影视分镜图节点生成后再连接。');
           }
           const id = addAiFilmNodeForPick(p.pick, downstreamPos);
           const sourceHandles = resolveShotListSourceHandlesForConnect(
@@ -3395,7 +3421,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
             from.id,
             hid,
           );
-          if (sourceHandles.length === 0) return pushErr('请从镜头表里的逐镜头 Output 端口拖出连接。');
+          if (sourceHandles.length === 0) return pushErr('请从分镜表里的逐镜头 Output 端口拖出连接。');
           set((s) => ({
             edges: addUniqueAnimatedEdges(
               s.edges,
@@ -3416,7 +3442,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           return id;
         }
         if (p.pick !== 'prompt') {
-          return pushErr('镜头表节点的逐镜头 Output 只能连接到 Prompt 节点或分镜宫格节点。');
+          return pushErr('分镜表节点的逐镜头 Output 只能连接到 Prompt 节点或影视分镜图节点。');
         }
         const id = get().addDepartmentNode('prompt', downstreamPos);
         const sourceHandles = resolveShotListSourceHandlesForConnect(
@@ -3424,7 +3450,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           from.id,
           hid,
         );
-        if (sourceHandles.length === 0) return pushErr('请从镜头表里的逐镜头 Output 端口拖出连接。');
+        if (sourceHandles.length === 0) return pushErr('请从分镜表里的逐镜头 Output 端口拖出连接。');
         set((s) => ({
           edges: addUniqueAnimatedEdges(
             s.edges,
@@ -3791,7 +3817,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           return id;
         }
         if (isAiFilmPick(p.pick)) {
-          return pushErr('新模式节点 Output 目前只支持接文本卡片，或由角色设定/影视分镜接入影视分镜提示词。');
+          return pushErr('新模式节点 Output 目前只支持接文本卡片，或由角色设定/影视分镜图接入影视分镜提示词。');
         }
         return pushErr('新模式节点 Output 暂不直接连接旧部门节点。');
       }
@@ -3847,7 +3873,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
             ? '当前没有可执行的输入。请先粘贴文本，或把文本卡片连接到编剧节点。'
             : kind === 'storyboard'
             ? '当前没有可执行的输入。请先提供剧本文本、编剧结果，或把上游内容连接到分镜节点。'
-            : '当前没有可执行的输入。请先提供分镜结果、镜头表，或把上游内容连接到 Prompt 节点。';
+            : '当前没有可执行的输入。请先提供分镜表，或把上游内容连接到 Prompt 节点。';
       get().pushMessage({ role: 'system', text: msg, nodeId });
       return;
     }
@@ -3868,7 +3894,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         generation_error: undefined,
         output_stale_reason: null,
         streaming_preview: '',
-        generation_phase: 'employee',
+        generation_phase: kind === 'storyboard' ? 'preparing' : 'employee',
       },
       true,
     );
@@ -3878,7 +3904,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       : kind === 'writing'
         ? '编剧节点正在读取输入并生成结果。'
         : kind === 'storyboard'
-          ? '分镜节点正在读取输入并生成镜头表。'
+          ? '分镜部正在读取输入并生成分镜表。'
           : 'Prompt 节点正在读取输入并生成提示词。';
     get().pushMessage({ role: 'broadcast', text: broadcastText, nodeId });
     activeTaskAbortControllers.get(nodeId)?.abort();
@@ -3890,28 +3916,39 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       }
     };
     let pendingModelStreamText = '';
-    let modelStreamFrame: number | null = null;
+    let modelStreamTimer: number | null = null;
     let hasModelStreamOutput = false;
     const publishModelStreamPreview = () => {
-      modelStreamFrame = null;
-      const accumulated = pendingModelStreamText;
+      modelStreamTimer = null;
+      const accumulated = limitModelStreamPreview(pendingModelStreamText);
       get().patchNodeData(
         nodeId,
         {
           streaming_preview: accumulated.trim()
             ? `模型正在返回结构化结果，请稍候...\n\n${accumulated}`
             : '模型已连接，正在等待首段输出...',
-          generation_phase: 'employee',
+          generation_phase: kind === 'storyboard' ? 'streaming' : 'employee',
         },
         false,
       );
     };
     const flushModelStreamPreview = () => {
-      if (modelStreamFrame != null) {
-        window.cancelAnimationFrame(modelStreamFrame);
-        modelStreamFrame = null;
+      if (modelStreamTimer != null) {
+        window.clearTimeout(modelStreamTimer);
+        modelStreamTimer = null;
       }
       publishModelStreamPreview();
+    };
+    const publishStoryboardPhase = (phase: LlmJsonStreamPhase) => {
+      const copy = storyboardGenerationPhaseCopy(phase);
+      get().patchNodeData(
+        nodeId,
+        {
+          generation_phase: phase as GenerationPhase,
+          ...(phase === 'streaming' ? {} : { streaming_preview: copy.message }),
+        },
+        false,
+      );
     };
 
     try {
@@ -3934,7 +3971,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
                 input: mergedWithImageAnalysis.trim(),
                 inputSource: 'graph',
                 streaming_preview: '场景参考图已读取，正在根据图片场景与文本内容生成分镜表...',
-                generation_phase: 'employee',
+                generation_phase: 'preparing',
               },
               false,
             );
@@ -4001,15 +4038,19 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         onModelStreamChunk: (_delta: string, accumulated: string) => {
           pendingModelStreamText = accumulated;
           hasModelStreamOutput ||= Boolean(accumulated.trim());
-          if (modelStreamFrame == null) {
-            modelStreamFrame = window.requestAnimationFrame(publishModelStreamPreview);
+          if (modelStreamTimer == null) {
+            modelStreamTimer = window.setTimeout(publishModelStreamPreview, 120);
           }
         },
+        onModelPhaseChange: kind === 'storyboard' ? publishStoryboardPhase : undefined,
       };
 
       get().patchNodeData(
         nodeId,
-        { streaming_preview: '模型已启动，正在生成内容...', generation_phase: 'employee' },
+        {
+          streaming_preview: '模型已启动，正在生成内容...',
+          generation_phase: kind === 'storyboard' ? 'connecting' : 'employee',
+        },
         false,
       );
 
@@ -4078,11 +4119,23 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       }
 
       const previewBody = formatPipelineOutputPreview(kind, emp.output);
-      if (!(kind === 'prompt' && hasModelStreamOutput)) {
+      const shouldReplayPreview =
+        kind === 'writing' || (kind === 'prompt' && !hasModelStreamOutput);
+      if (shouldReplayPreview) {
         await typewriterStream(
           previewBody,
           (acc) => get().patchNodeData(nodeId, { streaming_preview: acc, generation_phase: 'employee' }, false),
           { chunkChars: 40, delayMs: 20, signal: controller.signal },
+        );
+      } else if (kind === 'storyboard') {
+        const copy = storyboardGenerationPhaseCopy('finalizing');
+        get().patchNodeData(
+          nodeId,
+          {
+            streaming_preview: copy.message,
+            generation_phase: 'finalizing',
+          },
+          false,
         );
       }
       ensureNotStopped();
@@ -4095,8 +4148,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         generation_error: undefined,
         output_stale_reason: null,
       };
-      if (kind === 'storyboard' && emp.narrativeBeatCount != null) {
-        afterEmployee.sourceSceneCount = emp.narrativeBeatCount;
+      if (kind === 'storyboard' && emp.sourceSceneCount != null) {
+        afterEmployee.sourceSceneCount = emp.sourceSceneCount;
       }
       if (kind === 'storyboard' && emp.output) {
         afterEmployee.storyboard_ai_snapshot = cloneStoryboardOutput(emp.output as StoryboardOutput);
@@ -4122,7 +4175,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       let storyboardShotListId: string | undefined;
       if (kind === 'storyboard') {
         storyboardShotListId = get().ensureShotListForStoryboard(nodeId);
-        get().syncShotListNodesFromStoryboard(nodeId);
+        get().syncShotListNodesFromStoryboard(nodeId, { force: true });
         const version = get().nodes.find((x) => x.id === nodeId)?.data.version ?? 1;
         get().registerAsset({
           nodeId,
@@ -4157,8 +4210,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
               : 'Prompt 节点已生成完成，但自动创建提示词审核节点失败。'
             : kind === 'storyboard'
               ? storyboardShotListId
-                ? '分镜部已生成完成，分解表节点已自动打开。'
-                : '分镜部已生成完成，但分解表节点创建失败，请重新生成。'
+                ? '分镜部已生成完成，分镜表节点已自动打开。'
+                : '分镜部已生成完成，但分镜表节点创建失败，请重新生成。'
               : `${deptLabel(kindToDepartment(kind))} 已生成完成，请填写审核意见。`,
         nodeId: kind === 'storyboard' ? (storyboardShotListId ?? nodeId) : nodeId,
       });
@@ -4197,7 +4250,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
                     ...state.workflowAgentSession,
                     state: 'STORYBOARD_GENERATED',
                     shotListNodeId: shotListChild?.id,
-                    lastAssistantMessage: '分镜结果已生成，分解表节点已经自动打开，可以继续编辑或生成 Prompt。',
+                    lastAssistantMessage: '分镜结果已生成，分镜表节点已经自动打开，可以继续编辑或生成 Prompt。',
                     updatedAt: Date.now(),
                   },
                 }
@@ -4205,7 +4258,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           );
           get().pushMessage({
             role: 'assistant',
-            text: 'Agent：分镜结果已完成，分解表节点已同步生成并自动打开，可以继续编辑或生成 Prompt。',
+            text: 'Agent：分镜结果已完成，分镜表节点已同步生成并自动打开，可以继续编辑或生成 Prompt。',
             nodeId: shotListChild?.id ?? nodeId,
           });
         }
@@ -4275,8 +4328,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         nodeId,
       });
     } finally {
-      if (modelStreamFrame != null) {
-        window.cancelAnimationFrame(modelStreamFrame);
+      if (modelStreamTimer != null) {
+        window.clearTimeout(modelStreamTimer);
       }
       if (activeTaskAbortControllers.get(nodeId) === controller) {
         activeTaskAbortControllers.delete(nodeId);
@@ -4295,7 +4348,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     if (node.data.type === 'storyboard') {
       get().pushMessage({
         role: 'system',
-        text: '分镜生成完成后会自动创建并打开分解表节点。',
+        text: '分镜生成完成后会自动创建并打开分镜表节点。',
         nodeId: id,
       });
       return;
@@ -4341,7 +4394,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     if (node.data.type === 'storyboard') {
       get().pushMessage({
         role: 'system',
-        text: '分镜生成完成后会自动创建并打开分解表节点。',
+        text: '分镜生成完成后会自动创建并打开分镜表节点。',
         nodeId: id,
       });
       return id;
@@ -4447,7 +4500,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     if (node.data.type === 'storyboard') {
       get().pushMessage({
         role: 'system',
-        text: '请直接编辑分解表节点，或重新生成分镜。',
+        text: '请直接编辑分镜表节点，或重新生成分镜。',
         nodeId: id,
       });
       return id;
@@ -4583,7 +4636,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     }));
     get().pushMessage({
       role: 'system',
-      text: '已创建影视分镜节点。连接文本节点或分镜表镜头输出后，可生成分镜宫格提示词。',
+      text: '已创建影视分镜图节点。连接文本节点或分镜表镜头输出后，可生成分镜宫格图片。',
       nodeId: id,
     });
     return id;
@@ -4964,7 +5017,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     if (node.type === 'department' && node.data.type === 'storyboard') {
       get().pushMessage({
         role: 'system',
-        text: '分镜生成完成后会自动创建并打开分解表节点。',
+        text: '分镜生成完成后会自动创建并打开分镜表节点。',
         nodeId: id,
       });
       return id;
@@ -5219,7 +5272,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     }
 
     for (const sb of syncParents) {
-      get().syncShotListNodesFromStoryboard(sb);
+      get().syncShotListNodesFromStoryboard(sb, { force: true });
     }
 
     for (const n of snap.nodes) {

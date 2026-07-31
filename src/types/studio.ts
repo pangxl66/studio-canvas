@@ -62,6 +62,17 @@ export type NodeStatus =
   | 'APPROVED'
   | 'REJECTED';
 
+export type GenerationPhase =
+  | 'employee'
+  | 'leader'
+  | 'preparing'
+  | 'connecting'
+  | 'streaming'
+  | 'fallback'
+  | 'repairing'
+  | 'validating'
+  | 'finalizing';
+
 /** 旧版：用户在未改版终裁态手动通过 */
 export const REVIEW_RESULT_MANUAL_PASS = '用户手动通过';
 
@@ -176,6 +187,12 @@ export type TextNodeSemanticRole =
   | 'project_constraints'
   | 'story_content'
   | 'reference_notes';
+
+/** 图片接入文本节点后要执行的显式任务；连线本身只挂载素材，不启动推算。 */
+export type TextImageTaskMode =
+  | 'extract_shot'
+  | 'skill_analysis'
+  | 'continue_shot';
 
 /** 单镜头视频提示词的十维结构化（与主 prompt 字符串互补） */
 export interface PromptShotDimensions {
@@ -310,6 +327,10 @@ export type StudioNodeData = {
   /** TEXT_NODE：展示模式。plain=常规文本节点；未设置时使用 AI 工作区模式 */
   text_view_mode?: 'plain';
   text_polish_mode?: 'simple' | 'deep';
+  /** TEXT_NODE：图片任务。默认只提取当前画面的分镜事实，不推算后续镜头。 */
+  text_image_task_mode?: TextImageTaskMode;
+  /** TEXT_NODE：使用分镜 Skill 分析图片时选用的技能 id。 */
+  text_storyboard_skill_id?: string;
   /** TEXT_NODE：当前润色任务启动时间；用于识别刷新/HMR 后遗留的僵尸运行态。 */
   text_polish_started_at?: number;
   /** TEXT_NODE：在串联链路中的语义用途；auto 会结合节点名称和正文自动判断。 */
@@ -339,8 +360,8 @@ export type StudioNodeData = {
   output_stale_reason?: string | null;
   /** 执行中：详情面板流式展示的文本（员工生成 JSON 打字机 / 等待提示） */
   streaming_preview?: string;
-  /** 流水线子阶段：员工生成 vs 总监审核（均为 IN_PROGRESS 时用于文案与流光） */
-  generation_phase?: 'employee' | 'leader';
+  /** 流水线子阶段：准备、连接、流式生成、修复、校验与收尾；employee/leader 仅保留旧流程兼容。 */
+  generation_phase?: GenerationPhase;
   /** 详情页 Footer：累计 Token（由执行管线可选写入） */
   usageTokensTotal?: number;
   /** 详情页 Footer：`version` 递增时由 store 自动刷新 */

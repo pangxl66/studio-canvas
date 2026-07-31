@@ -2,11 +2,13 @@
 import {
   useCallback,
   useEffect,
+  memo,
   useMemo,
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
+  type UIEvent as ReactUIEvent,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { reindexStoryboardShotIds, tryParseStoryboardOutput } from '@/agents/storyboardAgents';
@@ -18,6 +20,10 @@ import {
 } from '@/components/detailPanel/StoryboardShotListTable';
 import { useStudioStore } from '@/store/useStudioStore';
 import type { StoryboardOutput, StoryboardShot, StudioNodeData } from '@/types/studio';
+import {
+  buildMagnetConnection,
+  isStudioConnectionAllowed,
+} from '@/utils/studioConnectionRules';
 import {
   registerShotListPendingEditFlusher,
   unregisterShotListPendingEditFlusher,
@@ -33,10 +39,21 @@ type EditableField =
   | 'content'
   | 'sound'
   | 'note';
+
+const SHOT_LIST_EDIT_COMMIT_DELAY_MS = 350;
+const SHOT_LIST_VIRTUALIZE_AFTER_ROWS = 24;
+const SHOT_LIST_VIRTUAL_ROW_HEIGHT = 104;
+const SHOT_LIST_VIRTUAL_OVERSCAN = 5;
 type ShotListContextMenuState = {
   x: number;
   y: number;
   action: 'isolate' | 'showAll';
+} | null;
+type ShotListManualConnectionLine = {
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
 } | null;
 
 const TRASH_ICON = (
@@ -62,7 +79,7 @@ function parseShotDuration(value: string): number | undefined {
   return Math.min(60, Math.round(parsed * 10) / 10);
 }
 
-function ShotCanvasRow({
+function ShotCanvasRowImpl({
   sh,
   rowIdx,
   selected,
@@ -75,6 +92,7 @@ function ShotCanvasRow({
   onDelete,
   onLiveField,
   onFlushPersist,
+  onManualConnectionStart,
   stopCanvas,
 }: {
   sh: StoryboardShot;
@@ -92,6 +110,10 @@ function ShotCanvasRow({
   onDelete: () => void;
   onLiveField: (field: EditableField, value: string) => void;
   onFlushPersist: () => void;
+  onManualConnectionStart: (
+    event: ReactMouseEvent<HTMLDivElement>,
+    wireId: string,
+  ) => void;
   stopCanvas: (e: ReactPointerEvent | ReactMouseEvent) => void;
 }) {
   const [editingField, setEditingField] = useState<EditableField | null>(null);
@@ -152,7 +174,7 @@ function ShotCanvasRow({
 
   return (
     <tr
-      className={`${selected ? 'shot-list-canvas__row--selected ' : ''}${
+      className={`shot-list-canvas__row ${selected ? 'shot-list-canvas__row--selected ' : ''}${
         hovered ? 'shot-list-canvas__row--port-hovered ' : ''
       }${
         selected && selectedGroupCount >= 2 ? 'shot-list-canvas__row--group-ready ' : ''
@@ -522,12 +544,26 @@ function ShotCanvasRow({
             id={makeShotListItemOutputHandleId(sh.wireId ?? String(sh.id))}
             className="shot-list-canvas__row-handle"
             title={`输出当前镜头 ${shotNoLabel} 到 Prompt 节点`}
+            onMouseDown={(event) =>
+              onManualConnectionStart(event, sh.wireId ?? String(sh.id))
+            }
           />
         </div>
       </td>
     </tr>
   );
 }
+
+const ShotCanvasRow = memo(
+  ShotCanvasRowImpl,
+  (previous, next) =>
+    previous.sh === next.sh &&
+    previous.rowIdx === next.rowIdx &&
+    previous.selected === next.selected &&
+    previous.selectedGroupCount === next.selectedGroupCount &&
+    previous.hovered === next.hovered &&
+    previous.promptLinkCount === next.promptLinkCount,
+);
 
 export function ShotListEmbeddedEditor({
   id,
@@ -556,9 +592,13 @@ export function ShotListEmbeddedEditor({
   const [hoveredWireId, setHoveredWireId] = useState<string | null>(null);
   const [batchSceneRef, setBatchSceneRef] = useState('');
   const [batchSound, setBatchSound] = useState('');
+  const [manualConnectionLine, setManualConnectionLine] =
+    useState<ShotListManualConnectionLine>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const refreshFrameRef = useRef<number | null>(null);
+  const manualConnectionFrameRef = useRef<number | null>(null);
+  const manualConnectionCleanupRef = useRef<(() => void) | null>(null);
   const selectionAnchorRef = useRef<number | null>(null);
   const dragSelectRef = useRef<{
     anchor: number;
@@ -595,6 +635,39 @@ export function ShotListEmbeddedEditor({
         .filter(({ rowIdx }) => !isolationActive || isolatedRowSet.has(rowIdx)),
     [isolatedRowSet, isolationActive, shots],
   );
+  const [virtualScrollTop, setVirtualScrollTop] = useState(0);
+  const scrollViewportHeight = Math.max(220, (viewportHeight ?? 560) - 210);
+  const virtualWindow = useMemo(() => {
+    const enabled = visibleRows.length > SHOT_LIST_VIRTUALIZE_AFTER_ROWS;
+    if (!enabled) {
+      return {
+        enabled: false,
+        start: 0,
+        end: visibleRows.length,
+        rows: visibleRows,
+        topSpacer: 0,
+        bottomSpacer: 0,
+      };
+    }
+    const visibleCount = Math.ceil(scrollViewportHeight / SHOT_LIST_VIRTUAL_ROW_HEIGHT);
+    const start = Math.max(
+      0,
+      Math.floor(virtualScrollTop / SHOT_LIST_VIRTUAL_ROW_HEIGHT) -
+        SHOT_LIST_VIRTUAL_OVERSCAN,
+    );
+    const end = Math.min(
+      visibleRows.length,
+      start + visibleCount + SHOT_LIST_VIRTUAL_OVERSCAN * 2,
+    );
+    return {
+      enabled: true,
+      start,
+      end,
+      rows: visibleRows.slice(start, end),
+      topSpacer: start * SHOT_LIST_VIRTUAL_ROW_HEIGHT,
+      bottomSpacer: (visibleRows.length - end) * SHOT_LIST_VIRTUAL_ROW_HEIGHT,
+    };
+  }, [scrollViewportHeight, virtualScrollTop, visibleRows]);
 
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingRef = useRef<{ rowIdx: number; field: EditableField; value: string } | null>(null);
@@ -607,6 +680,14 @@ export function ShotListEmbeddedEditor({
     });
   }, [id, updateNodeInternals]);
 
+  const handleVirtualScroll = useCallback(
+    (event: ReactUIEvent<HTMLDivElement>) => {
+      setVirtualScrollTop(event.currentTarget.scrollTop);
+      scheduleHandleRefresh();
+    },
+    [scheduleHandleRefresh],
+  );
+
   const applyPendingToStore = useCallback(() => {
     const p = pendingRef.current;
     pendingRef.current = null;
@@ -615,18 +696,28 @@ export function ShotListEmbeddedEditor({
     if (row?.type !== 'shot_list_node' || row.output == null) return;
     const out = tryParseStoryboardOutput(row.output);
     if (!out || p.rowIdx < 0 || p.rowIdx >= out.shots.length) return;
-    const next = out.shots.map((s, i) => {
-      if (i !== p.rowIdx) return s;
-      if (p.field === 'sceneRef') return { ...s, sceneRef: p.value.trim() || undefined };
-      if (p.field === 'type') return { ...s, type: p.value };
-      if (p.field === 'movement') return { ...s, movement: p.value };
-      if (p.field === 'durationSec') return { ...s, durationSec: parseShotDuration(p.value) };
-      if (p.field === 'description') return { ...s, description: p.value };
-      if (p.field === 'content') return { ...s, content: p.value };
-      if (p.field === 'sound') return { ...s, sound: p.value.trim() || undefined };
-      return { ...s, note: p.value.trim() || undefined };
-    });
-    patchShotListNodeOutput(id, { ...out, shots: reindexStoryboardShotIds(next) }, true);
+    const current = out.shots[p.rowIdx];
+    let updated: StoryboardShot;
+    if (p.field === 'sceneRef') {
+      updated = { ...current, sceneRef: p.value.trim() || undefined };
+    } else if (p.field === 'type') {
+      updated = { ...current, type: p.value };
+    } else if (p.field === 'movement') {
+      updated = { ...current, movement: p.value };
+    } else if (p.field === 'durationSec') {
+      updated = { ...current, durationSec: parseShotDuration(p.value) };
+    } else if (p.field === 'description') {
+      updated = { ...current, description: p.value };
+    } else if (p.field === 'content') {
+      updated = { ...current, content: p.value };
+    } else if (p.field === 'sound') {
+      updated = { ...current, sound: p.value.trim() || undefined };
+    } else {
+      updated = { ...current, note: p.value.trim() || undefined };
+    }
+    const next = out.shots.slice();
+    next[p.rowIdx] = updated;
+    patchShotListNodeOutput(id, { ...out, shots: next }, true);
   }, [id, patchShotListNodeOutput]);
 
   const flushPersist = useCallback(() => {
@@ -636,6 +727,120 @@ export function ShotListEmbeddedEditor({
     }
     applyPendingToStore();
   }, [applyPendingToStore]);
+
+  const startManualConnection = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>, wireId: string) => {
+      if (event.button !== 0) return;
+      flushPersist();
+      manualConnectionCleanupRef.current?.();
+
+      const sourceHandle = makeShotListItemOutputHandleId(wireId);
+      const sourceRect = event.currentTarget.getBoundingClientRect();
+      const fromX = sourceRect.left + sourceRect.width / 2;
+      const fromY = sourceRect.top + sourceRect.height / 2;
+      let latestPoint = { x: event.clientX, y: event.clientY };
+      let moved = false;
+
+      setManualConnectionLine({
+        fromX,
+        fromY,
+        toX: latestPoint.x,
+        toY: latestPoint.y,
+      });
+
+      const flushLineFrame = () => {
+        manualConnectionFrameRef.current = null;
+        setManualConnectionLine({
+          fromX,
+          fromY,
+          toX: latestPoint.x,
+          toY: latestPoint.y,
+        });
+      };
+
+      const onMouseMove = (nativeEvent: MouseEvent) => {
+        latestPoint = { x: nativeEvent.clientX, y: nativeEvent.clientY };
+        if (Math.hypot(latestPoint.x - fromX, latestPoint.y - fromY) >= 3) {
+          moved = true;
+        }
+        if (manualConnectionFrameRef.current == null) {
+          manualConnectionFrameRef.current = window.requestAnimationFrame(flushLineFrame);
+        }
+      };
+
+      const cleanup = () => {
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+        if (manualConnectionFrameRef.current != null) {
+          window.cancelAnimationFrame(manualConnectionFrameRef.current);
+          manualConnectionFrameRef.current = null;
+        }
+        manualConnectionCleanupRef.current = null;
+        setManualConnectionLine(null);
+      };
+
+      const onMouseUp = (nativeEvent: MouseEvent) => {
+        cleanup();
+        if (!moved) return;
+
+        const state = useStudioStore.getState();
+        const started = {
+          nodeId: id,
+          handleId: sourceHandle,
+          handleType: 'source' as const,
+        };
+        const directTarget = (
+          document.elementFromPoint(nativeEvent.clientX, nativeEvent.clientY) as
+            | HTMLElement
+            | null
+        )?.closest<HTMLElement>('.react-flow__node[data-id]');
+        const candidates = Array.from(
+          document.querySelectorAll<HTMLElement>('.react-flow__node[data-id]'),
+        )
+          .filter((element) => element.dataset.id && element.dataset.id !== id)
+          .map((element) => {
+            const rect = element.getBoundingClientRect();
+            const dx = Math.max(rect.left - nativeEvent.clientX, 0, nativeEvent.clientX - rect.right);
+            const dy = Math.max(rect.top - nativeEvent.clientY, 0, nativeEvent.clientY - rect.bottom);
+            return {
+              id: element.dataset.id!,
+              distance: Math.hypot(dx, dy),
+            };
+          })
+          .filter((candidate) => candidate.distance <= 64)
+          .sort((a, b) => a.distance - b.distance);
+        const targetIds = [
+          directTarget?.dataset.id,
+          ...candidates.map((candidate) => candidate.id),
+        ].filter((targetId, index, all): targetId is string =>
+          Boolean(targetId) && all.indexOf(targetId) === index,
+        );
+
+        for (const targetId of targetIds) {
+          const connection = buildMagnetConnection(started, targetId, state.nodes);
+          if (!connection || !isStudioConnectionAllowed(connection, state.nodes, state.edges)) {
+            continue;
+          }
+          const alreadyConnected = state.edges.some(
+            (edge) =>
+              edge.source === connection.source &&
+              edge.target === connection.target &&
+              edge.sourceHandle === connection.sourceHandle &&
+              edge.targetHandle === connection.targetHandle,
+          );
+          if (!alreadyConnected) {
+            state.onConnect(connection);
+          }
+          return;
+        }
+      };
+
+      manualConnectionCleanupRef.current = cleanup;
+      document.addEventListener('mousemove', onMouseMove);
+      document.addEventListener('mouseup', onMouseUp);
+    },
+    [flushPersist, id],
+  );
 
   useEffect(() => {
     registerShotListPendingEditFlusher(id, flushPersist);
@@ -655,7 +860,7 @@ export function ShotListEmbeddedEditor({
       persistTimerRef.current = setTimeout(() => {
         persistTimerRef.current = null;
         applyPendingToStore();
-      }, 100);
+      }, SHOT_LIST_EDIT_COMMIT_DELAY_MS);
     },
     [applyPendingToStore],
   );
@@ -680,7 +885,15 @@ export function ShotListEmbeddedEditor({
 
   useEffect(() => {
     scheduleHandleRefresh();
-  }, [scheduleHandleRefresh, selectedWireIds, shots.length, viewportHeight, visibleRows.length]);
+  }, [
+    scheduleHandleRefresh,
+    selectedWireIds,
+    shots.length,
+    viewportHeight,
+    visibleRows.length,
+    virtualWindow.start,
+    virtualWindow.end,
+  ]);
 
   useEffect(() => {
     if (!contextMenu) return undefined;
@@ -708,6 +921,7 @@ export function ShotListEmbeddedEditor({
   useEffect(
     () => () => {
       setShotListSelectedWires(id, []);
+      manualConnectionCleanupRef.current?.();
       if (refreshFrameRef.current != null) {
         window.cancelAnimationFrame(refreshFrameRef.current);
       }
@@ -914,8 +1128,6 @@ export function ShotListEmbeddedEditor({
   }, []);
 
   const hasSelection = selected.size >= 1;
-  const scrollViewportHeight = Math.max(220, (viewportHeight ?? 560) - 210);
-
   if (!output || shots.length === 0) {
     return (
       <div
@@ -943,8 +1155,6 @@ export function ShotListEmbeddedEditor({
   return (
     <div
       className="shot-list-canvas__root nodrag nopan nowheel"
-      onPointerDown={stopCanvas}
-      onMouseDown={stopCanvas}
       onContextMenu={openShotListContextMenu}
     >
       {hasSelection ? (
@@ -1083,7 +1293,7 @@ export function ShotListEmbeddedEditor({
         ref={scrollRef}
         className="shot-list-canvas__scroll"
         style={{ maxHeight: scrollViewportHeight, height: scrollViewportHeight }}
-        onScroll={scheduleHandleRefresh}
+        onScroll={handleVirtualScroll}
       >
         <table className="shot-list-canvas__table">
           <thead>
@@ -1127,9 +1337,14 @@ export function ShotListEmbeddedEditor({
             </tr>
           </thead>
           <tbody>
-            {visibleRows.map(({ shot: sh, rowIdx }) => (
+            {virtualWindow.topSpacer > 0 ? (
+              <tr className="shot-list-canvas__virtual-spacer" aria-hidden>
+                <td colSpan={12} style={{ height: virtualWindow.topSpacer }} />
+              </tr>
+            ) : null}
+            {virtualWindow.rows.map(({ shot: sh, rowIdx }) => (
               <ShotCanvasRow
-                key={sh.id}
+                key={sh.wireId ?? sh.id}
                 sh={sh}
                 rowIdx={rowIdx}
                 selected={selected.has(rowIdx)}
@@ -1142,9 +1357,15 @@ export function ShotListEmbeddedEditor({
                 onDelete={() => onDelete(rowIdx)}
                 onLiveField={(field, value) => onLiveField(rowIdx, field, value)}
                 onFlushPersist={flushPersist}
+                onManualConnectionStart={startManualConnection}
                 stopCanvas={stopCanvas}
               />
             ))}
+            {virtualWindow.bottomSpacer > 0 ? (
+              <tr className="shot-list-canvas__virtual-spacer" aria-hidden>
+                <td colSpan={12} style={{ height: virtualWindow.bottomSpacer }} />
+              </tr>
+            ) : null}
           </tbody>
         </table>
       </div>
@@ -1182,6 +1403,26 @@ export function ShotListEmbeddedEditor({
                 </button>
               )}
             </div>,
+            document.body,
+          )
+        : null}
+      {manualConnectionLine
+        ? createPortal(
+            <svg
+              className="shot-list-canvas__manual-connection-layer"
+              viewBox={`0 0 ${window.innerWidth} ${window.innerHeight}`}
+              aria-hidden
+            >
+              <path
+                d={`M ${manualConnectionLine.fromX} ${manualConnectionLine.fromY} C ${
+                  manualConnectionLine.fromX +
+                  Math.max(48, Math.abs(manualConnectionLine.toX - manualConnectionLine.fromX) * 0.45)
+                } ${manualConnectionLine.fromY}, ${
+                  manualConnectionLine.toX -
+                  Math.max(48, Math.abs(manualConnectionLine.toX - manualConnectionLine.fromX) * 0.45)
+                } ${manualConnectionLine.toY}, ${manualConnectionLine.toX} ${manualConnectionLine.toY}`}
+              />
+            </svg>,
             document.body,
           )
         : null}
