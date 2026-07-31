@@ -36,13 +36,18 @@ import {
 } from '@/components/ConnectEndBinder';
 import type { ContextMenuState } from '@/components/NodeContextMenu';
 import { ScissorCutLayer } from '@/components/ScissorCutLayer';
+import { ShotListPersistentConnectionLayer } from '@/components/ShotListPersistentConnectionLayer';
 import { StudioErrorBoundary } from '@/components/StudioErrorBoundary';
 import { useStudioGraphContentNodes } from '@/hooks/useStudioGraphContent';
 import { useStudioStore } from '@/store/useStudioStore';
 import type { StudioRFNode } from '@/types/reactFlow';
 import { isDeprecatedScriptFlowNode } from '@/utils/deprecatedScriptNodes';
 import { DEPT_OUTPUT_HANDLE_ID } from '@/utils/departmentInputWire';
-import { isShotListItemOutputHandleId } from '@/utils/shotListWire';
+import {
+  isShotListItemOutputHandleId,
+  SHOT_LIST_CONNECTION_PICKER_EVENT,
+  type ShotListConnectionPickerDetail,
+} from '@/utils/shotListWire';
 import {
   buildMagnetConnection,
   CONNECTION_MENU_LABELS,
@@ -797,6 +802,35 @@ export function StudioCanvas() {
   }, [nodePicker]);
 
   useEffect(() => {
+    const openShotListConnectionPicker = (event: Event) => {
+      const detail = (event as CustomEvent<ShotListConnectionPickerDetail>).detail;
+      if (!detail || !isShotListItemOutputHandleId(detail.fromHandleId)) return;
+      const sourceNode = useStudioStore
+        .getState()
+        .nodes.find((node) => node.id === detail.fromNodeId);
+      if (sourceNode?.type !== 'shotList') return;
+      const flow = screenToFlowRef.current?.({ x: detail.screenX, y: detail.screenY });
+      if (!flow) return;
+      const payload: NodePickerState = {
+        fromNodeId: detail.fromNodeId,
+        fromHandleId: detail.fromHandleId,
+        fromHandleType: 'source',
+        screenX: detail.screenX,
+        screenY: detail.screenY,
+        flowX: flow.x,
+        flowY: flow.y,
+      };
+      window.setTimeout(() => setNodePicker(payload), 0);
+    };
+    window.addEventListener(SHOT_LIST_CONNECTION_PICKER_EVENT, openShotListConnectionPicker);
+    return () =>
+      window.removeEventListener(
+        SHOT_LIST_CONNECTION_PICKER_EVENT,
+        openShotListConnectionPicker,
+      );
+  }, []);
+
+  useEffect(() => {
     if (!paneCreateMenu) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setPaneCreateMenu(null);
@@ -1249,6 +1283,7 @@ export function StudioCanvas() {
           <ChatDock />
         </Suspense>
       </ReactFlow>
+      <ShotListPersistentConnectionLayer />
       <Suspense fallback={null}>
         <StudioWelcomePanel />
         <NodeContextMenu menu={contextMenu} onClose={() => setContextMenu(null)} />

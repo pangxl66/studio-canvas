@@ -6,6 +6,27 @@ export const SHOT_LIST_PARENT_HANDLE_ID = 'shot-list-parent';
 /** 镜头表中每一行镜头右侧的独立输出端口前缀 */
 export const SHOT_LIST_ITEM_OUTPUT_HANDLE_PREFIX = 'shot-item-out:';
 
+export const SHOT_LIST_CONNECTION_PICKER_EVENT =
+  'studio:shot-list-connection-picker';
+
+export type ShotListConnectionPickerDetail = {
+  fromNodeId: string;
+  fromHandleId: string;
+  screenX: number;
+  screenY: number;
+};
+
+export function requestShotListConnectionPicker(
+  detail: ShotListConnectionPickerDetail,
+): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(
+    new CustomEvent<ShotListConnectionPickerDetail>(SHOT_LIST_CONNECTION_PICKER_EVENT, {
+      detail,
+    }),
+  );
+}
+
 export function createStoryboardShotWireId(seed?: number | string): string {
   const suffix = Math.random().toString(36).slice(2, 10);
   return `shotwire_${seed ?? 'x'}_${suffix}`;

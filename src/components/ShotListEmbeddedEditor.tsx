@@ -28,7 +28,11 @@ import {
   registerShotListPendingEditFlusher,
   unregisterShotListPendingEditFlusher,
 } from '@/utils/shotListPendingEdits';
-import { makeShotListItemOutputHandleId, parseShotListItemOutputHandleId } from '@/utils/shotListWire';
+import {
+  makeShotListItemOutputHandleId,
+  parseShotListItemOutputHandleId,
+  requestShotListConnectionPicker,
+} from '@/utils/shotListWire';
 
 type EditableField =
   | 'sceneRef'
@@ -55,6 +59,16 @@ type ShotListManualConnectionLine = {
   toX: number;
   toY: number;
 } | null;
+
+function connectionPathD({
+  fromX,
+  fromY,
+  toX,
+  toY,
+}: NonNullable<ShotListManualConnectionLine>): string {
+  const bend = Math.max(48, Math.abs(toX - fromX) * 0.45);
+  return `M ${fromX} ${fromY} C ${fromX + bend} ${fromY}, ${toX - bend} ${toY}, ${toX} ${toY}`;
+}
 
 const TRASH_ICON = (
   <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden>
@@ -833,6 +847,13 @@ export function ShotListEmbeddedEditor({
           }
           return;
         }
+
+        requestShotListConnectionPicker({
+          fromNodeId: id,
+          fromHandleId: sourceHandle,
+          screenX: nativeEvent.clientX,
+          screenY: nativeEvent.clientY,
+        });
       };
 
       manualConnectionCleanupRef.current = cleanup;
@@ -1413,15 +1434,7 @@ export function ShotListEmbeddedEditor({
               viewBox={`0 0 ${window.innerWidth} ${window.innerHeight}`}
               aria-hidden
             >
-              <path
-                d={`M ${manualConnectionLine.fromX} ${manualConnectionLine.fromY} C ${
-                  manualConnectionLine.fromX +
-                  Math.max(48, Math.abs(manualConnectionLine.toX - manualConnectionLine.fromX) * 0.45)
-                } ${manualConnectionLine.fromY}, ${
-                  manualConnectionLine.toX -
-                  Math.max(48, Math.abs(manualConnectionLine.toX - manualConnectionLine.fromX) * 0.45)
-                } ${manualConnectionLine.toY}, ${manualConnectionLine.toX} ${manualConnectionLine.toY}`}
-              />
+              <path d={connectionPathD(manualConnectionLine)} />
             </svg>,
             document.body,
           )

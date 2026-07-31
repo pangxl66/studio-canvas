@@ -10825,6 +10825,31 @@ body,
   filter: drop-shadow(0 0 5px rgba(192, 132, 252, 0.72));
 }
 
+.shot-list-canvas__persistent-connection-layer {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 2147482000;
+}
+
+.shot-list-canvas__persistent-connection-layer path {
+  fill: none;
+  stroke: rgba(192, 132, 252, 0.92);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 4px rgba(192, 132, 252, 0.62));
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+.shot-list-canvas__persistent-connection-layer path:hover {
+  stroke: #e9d5ff;
+  stroke-width: 4;
+}
+
 .recharge-panel__backdrop {
   position: absolute;
   inset: 0;

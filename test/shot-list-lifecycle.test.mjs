@@ -6,6 +6,8 @@ import {
   hasSameShotListWireTopology,
   makeShotListItemOutputHandleId,
   reconcileShotListOutputEdges,
+  requestShotListConnectionPicker,
+  SHOT_LIST_CONNECTION_PICKER_EVENT,
 } from '../src/utils/shotListWire.ts';
 import {
   findRecoverableStoryboardShotListId,
@@ -19,6 +21,7 @@ test('shot-list root leaves row output handle events available to React Flow', (
   const editor = read('src/components/ShotListEmbeddedEditor.tsx');
   const connectEndBinder = read('src/components/ConnectEndBinder.tsx');
   const canvas = read('src/components/StudioCanvas.tsx');
+  const persistentLayer = read('src/components/ShotListPersistentConnectionLayer.tsx');
   const styles = read('src/index.css');
   const rootTag =
     editor.match(
@@ -36,8 +39,42 @@ test('shot-list root leaves row output handle events available to React Flow', (
   assert.match(editor, /document\.addEventListener\('mousemove', onMouseMove\)/);
   assert.match(editor, /buildMagnetConnection\(started, targetId, state\.nodes\)/);
   assert.match(editor, /state\.onConnect\(connection\)/);
+  assert.match(editor, /requestShotListConnectionPicker\(\{/);
   assert.match(editor, /shot-list-canvas__manual-connection-layer/);
   assert.match(styles, /\.shot-list-canvas__manual-connection-layer\s*\{[\s\S]*?pointer-events: none;/);
+  assert.match(canvas, /<ShotListPersistentConnectionLayer\s*\/>/);
+  assert.match(persistentLayer, /data-edge-id=\{path\.edgeId\}/);
+  assert.match(persistentLayer, /new MutationObserver\(scheduleMeasure\)/);
+  assert.match(persistentLayer, /state\.onEdgesChange\(/);
+  assert.match(styles, /\.shot-list-canvas__persistent-connection-layer\s*\{[\s\S]*?pointer-events: none;/);
+  assert.match(canvas, /SHOT_LIST_CONNECTION_PICKER_EVENT/);
+  assert.match(canvas, /setNodePicker\(payload\)/);
+});
+
+test('shot-list manual fallback sends the exact row handle and drop point to the canvas', () => {
+  const originalWindow = globalThis.window;
+  const eventTarget = new EventTarget();
+  globalThis.window = eventTarget;
+  let received = null;
+  eventTarget.addEventListener(SHOT_LIST_CONNECTION_PICKER_EVENT, (event) => {
+    received = event.detail;
+  });
+
+  requestShotListConnectionPicker({
+    fromNodeId: 'shot-list-1',
+    fromHandleId: makeShotListItemOutputHandleId('wire-3'),
+    screenX: 840,
+    screenY: 420,
+  });
+
+  assert.deepEqual(received, {
+    fromNodeId: 'shot-list-1',
+    fromHandleId: makeShotListItemOutputHandleId('wire-3'),
+    screenX: 840,
+    screenY: 420,
+  });
+  if (originalWindow === undefined) delete globalThis.window;
+  else globalThis.window = originalWindow;
 });
 
 test('merged shots migrate old output edges and remove duplicates', () => {
