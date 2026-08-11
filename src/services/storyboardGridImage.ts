@@ -1,13 +1,19 @@
 import type { Edge } from '@xyflow/react';
 import { getResolvedVisionLlmGatewayConfig } from '@/config/llmSettings';
-import { getAuthSnapshot, isSaasAuthEnabled, isSaasMockEnabled } from '@/services/authClient';
+import {
+  getAuthSnapshot,
+  isLanDirectAccessEnabled,
+  isSaasAuthEnabled,
+  isSaasMockEnabled,
+} from '@/services/authClient';
 import { requestCreditRefresh, spendMockCredit } from '@/services/creditService';
 import type { StudioRFNode } from '@/types/reactFlow';
-import type { StoryboardShot } from '@/types/studio';
+import type { ProjectAspectRatio, StoryboardShot } from '@/types/studio';
 import {
   DEFAULT_IMAGE_GENERATION_MODEL,
   imageGenerationModelOption,
   resolveImageGenerationModel,
+  storyboardGridImageQuality,
   type ImageGenerationModelId,
 } from '@/services/imageGenerationModels';
 import {
@@ -71,7 +77,7 @@ export type StoryboardGridImageSize =
 
 export type StoryboardGridPromptOptions = {
   canvas?: 'square' | 'landscape' | 'portrait';
-  panelAspectRatio?: '16:9' | '9:16';
+  panelAspectRatio?: ProjectAspectRatio;
   referenceInstruction?: string;
   hasLayoutReference?: boolean;
   layoutReferenceIndex?: number;
@@ -259,9 +265,13 @@ export function buildStoryboardGridPrompt(
   const canvasInstruction = panelCount === 6 && options.panelAspectRatio
     ? options.panelAspectRatio === '9:16'
       ? '最终整张图片使用六宫格专属 3:8 竖向画布（2 列 × 3 行）'
-      : '最终整张图片使用六宫格专属 8:3 横向画布（3 列 × 2 行）'
-    : options.canvas === 'landscape'
-      ? '最终整张图片使用 16:9 横向画布'
+      : options.panelAspectRatio === '21:9'
+        ? '最终整张图片使用超宽横向安全画布（3 列 × 2 行），每格严格保持 21:9'
+        : '最终整张图片使用六宫格专属 8:3 横向画布（3 列 × 2 行）'
+    : options.panelAspectRatio === '21:9'
+      ? '最终整张图片使用可容纳 21:9 单格的超宽安全画布，所有有效面板严格保持 21:9'
+      : options.canvas === 'landscape'
+        ? '最终整张图片使用 16:9 横向画布'
       : options.canvas === 'portrait'
         ? '最终整张图片使用 9:16 竖向画布'
         : '最终整张图片使用正方形画布';
@@ -273,11 +283,13 @@ export function buildStoryboardGridPrompt(
     '说明带必须位于本格内部，不跨格、不遮挡人物面部和关键道具；图片模型不要在说明带里自行生成文字、数字或符号，系统会在生成后按分镜表原文叠加准确的镜头号、景别、运镜和画面说明。',
   ].join('');
   const cropSafetyInstruction =
-    options.canvas === 'landscape'
-      ? '每个分镜直接按 16:9 横向电影镜头完成构图，主体、人物头部和关键道具必须完整进入画面；不要依赖后期裁切来获得比例。'
-      : options.canvas === 'portrait'
-        ? '每个分镜直接按 9:16 竖向电影镜头完成构图，主体、人物和关键道具必须完整进入画面；不要依赖后期裁切来获得比例。'
-        : '';
+    options.panelAspectRatio === '21:9'
+      ? '每个分镜直接按 21:9 超宽银幕安全区构图，主体、人物头部和关键道具必须完整留在中央安全区；渠道使用相近原生尺寸时，只允许裁掉安全区外留白。'
+      : options.canvas === 'landscape'
+        ? '每个分镜直接按 16:9 横向电影镜头完成构图，主体、人物头部和关键道具必须完整进入画面；不要依赖后期裁切来获得比例。'
+        : options.canvas === 'portrait'
+          ? '每个分镜直接按 9:16 竖向电影镜头完成构图，主体、人物和关键道具必须完整进入画面；不要依赖后期裁切来获得比例。'
+          : '';
   const referenceInstruction = options.referenceInstruction?.trim();
 
   return [
@@ -345,7 +357,7 @@ function fitCaptionText(context: CanvasRenderingContext2D, text: string, maxWidt
 export async function addStoryboardPanelCaptions(
   result: StoryboardGridImageResult,
   shots: StoryboardShot[],
-  aspectRatio: '16:9' | '9:16',
+  aspectRatio: ProjectAspectRatio,
 ): Promise<StoryboardGridImageResult> {
   if (!shots.length) return result;
   const image = await loadGeneratedImage(result.imageDataUrl);
@@ -356,7 +368,9 @@ export async function addStoryboardPanelCaptions(
   const rows = layoutRows(shots.length, aspectRatio);
   const maxColumns = Math.max(...rows);
   const panelWidth = width / maxColumns;
-  const panelHeight = panelWidth * (aspectRatio === '16:9' ? 9 / 16 : 16 / 9);
+  const panelHeight = panelWidth * (
+    aspectRatio === '9:16' ? 16 / 9 : aspectRatio === '21:9' ? 9 / 21 : 9 / 16
+  );
   const gridHeight = panelHeight * rows.length;
   const startY = (height - gridHeight) / 2;
   const canvas = document.createElement('canvas');
@@ -448,14 +462,36 @@ async function compressReferenceImage(
   dataUrl: string,
   kind: StoryboardGridReferenceImage['kind'],
   overrides?: { maxSide?: number; quality?: number },
+  signal?: AbortSignal,
 ): Promise<string> {
+  if (signal?.aborted) throw new DOMException('参考图处理已停止。', 'AbortError');
   const image = new Image();
   image.decoding = 'async';
   await new Promise<void>((resolve, reject) => {
-    image.onload = () => resolve();
-    image.onerror = () => reject(new Error('参考图读取失败。'));
+    let settled = false;
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      image.onload = null;
+      image.onerror = null;
+    };
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback();
+    };
+    const onAbort = () => finish(() => reject(new DOMException('参考图处理已停止。', 'AbortError')));
+    const timer = window.setTimeout(
+      () => finish(() => reject(new Error('参考图读取超时，请检查该图片是否仍然可用。'))),
+      30_000,
+    );
+    image.onload = () => finish(resolve);
+    image.onerror = () => finish(() => reject(new Error('参考图读取失败，请重新载入该图片。')));
+    signal?.addEventListener('abort', onAbort, { once: true });
     image.src = dataUrl;
   });
+  if (signal?.aborted) throw new DOMException('参考图处理已停止。', 'AbortError');
   const maxSide = overrides?.maxSide ?? (kind === 'character' ? 1536 : kind === 'prop' ? 1280 : 1024);
   const scale = Math.min(1, maxSide / Math.max(image.naturalWidth || 1, image.naturalHeight || 1));
   const width = Math.max(1, Math.round(image.naturalWidth * scale));
@@ -469,7 +505,11 @@ async function compressReferenceImage(
   context.fillRect(0, 0, width, height);
   context.drawImage(image, 0, 0, width, height);
   const quality = overrides?.quality ?? (kind === 'character' ? 0.95 : kind === 'prop' ? 0.9 : 0.84);
-  return canvas.toDataURL('image/jpeg', quality);
+  const compressed = canvas.toDataURL('image/jpeg', quality);
+  image.src = '';
+  canvas.width = 1;
+  canvas.height = 1;
+  return compressed;
 }
 
 export async function prepareImageEditReference(
@@ -486,22 +526,28 @@ export async function prepareImageEditReference(
 export async function prepareStoryboardReferenceImages(
   references: StoryboardConnectedReference[],
   maxImages = 8,
+  signal?: AbortSignal,
 ): Promise<StoryboardGridReferenceImage[]> {
   const usable = prioritizeStoryboardReferences(references)
     .filter((reference) => reference.dataUrl)
     .slice(0, maxImages);
-  return Promise.all(
-    usable.map(async (reference) => ({
-      dataUrl: await compressReferenceImage(reference.dataUrl as string, reference.kind),
+  // 大图并行解码会在四张以上参考图时造成明显内存尖峰，甚至让浏览器一直停在 0/1。
+  // 顺序处理可稳定释放每张图的解码画布，耗时差异很小。
+  const prepared: StoryboardGridReferenceImage[] = [];
+  for (const reference of usable) {
+    if (signal?.aborted) throw new DOMException('参考图处理已停止。', 'AbortError');
+    prepared.push({
+      dataUrl: await compressReferenceImage(reference.dataUrl as string, reference.kind, undefined, signal),
       name: reference.name,
       kind: reference.kind,
       entityId: reference.entityId,
       entityName: reference.entityName,
-    })),
-  );
+    });
+  }
+  return prepared;
 }
 
-function layoutRows(panelCount: number, aspectRatio: '16:9' | '9:16'): number[] {
+function layoutRows(panelCount: number, aspectRatio: ProjectAspectRatio): number[] {
   if (panelCount <= 3) return [panelCount];
   if (panelCount === 4) return [2, 2];
   if (panelCount === 5) return [3, 2];
@@ -514,7 +560,7 @@ function layoutRows(panelCount: number, aspectRatio: '16:9' | '9:16'): number[] 
 /** A blank guide sent to the image model so panel geometry is generated, not post-cropped. */
 export function createStoryboardLayoutReference(
   panelCount: number,
-  aspectRatio: '16:9' | '9:16',
+  aspectRatio: ProjectAspectRatio,
 ): StoryboardGridReferenceImage {
   const [width, height] = storyboardGridCanvasSize(panelCount, aspectRatio)
     .split('x')
@@ -522,7 +568,9 @@ export function createStoryboardLayoutReference(
   const rows = layoutRows(panelCount, aspectRatio);
   const maxColumns = Math.max(...rows);
   const panelWidth = width / maxColumns;
-  const panelHeight = panelWidth * (aspectRatio === '16:9' ? 9 / 16 : 16 / 9);
+  const panelHeight = panelWidth * (
+    aspectRatio === '9:16' ? 16 / 9 : aspectRatio === '21:9' ? 9 / 21 : 9 / 16
+  );
   const gridHeight = panelHeight * rows.length;
   const startY = (height - gridHeight) / 2;
   const gap = Math.max(4, Math.round(Math.min(width, height) * 0.006));
@@ -581,6 +629,7 @@ export async function generateStoryboardGridImage(
   if (!config) throw new Error('尚未配置可用的图片模型接口。请先完成模型设置。');
   const model = resolveImageGenerationModel(requestedModel);
   const modelLabel = imageGenerationModelOption(model).label;
+  const quality = storyboardGridImageQuality(referenceImages);
 
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), Math.max(config.timeoutMs ?? 120_000, 420_000));
@@ -596,7 +645,9 @@ export async function generateStoryboardGridImage(
     if (useProxy && isSaasAuthEnabled()) {
       const { session } = await getAuthSnapshot();
       if (session?.access_token) headers.Authorization = `Bearer ${session.access_token}`;
-      if (isSaasMockEnabled() && session?.user?.email) headers['X-Studio-Mock-Email'] = session.user.email;
+      if ((isSaasMockEnabled() || isLanDirectAccessEnabled()) && session?.user?.email) {
+        headers['X-Studio-Mock-Email'] = session.user.email;
+      }
     } else if (config.apiKey) {
       headers.Authorization = `Bearer ${config.apiKey}`;
     }
@@ -614,7 +665,7 @@ export async function generateStoryboardGridImage(
         projectId,
         model,
         size,
-        quality: referenceImages.some((reference) => reference.kind === 'character') ? 'high' : 'medium',
+        quality,
         referenceImages,
       });
     } else if (referenceImages.length) {
@@ -623,14 +674,11 @@ export async function generateStoryboardGridImage(
       form.set('prompt', prompt);
       form.set('n', '1');
       form.set('size', size);
-      form.set(
-        'quality',
-        referenceImages.some((reference) => reference.kind === 'character') ? 'high' : 'medium',
-      );
+      form.set('quality', quality);
       form.set('output_format', 'jpeg');
       form.set('output_compression', '88');
       referenceImages.forEach((reference, index) => {
-        form.append('image[]', dataUrlToBlob(reference.dataUrl), `reference-${index + 1}.jpg`);
+        form.append('image', dataUrlToBlob(reference.dataUrl), `reference-${index + 1}.jpg`);
       });
       body = form;
     } else {

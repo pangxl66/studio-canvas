@@ -28,6 +28,13 @@ export type ImageGenerationModelId = (typeof STORYBOARD_GRID_IMAGE_MODELS)[numbe
 
 export const DEFAULT_IMAGE_GENERATION_MODEL: ImageGenerationModelId = 'gemini-3.1-flash-image';
 
+export function storyboardGridImageQuality(
+  referenceImages: ReadonlyArray<{ kind?: string }>,
+): 'medium' | 'high' {
+  if (referenceImages.length >= 3) return 'medium';
+  return referenceImages.some((reference) => reference.kind === 'character') ? 'high' : 'medium';
+}
+
 export function isImageGenerationModelId(value: unknown): value is ImageGenerationModelId {
   return STORYBOARD_GRID_IMAGE_MODELS.some((model) => model.id === value);
 }

@@ -1,0 +1,4 @@
+interface:
+  display_name: "漫威电影风格标注分镜"
+  short_description: "生成提示词节点可识别的21:9导演级标注分镜JSON"
+  default_prompt: "使用 $generate-marvel-storyboards 根据我的基础分镜生成提示词节点可识别的文字版 JSON；默认画幅为 21:9。"

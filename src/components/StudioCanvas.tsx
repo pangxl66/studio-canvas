@@ -7,6 +7,7 @@
   Panel,
   ReactFlow,
   SelectionMode,
+  ViewportPortal,
   useReactFlow,
   type CoordinateExtent,
   type Edge,
@@ -28,6 +29,7 @@ import {
   type DragEvent as ReactDragEvent,
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
 } from 'react';
 import {
   ConnectEndBinder,
@@ -54,6 +56,8 @@ import {
   connectionMenuPicksForPicker,
   focusDetailForConnectionPick,
   isStudioConnectionAllowed,
+  preferredSourceHandleForNode,
+  type ConnectionMenuPick,
   type ConnectionCandidate,
   type CreateNodeKind,
 } from '@/utils/studioConnectionRules';
@@ -220,6 +224,9 @@ const NodeContextMenu = lazy(() =>
 const StudioProjectMenu = lazy(() =>
   import('@/components/StudioProjectMenu').then((module) => ({ default: module.StudioProjectMenu })),
 );
+const ProjectGlobalSettings = lazy(() =>
+  import('@/components/ProjectGlobalSettings').then((module) => ({ default: module.ProjectGlobalSettings })),
+);
 const StudioSettings = lazy(() =>
   import('@/components/StudioSettings').then((module) => ({ default: module.StudioSettings })),
 );
@@ -330,8 +337,8 @@ const PANE_GALLERY_ITEMS_BASE: NodeGalleryItem[] = [
   {
     id: 'film_video_prompt_node',
     kind: 'film_video_prompt_node',
-    title: '影视分镜提示词',
-    subtitle: '自动识别 A/B/C 输入模式，生成 Seedance 视频提示词。',
+    title: '视频提示词',
+    subtitle: '读取最终九宫格图片，分析逐格表演与动作接力，生成独立视频提示词。',
     badge: '新模式',
     accentClass: 'node-picker__card--film',
     icon: '影',
@@ -450,7 +457,7 @@ export function StudioCanvas() {
           !deprecatedNodeIds.has(edge.source) &&
           !deprecatedNodeIds.has(edge.target) &&
           !isDisabledShotListTableOutputEdge(edge, disabledShotListSourceIds),
-      ),
+      ).map((edge) => (edge.animated ? { ...edge, animated: false } : edge)),
     [deprecatedNodeIds, disabledShotListSourceIds, edges],
   );
 
@@ -496,6 +503,7 @@ export function StudioCanvas() {
   const [selectedEdgeIds, setSelectedEdgeIds] = useState<string[]>([]);
   const [draggingCanvasFile, setDraggingCanvasFile] = useState(false);
   const [nodeDragActive, setNodeDragActive] = useState(false);
+  const [viewportMoveActive, setViewportMoveActive] = useState(false);
   const [connectionDragActive, setConnectionDragActive] = useState(false);
   const [connectionHoverNodeId, setConnectionHoverNodeId] = useState<string | null>(null);
   const connectEndImplRef = useRef<OnConnectEnd>(() => {});
@@ -535,6 +543,16 @@ export function StudioCanvas() {
     () => connectionMenuPicksForPicker(nodePicker, nodes),
     [nodePicker, nodes],
   );
+  const selectedNodeCount = useMemo(
+    () => visibleNodes.reduce((count, node) => count + (node.selected ? 1 : 0), 0),
+    [visibleNodes],
+  );
+  const multiSelectionActive = selectedNodeCount > 1;
+  const multiSelectionSourceNodes = useMemo(() => {
+    const selected = visibleNodes.filter((node) => node.selected);
+    if (selected.length < 2) return [];
+    return selected.every((node) => preferredSourceHandleForNode(node) != null) ? selected : [];
+  }, [visibleNodes]);
   const onConnectStart = useCallback<OnConnectStart>((_e, p) => {
     const started: ConnectionDragStart = {
       nodeId: p.nodeId,
@@ -674,10 +692,13 @@ export function StudioCanvas() {
   }, [connectionDragActive, findConnectionHoverNode]);
 
   const onNodeClick = useCallback(
-    (_: ReactMouseEvent, n: StudioRFNode) => {
+    (event: ReactMouseEvent, n: StudioRFNode) => {
       lastPaneClickRef.current = null;
       setContextMenu(null);
       setPaneCreateMenu(null);
+      // React Flow owns Shift multi-selection. Focusing here would immediately
+      // collapse it back to one node and make the unified output disappear.
+      if (event.shiftKey) return;
       const openDetail =
         (n.type === 'department' && n.data.type !== 'prompt') || n.type === 'shotList';
       focusNode(n.id, { openDetail });
@@ -762,6 +783,14 @@ export function StudioCanvas() {
     [duplicateNodesByIds, repositionNodes],
   );
 
+  const onViewportMoveStart = useCallback(() => {
+    setViewportMoveActive(true);
+  }, []);
+
+  const onViewportMoveEnd = useCallback(() => {
+    setViewportMoveActive(false);
+  }, []);
+
   const onPaneClick = useCallback((e: ReactMouseEvent) => {
     const now = Date.now();
     const prev = lastPaneClickRef.current;
@@ -786,6 +815,97 @@ export function StudioCanvas() {
   const onSelectionChange = useCallback(({ edges }: { nodes: StudioRFNode[]; edges: Edge[] }) => {
     setSelectedEdgeIds(edges.map((e) => e.id));
   }, []);
+
+  const openMultiSelectionPicker = useCallback(
+    (payload: {
+      sourceNodeIds: string[];
+      screenX: number;
+      screenY: number;
+      flowX: number;
+      flowY: number;
+    }) => {
+      const first = useStudioStore
+        .getState()
+        .nodes.find((node) => node.id === payload.sourceNodeIds[0]);
+      if (!first) return;
+      setNodePicker({
+        fromNodeId: first.id,
+        fromNodeIds: payload.sourceNodeIds,
+        fromHandleId: preferredSourceHandleForNode(first),
+        fromHandleType: 'source',
+        screenX: payload.screenX,
+        screenY: payload.screenY,
+        flowX: payload.flowX,
+        flowY: payload.flowY,
+      });
+    },
+    [],
+  );
+
+  const completeMultiSelectionPick = useCallback(
+    (
+      sourceNodeIds: string[],
+      pick: ConnectionMenuPick,
+      position: { x: number; y: number },
+    ): string | undefined => {
+      let targetId: string | undefined;
+      if (pick === 'text_node') targetId = addTextNode('', position);
+      else if (pick === 'image_node') targetId = addImageNode(position);
+      else if (pick === 'video_node') targetId = addVideoNode(position);
+      else if (pick === 'storyboard_file_node') targetId = addStoryboardFileNode(position);
+      else if (pick === 'prompt_review_node') targetId = addPromptReviewNode(position);
+      else if (pick === 'film_character_node') targetId = addAiFilmCharacterNode(position);
+      else if (pick === 'film_storyboard_node') targetId = addAiFilmStoryboardNode(position);
+      else if (pick === 'film_video_prompt_node') targetId = addAiFilmVideoPromptNode(position);
+      else if (pick === 'writing' || pick === 'storyboard' || pick === 'prompt') {
+        targetId = addDepartmentNode(pick, position);
+      }
+      if (!targetId) return undefined;
+
+      const state = useStudioStore.getState();
+      const connections = sourceNodeIds.flatMap((sourceId) => {
+        const connection = buildMagnetConnection(
+          { nodeId: sourceId, handleId: null, handleType: 'source' },
+          targetId!,
+          state.nodes,
+        );
+        return connection && isStudioConnectionAllowed(connection, state.nodes, state.edges)
+          ? [connection]
+          : [];
+      });
+
+      if (connections.length !== sourceNodeIds.length) {
+        removeNodesByIds([targetId]);
+        pushMessage({
+          role: 'system',
+          text: '所选节点不能全部接入这个下游节点，已取消创建。',
+        });
+        return undefined;
+      }
+
+      connections.forEach((connection) => onConnect(connection));
+      pushMessage({
+        role: 'system',
+        text: `已把选中的 ${sourceNodeIds.length} 个节点统一接入新节点。`,
+        nodeId: targetId,
+      });
+      return targetId;
+    },
+    [
+      addAiFilmCharacterNode,
+      addAiFilmStoryboardNode,
+      addAiFilmVideoPromptNode,
+      addDepartmentNode,
+      addImageNode,
+      addPromptReviewNode,
+      addStoryboardFileNode,
+      addTextNode,
+      addVideoNode,
+      onConnect,
+      pushMessage,
+      removeNodesByIds,
+    ],
+  );
 
   const onEdgesDelete = useCallback((deleted: Edge[]) => {
     const gone = new Set(deleted.map((e) => e.id));
@@ -1016,6 +1136,7 @@ export function StudioCanvas() {
               createStudioProjectPayload(currentProject.nodes, currentProject.edges, {
                 projectId: currentProject.currentProjectId ?? undefined,
                 projectName: currentProject.currentProjectName,
+                projectSettings: currentProject.projectSettings,
               }),
             );
           }
@@ -1023,11 +1144,13 @@ export function StudioCanvas() {
             createStudioProjectPayload(payload.nodes, payload.edges, {
               projectId: nextProjectId,
               projectName: nextProjectName,
+              projectSettings: payload.projectSettings,
             }),
           );
           hydrateProject(payload.nodes, payload.edges, {
             projectId: nextProjectId,
             projectName: nextProjectName,
+            projectSettings: payload.projectSettings,
             broadcastText: `已从拖入文件打开项目“${nextProjectName}”。`,
           });
           await pushStudioRecentProject({
@@ -1193,6 +1316,8 @@ export function StudioCanvas() {
     <div
       className={`studio-canvas${draggingCanvasFile ? ' studio-canvas--dragging-file' : ''}${
         nodeDragActive ? ' studio-canvas--node-dragging' : ''
+      }${viewportMoveActive ? ' studio-canvas--viewport-moving' : ''
+      }${multiSelectionActive ? ' studio-canvas--multi-select' : ''
       }`}
       onDragOver={handleCanvasDragOver}
       onDragLeave={handleCanvasDragLeave}
@@ -1222,9 +1347,12 @@ export function StudioCanvas() {
         onNodeDoubleClick={onNodeDoubleClick}
         onNodeDragStart={onNodeDragStart}
         onNodeDragStop={onNodeDragStop}
+        onMoveStart={onViewportMoveStart}
+        onMoveEnd={onViewportMoveEnd}
         onPaneClick={onPaneClick}
         onSelectionChange={onSelectionChange}
         defaultEdgeOptions={{ selectable: true }}
+        onlyRenderVisibleElements
         fitView
         fitViewOptions={{ maxZoom: 1.24, padding: 0.18 }}
         translateExtent={INFINITE_EXTENT}
@@ -1249,10 +1377,15 @@ export function StudioCanvas() {
           dragStartRef={connectionDragRef}
           setPicker={setNodePicker}
         />
+        <MultiSelectionOutputLayer
+          nodes={multiSelectionSourceNodes}
+          onDrop={openMultiSelectionPicker}
+        />
         <FlowProjectionBridge onReady={(projector) => { screenToFlowRef.current = projector; }} />
         <PaneCreateMenuBinder seed={paneMenuSeed} onResolve={setPaneCreateMenu} onConsume={() => setPaneMenuSeed(null)} />
         <Suspense fallback={null}>
           <StudioProjectMenu />
+          <ProjectGlobalSettings />
         </Suspense>
         <Panel position="top-center" className="studio-edge-panel">
           {selectedEdgeIds.length > 0 ? (
@@ -1298,7 +1431,9 @@ export function StudioCanvas() {
           onPointerDown={(e) => e.stopPropagation()}
         >
           <div className="node-picker__title">
-            {shotListOutputPanePicker
+            {nodePicker.fromNodeIds && nodePicker.fromNodeIds.length > 1
+              ? `引用选中的 ${nodePicker.fromNodeIds.length} 个节点 · 创建下游节点`
+              : shotListOutputPanePicker
               ? '分镜表 Output · 创建下游节点并连线'
               : promptOutputPanePicker
                 ? 'Prompt Output · 创建下游审核节点'
@@ -1312,13 +1447,20 @@ export function StudioCanvas() {
                 className="node-picker__btn"
                 onClick={() => {
                   const p = nodePicker;
-                  const nid = completeConnectionMenuPick({
-                    fromNodeId: p.fromNodeId,
-                    fromHandleId: p.fromHandleId,
-                    fromHandleType: p.fromHandleType,
-                    pick: kind,
-                    flowPosition: { x: p.flowX, y: p.flowY },
-                  });
+                  const nid =
+                    p.fromNodeIds && p.fromNodeIds.length > 1
+                      ? completeMultiSelectionPick(
+                          p.fromNodeIds,
+                          kind,
+                          { x: p.flowX + 56, y: p.flowY - 70 },
+                        )
+                      : completeConnectionMenuPick({
+                          fromNodeId: p.fromNodeId,
+                          fromHandleId: p.fromHandleId,
+                          fromHandleType: p.fromHandleType,
+                          pick: kind,
+                          flowPosition: { x: p.flowX, y: p.flowY },
+                        });
                   if (nid) {
                     setNodePicker(null);
                     focusNode(nid, { openDetail: focusDetailForConnectionPick(kind) });
@@ -1428,6 +1570,131 @@ function NodeGalleryMenu({
         );
       })}
     </div>
+  );
+}
+
+function MultiSelectionOutputLayer({
+  nodes,
+  onDrop,
+}: {
+  nodes: StudioRFNode[];
+  onDrop: (payload: {
+    sourceNodeIds: string[];
+    screenX: number;
+    screenY: number;
+    flowX: number;
+    flowY: number;
+  }) => void;
+}) {
+  const { screenToFlowPosition } = useReactFlow();
+  const [dragPoint, setDragPoint] = useState<{ x: number; y: number } | null>(null);
+  const dragStartRef = useRef<{ pointerId: number; screenX: number; screenY: number } | null>(null);
+  const sourceNodeIds = useMemo(() => nodes.map((node) => node.id), [nodes]);
+  const sourceKey = sourceNodeIds.join('|');
+
+  useEffect(() => {
+    dragStartRef.current = null;
+    setDragPoint(null);
+  }, [sourceKey]);
+
+  const geometry = useMemo(() => {
+    if (nodes.length < 2) return null;
+    const boxes = nodes.map((node) => {
+      const width = node.measured?.width ?? node.width ?? 360;
+      const height = node.measured?.height ?? node.height ?? 240;
+      return {
+        left: node.position.x,
+        top: node.position.y,
+        right: node.position.x + width,
+        bottom: node.position.y + height,
+        anchorX: node.position.x + width,
+        anchorY: node.position.y + height / 2,
+      };
+    });
+    const right = Math.max(...boxes.map((box) => box.right));
+    const top = Math.min(...boxes.map((box) => box.top));
+    const bottom = Math.max(...boxes.map((box) => box.bottom));
+    return {
+      boxes,
+      hub: { x: right + 52, y: top + (bottom - top) / 2 },
+    };
+  }, [nodes]);
+
+  if (!geometry) return null;
+
+  const curve = (from: { x: number; y: number }, to: { x: number; y: number }) => {
+    const bend = Math.max(36, Math.abs(to.x - from.x) * 0.48);
+    return `M ${from.x} ${from.y} C ${from.x + bend} ${from.y}, ${to.x - bend} ${to.y}, ${to.x} ${to.y}`;
+  };
+
+  const finishDrag = (event: ReactPointerEvent<HTMLButtonElement>, cancelled = false) => {
+    const started = dragStartRef.current;
+    dragStartRef.current = null;
+    setDragPoint(null);
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // The browser may release capture before pointercancel.
+    }
+    if (cancelled || !started) return;
+    if (Math.hypot(event.clientX - started.screenX, event.clientY - started.screenY) < 8) return;
+    const flow = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+    onDrop({
+      sourceNodeIds,
+      screenX: event.clientX,
+      screenY: event.clientY,
+      flowX: flow.x,
+      flowY: flow.y,
+    });
+  };
+
+  return (
+    <ViewportPortal>
+      <div className="studio-multi-output-layer" aria-hidden={!dragPoint}>
+        {dragPoint ? (
+          <svg className="studio-multi-output-layer__wires" width="1" height="1">
+            {geometry.boxes.map((box, index) => (
+              <path
+                key={sourceNodeIds[index]}
+                d={curve({ x: box.anchorX, y: box.anchorY }, geometry.hub)}
+              />
+            ))}
+            <path
+              className="studio-multi-output-layer__wire--active"
+              d={curve(geometry.hub, dragPoint)}
+            />
+          </svg>
+        ) : null}
+        <button
+          type="button"
+          className={`studio-multi-output-layer__handle nodrag nopan${dragPoint ? ' is-dragging' : ''}`}
+          style={{ left: geometry.hub.x, top: geometry.hub.y }}
+          aria-label={`统一输出选中的 ${nodes.length} 个节点`}
+          title={`拖拽以引用选中的 ${nodes.length} 个节点`}
+          onPointerDown={(event) => {
+            if (event.button !== 0) return;
+            event.preventDefault();
+            event.stopPropagation();
+            event.currentTarget.setPointerCapture(event.pointerId);
+            dragStartRef.current = {
+              pointerId: event.pointerId,
+              screenX: event.clientX,
+              screenY: event.clientY,
+            };
+            setDragPoint(screenToFlowPosition({ x: event.clientX, y: event.clientY }));
+          }}
+          onPointerMove={(event) => {
+            if (dragStartRef.current?.pointerId !== event.pointerId) return;
+            setDragPoint(screenToFlowPosition({ x: event.clientX, y: event.clientY }));
+          }}
+          onPointerUp={(event) => finishDrag(event)}
+          onPointerCancel={(event) => finishDrag(event, true)}
+        >
+          <span aria-hidden>＋</span>
+          <strong>{nodes.length}</strong>
+        </button>
+      </div>
+    </ViewportPortal>
   );
 }
 

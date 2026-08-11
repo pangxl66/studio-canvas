@@ -4,7 +4,7 @@ export type AiFilmmakingPromptNodeKind =
   | 'film_video_prompt_node';
 
 export type AiFilmmakingVideoMode = 'A' | 'B' | 'C';
-export type AiFilmmakingStoryboardAspectRatio = '16:9' | '9:16';
+export type AiFilmmakingStoryboardAspectRatio = ProjectAspectRatio;
 
 export type AiFilmStoryboardSkillPrompt = {
   name: string;
@@ -17,6 +17,7 @@ export type AiFilmmakingSourceSummary = {
   storyboardPrompts: string[];
   storyboardTables: string[];
   storyboardPanelCount?: number;
+  storyboardDurationSec?: number;
   storyboardAspectRatio?: AiFilmmakingStoryboardAspectRatio;
   imageLabels: string[];
   storyboardImageLabels: string[];
@@ -26,7 +27,7 @@ export type AiFilmmakingSourceSummary = {
 export const DEFAULT_STORYBOARD_ASPECT_RATIO: AiFilmmakingStoryboardAspectRatio = '16:9';
 
 export function normalizeStoryboardAspectRatio(value?: unknown): AiFilmmakingStoryboardAspectRatio {
-  return value === '9:16' ? '9:16' : DEFAULT_STORYBOARD_ASPECT_RATIO;
+  return value === '9:16' || value === '21:9' ? value : DEFAULT_STORYBOARD_ASPECT_RATIO;
 }
 
 function normalizedStoryboardPanelCount(panelCount?: number): number {
@@ -37,9 +38,13 @@ function normalizedStoryboardPanelCount(panelCount?: number): number {
 
 function storyboardAspectRatioHint(aspectRatio?: AiFilmmakingStoryboardAspectRatio): string {
   const normalized = normalizeStoryboardAspectRatio(aspectRatio);
-  return normalized === '9:16'
-    ? '9:16 vertical portrait storyboard sheet, optimized for mobile/video vertical review'
-    : '16:9 horizontal landscape storyboard sheet, optimized for cinematic wide-screen review';
+  if (normalized === '9:16') {
+    return '9:16 vertical portrait storyboard sheet, optimized for mobile/video vertical review';
+  }
+  if (normalized === '21:9') {
+    return '21:9 ultra-wide cinematic storyboard framing; keep all critical subjects inside a centered 21:9 safe area when the provider uses a nearby native canvas size';
+  }
+  return '16:9 horizontal landscape storyboard sheet, optimized for cinematic wide-screen review';
 }
 
 function storyboardGridLayoutHint(
@@ -193,7 +198,7 @@ export function buildAiFilmmakingSystemPrompt(
     'Variant A: text-driven shots, optional character sheet references.',
     'Variant B: storyboard grid as the main reference.',
     'Variant C: character sheets plus storyboard grid.',
-    'Default duration is always 15 seconds unless the input explicitly asks for less. Cover the full 0:00-0:15 timeline.',
+    'Use the duration explicitly requested by the node or upstream shots, even when it exceeds 15 seconds. Only fall back to 15 seconds when no duration is supplied. Cover the full selected timeline.',
     'Default audio is NO MUSIC unless the user explicitly asks for music. Ambient sound and Foley are allowed.',
     'Use @image numbering correctly: every reference gets a unique number. Character sheet references come first, storyboard grid comes after character sheets.',
     'If using Variant B or C, say the storyboard grid should be read as sequential shots, not as one image.',
@@ -277,7 +282,7 @@ export function buildSeedanceVideoUserPrompt(
   return [
     `App-detected mode: ${variant}`,
     'Generate Template 3 Seedance 2.0 video prompt text for this mode. If the attached image clearly indicates another A/B/C variant, use the visually correct variant and name it in the prompt.',
-    'Use 15 seconds by default. Use NO MUSIC unless source material explicitly requests music.',
+    'Use the duration explicitly supplied by the node or upstream shots, even when it exceeds 15 seconds. Only fall back to 15 seconds when no duration exists. Use NO MUSIC unless source material explicitly requests music.',
     'Use correct @image numbering for every connected reference.',
     'Output only the final prompt text.',
     '',
@@ -285,3 +290,4 @@ export function buildSeedanceVideoUserPrompt(
     formatSourceSummary(summary),
   ].join('\n');
 }
+import type { ProjectAspectRatio } from '@/types/studio';

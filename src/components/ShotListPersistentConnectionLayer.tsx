@@ -11,6 +11,13 @@ type PersistentConnectionPath = {
   toY: number;
 };
 
+type PersistentConnectionElements = {
+  edgeId: string;
+  sourceHandle: HTMLElement | null;
+  targetHandle: HTMLElement | null;
+  targetNode: HTMLElement | null;
+};
+
 function pathD({ fromX, fromY, toX, toY }: PersistentConnectionPath): string {
   const bend = Math.max(48, Math.abs(toX - fromX) * 0.45);
   return `M ${fromX} ${fromY} C ${fromX + bend} ${fromY}, ${toX - bend} ${toY}, ${toX} ${toY}`;
@@ -61,6 +68,7 @@ export function ShotListPersistentConnectionLayer() {
   relevantEdgesRef.current = relevantEdges;
   const [paths, setPaths] = useState<PersistentConnectionPath[]>([]);
   const frameRef = useRef<number | null>(null);
+  const elementsRef = useRef<PersistentConnectionElements[]>([]);
 
   const selectEdge = useCallback((edgeId: string) => {
     const state = useStudioStore.getState();
@@ -74,8 +82,7 @@ export function ShotListPersistentConnectionLayer() {
   }, []);
 
   useEffect(() => {
-    const measure = () => {
-      frameRef.current = null;
+    const resolveElements = () => {
       const handles = Array.from(
         document.querySelectorAll<HTMLElement>('.react-flow__handle[data-nodeid]'),
       );
@@ -93,31 +100,46 @@ export function ShotListPersistentConnectionLayer() {
           .map((node) => [node.dataset.id!, node]),
       );
 
-      const nextPaths: PersistentConnectionPath[] = [];
-      for (const edge of relevantEdgesRef.current) {
-        if (!edge.sourceHandle) continue;
-        const sourceHandle = handleMap.get(
-          `${edge.source}\u0000${edge.sourceHandle}\u0000source`,
-        );
-        const from = sourceHandle ? rectCenter(sourceHandle.getBoundingClientRect()) : null;
-        if (!from) continue;
-
+      elementsRef.current = relevantEdgesRef.current.map((edge) => {
+        const sourceHandle = edge.sourceHandle
+          ? handleMap.get(`${edge.source}\u0000${edge.sourceHandle}\u0000source`) ?? null
+          : null;
         const targetHandle = edge.targetHandle
-          ? handleMap.get(`${edge.target}\u0000${edge.targetHandle}\u0000target`)
+          ? handleMap.get(`${edge.target}\u0000${edge.targetHandle}\u0000target`) ?? null
           : handles.find(
               (handle) =>
                 handle.dataset.nodeid === edge.target && handle.classList.contains('target'),
-            );
-        let to = targetHandle ? rectCenter(targetHandle.getBoundingClientRect()) : null;
-        if (!to) {
-          const targetRect = nodeMap.get(edge.target)?.getBoundingClientRect();
+            ) ?? null;
+        return {
+          edgeId: edge.id,
+          sourceHandle,
+          targetHandle,
+          targetNode: nodeMap.get(edge.target) ?? null,
+        };
+      });
+    };
+
+    const measure = () => {
+      frameRef.current = null;
+      const nextPaths: PersistentConnectionPath[] = [];
+      for (const elements of elementsRef.current) {
+        const from = elements.sourceHandle?.isConnected
+          ? rectCenter(elements.sourceHandle.getBoundingClientRect())
+          : null;
+        if (!from) continue;
+
+        let to = elements.targetHandle?.isConnected
+          ? rectCenter(elements.targetHandle.getBoundingClientRect())
+          : null;
+        if (!to && elements.targetNode?.isConnected) {
+          const targetRect = elements.targetNode.getBoundingClientRect();
           if (targetRect && (targetRect.width > 0 || targetRect.height > 0)) {
             to = { x: targetRect.left, y: targetRect.top + targetRect.height / 2 };
           }
         }
         if (!to) continue;
         nextPaths.push({
-          edgeId: edge.id,
+          edgeId: elements.edgeId,
           fromX: from.x,
           fromY: from.y,
           toX: to.x,
@@ -132,12 +154,32 @@ export function ShotListPersistentConnectionLayer() {
       frameRef.current = window.requestAnimationFrame(measure);
     };
 
+    const resolveAndScheduleMeasure = () => {
+      resolveElements();
+      scheduleMeasure();
+    };
+
+    resolveElements();
     measure();
     window.addEventListener('resize', scheduleMeasure);
     document.addEventListener('scroll', scheduleMeasure, true);
 
     const flowViewport = document.querySelector<HTMLElement>('.react-flow__viewport');
-    const mutationObserver = flowViewport ? new MutationObserver(scheduleMeasure) : null;
+    const mutationObserver = flowViewport
+      ? new MutationObserver((records) => {
+          if (
+            records.some(
+              (record) =>
+                record.type === 'childList' ||
+                (record.type === 'attributes' && record.attributeName === 'class'),
+            )
+          ) {
+            resolveAndScheduleMeasure();
+            return;
+          }
+          scheduleMeasure();
+        })
+      : null;
     if (flowViewport) {
       mutationObserver?.observe(flowViewport, {
         subtree: true,
@@ -149,7 +191,9 @@ export function ShotListPersistentConnectionLayer() {
 
     const flowRoot = document.querySelector<HTMLElement>('.react-flow');
     const resizeObserver =
-      typeof ResizeObserver !== 'undefined' ? new ResizeObserver(scheduleMeasure) : null;
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(resolveAndScheduleMeasure)
+        : null;
     if (flowRoot) resizeObserver?.observe(flowRoot);
 
     return () => {

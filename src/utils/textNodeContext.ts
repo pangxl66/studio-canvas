@@ -161,6 +161,65 @@ export function extractProjectConstraintsFromTaggedText(raw: string): string[] {
   return Array.from(new Set(constraints));
 }
 
+function normalizeConstraintForComparison(value: string): string {
+  return value
+    .normalize('NFKC')
+    .replace(/^[^：:\n]{1,80}[：:]/, '')
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+/**
+ * 项目约束以用户输入块为权威来源，同时保留模型补充的非重叠硬约束。
+ * 模型经常把一个输入块拆成多条返回；这里用包含关系去掉这些语义子串，
+ * 避免根字段和每镜 note 随生成次数不断膨胀。
+ */
+export function dedupeProjectConstraints(
+  modelConstraints: string[] = [],
+  inputConstraints: string[] = [],
+): string[] {
+  const ordered = [...inputConstraints, ...modelConstraints]
+    .map((constraint) => constraint.trim())
+    .filter(Boolean);
+  const result: string[] = [];
+  const comparisonKeys: string[] = [];
+
+  for (const constraint of ordered) {
+    const key = normalizeConstraintForComparison(constraint);
+    if (!key) continue;
+    if (
+      comparisonKeys.some(
+        (existingKey) => existingKey === key || existingKey.includes(key),
+      )
+    ) {
+      continue;
+    }
+    const coveredIndexes = comparisonKeys
+      .map((existingKey, index) => (key.includes(existingKey) ? index : -1))
+      .filter((index) => index >= 0)
+      .reverse();
+    for (const index of coveredIndexes) {
+      comparisonKeys.splice(index, 1);
+      result.splice(index, 1);
+    }
+    result.push(constraint);
+    comparisonKeys.push(key);
+  }
+
+  return result;
+}
+
+/** 将项目约束拆成模型生成前可逐项核对的原子清单。 */
+export function buildProjectConstraintExecutionChecklist(constraints: string[]): string {
+  const items = constraints
+    .flatMap((constraint) => constraint.split(/[。！？；\n]+/))
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 32);
+  if (items.length === 0) return '';
+  return items.map((item, index) => `C${index + 1}. ${item}`).join('\n');
+}
+
 function compactConstraintSummary(constraints: string[], maxLength = 900): string {
   const compact = constraints
     .map((constraint) => constraint.replace(/\s+/g, ' ').trim())
@@ -178,12 +237,9 @@ export function applyProjectConstraintsToStoryboardOutput(
   output: StoryboardOutput,
   inputConstraints: string[] = [],
 ): StoryboardOutput {
-  const projectConstraints = Array.from(
-    new Set(
-      [...(output.projectConstraints ?? []), ...inputConstraints]
-        .map((constraint) => constraint.trim())
-        .filter(Boolean),
-    ),
+  const projectConstraints = dedupeProjectConstraints(
+    output.projectConstraints ?? [],
+    inputConstraints,
   );
   if (projectConstraints.length === 0) return output;
 
@@ -193,10 +249,14 @@ export function applyProjectConstraintsToStoryboardOutput(
     projectConstraints,
     shots: output.shots.map((shot) => {
       const note = shot.note?.trim() ?? '';
-      if (note.includes('项目约束（跨镜）')) return shot;
+      const noteWithoutLegacyMarker = note
+        .replace(/\n?项目约束（跨镜）：[\s\S]*$/, '')
+        .trim();
       return {
         ...shot,
-        note: note ? `${note}\n${marker}` : marker,
+        note: noteWithoutLegacyMarker
+          ? `${noteWithoutLegacyMarker}\n${marker}`
+          : marker,
       };
     }),
   };

@@ -48,16 +48,24 @@ test('source aspect ratio maps to a supported edit output size', () => {
   assert.equal(imageEditOutputSize('16:9', 100, 100), '1536x864');
 });
 
-test('image-to-image edit connections and quick creation are disabled', () => {
+test('multi-selected images can create one downstream image edit node', () => {
   const rules = read('src/utils/studioConnectionRules.ts');
-  const store = read('src/store/useStudioStore.ts');
+  const canvas = read('src/components/StudioCanvas.tsx');
+  const styles = read('src/index.css');
 
   assert.match(
     rules,
-    /if \(a\.type === 'imageNode' && b\.type === 'imageNode'\) \{\s*return false;\s*\}/,
+    /if \(a\.type === 'imageNode' && b\.type === 'imageNode'\)[\s\S]*?IMAGE_NODE_INPUT_HANDLE_ID[\s\S]*?return true;/,
   );
-  assert.doesNotMatch(store, /已创建下游图片节点并进入编辑模式/);
-  assert.doesNotMatch(store, /已创建上游图片节点；载入图片后/);
+  assert.match(canvas, /MultiSelectionOutputLayer/);
+  assert.match(canvas, /completeMultiSelectionPick/);
+  assert.match(canvas, /已把选中的 \$\{sourceNodeIds\.length\} 个节点统一接入新节点/);
+  assert.match(canvas, /selectedNodeCount > 1/);
+  assert.match(canvas, /studio-canvas--multi-select/);
+  assert.match(
+    styles,
+    /\.studio-canvas--multi-select \.text-node__workspace,[\s\S]*?\.image-table-node__composer[\s\S]*?display:\s*none !important/,
+  );
 });
 
 test('selected image node opens an in-place editor and keeps a restorable baseline', () => {
@@ -81,6 +89,8 @@ test('selected image node opens an in-place editor and keeps a restorable baseli
   assert.match(component, /展开编辑器/);
   assert.match(types, /imageEditBaseDataUrl\?: string/);
   assert.match(client, /referenceImages\.length[\s\S]*directImageEditUrl/);
+  assert.match(client, /form\.append\('image',/);
+  assert.doesNotMatch(client, /form\.append\('image\[\]',/);
   assert.match(canvas, /PANE_CREATE_MENU_KINDS[\s\S]*?'image_node'/);
 
   const styles = read('src/index.css');
@@ -88,7 +98,7 @@ test('selected image node opens an in-place editor and keeps a restorable baseli
   assert.match(styles, /\.image-table-node__body--edit\s*\{[\s\S]*?top:\s*calc\(100% \+ 24px\)/);
 });
 
-test('image generation state is not blocked by the department workflow guard', () => {
+test('image generation state is not blocked by the workflow guard and stale drawing state recovers', () => {
   const component = read('src/components/ImageTableNode.tsx');
   const store = read('src/store/useStudioStore.ts');
   const persistence = read('src/utils/studioNodePersistence.ts');
@@ -103,8 +113,9 @@ test('image generation state is not blocked by the department workflow guard', (
   assert.match(component, /generationInFlightRef\.current = false/);
   assert.match(
     persistence,
-    /data\.type === 'image_node' && data\.imageGenerationStatus === 'generating'/,
+    /if \(data\.imageGenerationStatus === 'generating'\)/,
   );
+  assert.match(persistence, /const isImageNode = data\.type === 'image_node'/);
   assert.match(persistence, /imageGenerationStatus:\s*'idle'/);
 });
 
@@ -116,7 +127,10 @@ test('credit refresh requests preserve the local mock user identity', () => {
     /if \(isSaasMockEnabled\(\)\) \{\s*return readMockCredit\(\);\s*\}/,
   );
   assert.match(creditService, /const mockEnabled = isSaasMockEnabled\(\)/);
-  assert.match(creditService, /mockEnabled && session\.user\?\.email/);
+  assert.match(
+    creditService,
+    /\(mockEnabled \|\| isLanDirectAccessEnabled\(\)\) && session\.user\?\.email/,
+  );
   assert.match(creditService, /headers\['X-Studio-Mock-Email'\] = session\.user\.email/);
   assert.match(creditService, /fetch\('\/api\/credits\/status', \{\s*headers\s*\}\)/);
   assert.match(creditService, /if \(mockEnabled && status\) writeMockCredit\(status\)/);

@@ -18,3 +18,17 @@ test('an existing project saves immediately without asking for its name again', 
   );
   assert.match(source, /else \{\s*await queueStudioProjectSnapshot/);
 });
+
+test('save as creates a new project copy without overwriting the current project', () => {
+  const saveAsBlock = source.slice(
+    source.indexOf('const saveProjectAsWorkspace'),
+    source.indexOf('const saveProjectToCloud'),
+  );
+
+  assert.match(saveAsBlock, /window\.prompt\('另存为工程名称'/);
+  assert.match(saveAsBlock, /const projectId = createStudioProjectId\(\)/);
+  assert.match(saveAsBlock, /await queueStudioProjectSnapshot/);
+  assert.match(saveAsBlock, /setCurrentProjectMeta\(projectId, projectName\)/);
+  assert.doesNotMatch(saveAsBlock, /flushCurrentProjectSnapshot/);
+  assert.match(source, /<span>另存为工程…<\/span>/);
+});

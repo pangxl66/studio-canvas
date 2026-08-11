@@ -9,6 +9,7 @@ import {
   getSupabaseClient,
   hasActivatedTestInviteEmail,
   isSaasAuthEnabled,
+  isLanDirectAccessEnabled,
   isSaasMockEnabled,
   isSupabaseConfigured,
   isTestInviteAuthEnabled,
@@ -49,10 +50,11 @@ function getLoginErrorMessage(error: unknown, fallback: string): string {
 }
 
 export function AuthGate({ children }: AuthGateProps) {
+  const lanDirectAccessEnabled = isLanDirectAccessEnabled();
   const emailAuthEnabled = isSupabaseConfigured() || isSaasMockEnabled();
   const testInviteOnly = isTestInviteAuthEnabled() && !emailAuthEnabled;
   const [session, setSession] = useState<Session | null>(null);
-  const [isLoading, setIsLoading] = useState(isSaasAuthEnabled());
+  const [isLoading, setIsLoading] = useState(isSaasAuthEnabled() && !lanDirectAccessEnabled);
   const [email, setEmail] = useState(() => getRememberedLoginEmail());
   const [verificationCode, setVerificationCode] = useState('');
   const [inviteCode, setInviteCode] = useState('');
@@ -73,7 +75,7 @@ export function AuthGate({ children }: AuthGateProps) {
   }, [sendCooldown]);
 
   useEffect(() => {
-    if (!isSaasAuthEnabled()) return;
+    if (!isSaasAuthEnabled() || lanDirectAccessEnabled) return;
 
     const client = getSupabaseClient();
     let isMounted = true;
@@ -113,9 +115,10 @@ export function AuthGate({ children }: AuthGateProps) {
       data?.subscription?.unsubscribe();
       window.removeEventListener(STUDIO_AUTH_MOCK_EVENT, syncLocalAuthSnapshot);
     };
-  }, []);
+  }, [lanDirectAccessEnabled]);
 
   useEffect(() => {
+    if (lanDirectAccessEnabled) return;
     const normalizedEmail = email.trim().toLowerCase();
     if (!normalizedEmail || !normalizedEmail.includes('@')) {
       setServerActivatedInviteEmail('');
@@ -145,7 +148,11 @@ export function AuthGate({ children }: AuthGateProps) {
       isCancelled = true;
       window.clearTimeout(timer);
     };
-  }, [email]);
+  }, [email, lanDirectAccessEnabled]);
+
+  if (lanDirectAccessEnabled) {
+    return <>{children}</>;
+  }
 
   if (!isSaasAuthEnabled()) {
     return <>{children}</>;

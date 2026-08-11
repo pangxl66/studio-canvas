@@ -277,10 +277,11 @@ function checkPromptGenerationGuards() {
       'const SEEDANCE2_SEGMENTED_HEADINGS = [',
       'Do not use the default Studio Canvas card fields',
       'Each seedanceCard must be ${MIN_SEEDANCE2_SEGMENTED_CARD_CHARS}-${MAX_SEEDANCE2_SEGMENTED_CARD_CHARS} Chinese characters',
-      'must contain a continuous [00.0s - 15.0s] timeline',
+      'must contain a continuous timeline from 00.0s to the node-specified or upstream real duration',
+      'There is no 15-second hard limit.',
       'parseSeedance2TimelineIntervals(seedanceCard)',
       'timeline must be continuous from 00.0s',
-      'timeline must end exactly at 15.0s',
+      'timeline must end at a valid positive duration',
     ],
     'Seedance2 segmented prompt isolation guards',
   );

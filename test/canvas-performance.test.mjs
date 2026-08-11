@@ -68,6 +68,31 @@ test('connection magnet work is cached and throttled to one pointer frame', () =
   assert.doesNotMatch(canvas, /window\.addEventListener\('touchmove', onMove/);
 });
 
+test('large canvases render static visible edges and suspend effects while the viewport moves', () => {
+  const canvas = read('src/components/StudioCanvas.tsx');
+  const styles = read('src/index.css');
+
+  assert.match(canvas, /edge\.animated \? \{ \.\.\.edge, animated: false \} : edge/);
+  assert.match(canvas, /onlyRenderVisibleElements/);
+  assert.match(canvas, /onMoveStart=\{onViewportMoveStart\}/);
+  assert.match(canvas, /onMoveEnd=\{onViewportMoveEnd\}/);
+  assert.match(canvas, /studio-canvas--viewport-moving/);
+  assert.match(styles, /\.studio-canvas--viewport-moving \.detail-panel/);
+  assert.match(styles, /\.studio-canvas--viewport-moving \.react-flow__edge-path/);
+});
+
+test('persistent shot-list connections reuse resolved DOM endpoints while nodes move', () => {
+  const layer = read('src/components/ShotListPersistentConnectionLayer.tsx');
+
+  assert.match(layer, /const elementsRef = useRef<PersistentConnectionElements\[\]>/);
+  assert.match(layer, /const resolveElements = \(\) =>/);
+  assert.match(layer, /for \(const elements of elementsRef\.current\)/);
+  assert.match(layer, /record\.type === 'childList'/);
+  assert.match(layer, /record\.attributeName === 'class'/);
+  const measureBody = layer.match(/const measure = \(\) => \{[\s\S]*?\n    \};/)?.[0] ?? '';
+  assert.doesNotMatch(measureBody, /querySelectorAll/);
+});
+
 test('expensive translucent effects are disabled during node drag', () => {
   const css = read('src/index.css');
 

@@ -8,6 +8,11 @@ const PROJECT_ID_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
 const VERSION_ID_PATTERN = /^\d+-[a-f0-9]{12}$/;
 const ASSET_ID_PATTERN = /^sha256_[a-f0-9]{64}$/;
 const MAX_ASSET_BYTES = 100 * 1024 * 1024;
+const EMBEDDED_IMAGE_FIELD_BY_DATA_URL = new Map([
+  ['imageDataUrl', ['imageAssetId', 'imageAssetMimeType']],
+  ['imageEditBaseDataUrl', ['imageEditBaseAssetId', 'imageEditBaseAssetMimeType']],
+  ['imagePaletteSourceDataUrl', ['imagePaletteSourceAssetId', 'imagePaletteSourceAssetMimeType']],
+]);
 
 function assertProjectId(projectId) {
   if (!PROJECT_ID_PATTERN.test(projectId)) {
@@ -256,12 +261,13 @@ function createLocalProjectRepository(options = {}) {
       if (!isRecord(current)) return current;
       const output = {};
       for (const [key, child] of Object.entries(current)) {
-        if (key === 'imageDataUrl' && typeof child === 'string') {
+        const assetFields = EMBEDDED_IMAGE_FIELD_BY_DATA_URL.get(key);
+        if (assetFields && typeof child === 'string') {
           const parsed = parseImageDataUrl(child);
           if (parsed) {
             const assetId = writeAssetBuffer(parsed.buffer);
-            output.imageAssetId = assetId;
-            output.imageAssetMimeType = parsed.mimeType;
+            output[assetFields[0]] = assetId;
+            output[assetFields[1]] = parsed.mimeType;
             changed = true;
             assetCount += 1;
             continue;

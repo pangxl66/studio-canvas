@@ -1,5 +1,5 @@
 /** 与 src/skills 下子目录名一致 */
-export type SkillFolder = 'writing' | 'storyboard' | 'prompt';
+export type SkillFolder = 'writing' | 'storyboard' | 'prompt' | 'video_prompt';
 
 /** 技能在节点里的插槽职责。Prompt 节点会把 style 作为唯一主规范槽。 */
 export type SkillSlotKind = 'style' | 'enhancement';

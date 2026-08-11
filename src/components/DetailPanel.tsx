@@ -1011,15 +1011,12 @@ export function DetailPanel() {
                 disabled={
                   node.status === 'IN_PROGRESS' ||
                   (node.status !== 'NOT_STARTED' && node.status !== 'REJECTED') ||
-                  storyboardInputSceneCount > 1 ||
                   (!Boolean(node.input?.trim()) &&
                     !(selectedId != null && departmentNodeHasInputWire(selectedId, edges, rfNodes)))
                 }
                 title={
                   node.status === 'IN_PROGRESS'
                     ? '生成中'
-                    : storyboardInputSceneCount > 1
-                      ? `当前识别到 ${storyboardInputSceneCount} 个场次，请只保留一个场次`
                     : !Boolean(node.input?.trim()) &&
                         !(selectedId != null && departmentNodeHasInputWire(selectedId, edges, rfNodes))
                       ? '请先连接文本卡片，或在下方填写剧本正文'
@@ -1030,15 +1027,11 @@ export function DetailPanel() {
                 执行生成
               </button>
             </div>
-            {storyboardInputSceneCount > 1 ? (
-              <p className="detail-panel__feedback" style={{ marginTop: 8 }}>
-                当前识别到 {storyboardInputSceneCount} 个场次。请在上游或下方输入框中只保留一个场次，再执行生成。
-              </p>
-            ) : (
-              <p className="detail-panel__tip detail-panel__tip--tight">
-                单场次模式：一次只处理一个场次。多场次输入会在调用模型前拦截，不消耗分镜生成额度。
-              </p>
-            )}
+            <p className="detail-panel__tip detail-panel__tip--tight">
+              {storyboardInputSceneCount > 1
+                ? `已识别 ${storyboardInputSceneCount} 个场次，将按原始顺序连续生成，并通过 sceneRef 保留场次边界。`
+                : '支持单场次与多场次输入；模型不会补写输入之外的新场次。'}
+            </p>
             {storyboardLegacyHint ? (
               <p className="detail-panel__feedback" style={{ marginTop: 8 }}>
                 {storyboardLegacyHint}

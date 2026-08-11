@@ -51,13 +51,12 @@ test('selected image model is persisted and sent through client and server', () 
   assert.match(store, /imageGenerationSelectedModel:\s*'gemini-3\.1-flash-image'/);
 });
 
-test('both image API targets keep the image2 UI id and map it to the provider model', () => {
+test('both image API targets keep UI model ids and retry the Nano Banana 2 preview channel', () => {
   const server = read('server/index.cjs');
   const api = read('api/images/generate.ts');
-  const disabledModels = /gemini-3-pro-image-preview|gemini-3\.1-flash-image-preview/;
 
-  assert.doesNotMatch(server, disabledModels);
-  assert.doesNotMatch(api, disabledModels);
+  assert.doesNotMatch(server, /gemini-3-pro-image-preview/);
+  assert.doesNotMatch(api, /gemini-3-pro-image-preview/);
   assert.doesNotMatch(server, /IMAGE_ALLOWED_MODELS/);
   assert.doesNotMatch(api, /IMAGE_ALLOWED_MODELS/);
   assert.match(server, /BUILTIN_IMAGE_MODELS\.has\(requested\)/);
@@ -68,8 +67,16 @@ test('both image API targets keep the image2 UI id and map it to the provider mo
   assert.match(api, /\['image2', 'gpt-image-2'\]/);
   assert.match(server, /resolveUpstreamImageModel\(model\)/);
   assert.match(api, /resolveUpstreamImageModel\(model\)/);
+  assert.match(server, /upstreamImageModelCandidates\(model, size\)/);
+  assert.match(api, /upstreamImageModelCandidates\(model, size\)/);
+  assert.match(server, /gemini-3\.1-flash-image-preview/);
+  assert.match(api, /gemini-3\.1-flash-image-preview/);
   assert.match(server, /measureImageBuffer\(imageBuffer\)/);
   assert.match(api, /measureImageBuffer\(Buffer\.from\(b64, 'base64'\)\)/);
+  assert.match(server, /form\.append\('image',/);
+  assert.match(api, /form\.append\('image',/);
+  assert.doesNotMatch(server, /form\.append\('image\[\]',/);
+  assert.doesNotMatch(api, /form\.append\('image\[\]',/);
 });
 
 test('local image proxy resolves the provider alias and measures returned pixels', () => {
@@ -79,6 +86,18 @@ test('local image proxy resolves the provider alias and measures returned pixels
     __test.resolveUpstreamImageModel('gemini-3.1-flash-image'),
     'gemini-3.1-flash-image',
   );
+  assert.deepEqual(__test.upstreamImageModelCandidates('gemini-3.1-flash-image'), [
+    'gemini-3.1-flash-image',
+    'gemini-3.1-flash-image-preview',
+  ]);
+  assert.deepEqual(__test.upstreamImageModelCandidates('gemini-3.1-flash-image', '1536x576'), [
+    'gemini-3.1-flash-image',
+  ]);
+  assert.deepEqual(__test.upstreamImageModelCandidates('image2'), ['gpt-image-2']);
+  assert.equal(__test.shouldRetryImageUpstream(503, '{"error":"无可用渠道"}'), true);
+  assert.equal(__test.shouldRetryImageUpstream(400, '{"error":"invalid size"}'), false);
+  assert.equal(__test.imageAspectMatchesSize({ width: 2048, height: 768 }, '1536x576'), true);
+  assert.equal(__test.imageAspectMatchesSize({ width: 1672, height: 941 }, '1536x576'), false);
   const png = Buffer.alloc(24);
   Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(png, 0);
   png.writeUInt32BE(1536, 16);

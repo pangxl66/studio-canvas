@@ -10,6 +10,7 @@ import {
 import { createStoryboardShotWireId } from '@/utils/shotListWire';
 import {
   applyProjectConstraintsToStoryboardOutput,
+  buildProjectConstraintExecutionChecklist,
   extractProjectConstraintsFromTaggedText,
 } from '@/utils/textNodeContext';
 import { countStoryboardInputScenes } from '@/utils/storyboardSceneScope';
@@ -247,7 +248,7 @@ export function tryParseStoryboardOutput(x: unknown): StoryboardOutput | null {
 }
 
 function buildStoryboardUserPromptFromWriting(script: WritingOutput): string {
-  return `以下为当前单场次数据（WritingOutput JSON）。请严格按“徐克式导演分镜流程”处理：先判断场面命题、主次机制、空间结构、人物功能、势能递进与英雄画面，再把这些判断落实到镜头表里，但最终只输出合法 JSON。禁止新增第二场或跨场扩写。
+  return `以下为一个或多个场次的数据（WritingOutput JSON）。请严格按“徐克式导演分镜流程”逐场处理：先判断每场的场面命题、主次机制、空间结构、人物功能、势能递进与英雄画面，再把这些判断落实到同一张镜头表里，但最终只输出合法 JSON。必须覆盖输入中的全部场次，严格保持原始顺序和边界，禁止遗漏、合并或新增场次。
 
 硬性要求：
 1. narrativeBeats 尽量写成“蓄势 / 转势 / 爆发 / 收束”式节奏摘要，而不是单纯复述剧情。
@@ -256,15 +257,24 @@ function buildStoryboardUserPromptFromWriting(script: WritingOutput): string {
 4. 武侠 / 奇幻 / 围猎 / 追逐 / 突围场面优先加强纵深、高低差、遮挡揭示、突然现身与第二波压迫。
 5. 若同场连续镜头确实适合 15 秒内组合，可用 mergedMembers；否则优先细分镜头。
 6. 若输入包含“视觉场景参考图 / 图片场景分析”，必须把图片当作场景设定硬约束：所有镜头的地点、时代、空间方向、光影色彩、美术质感、可见道具/建筑/环境元素和氛围都必须与图片一致，并在 sceneRef、description 或 note 中落地，不得生成与参考图冲突的场景设定。
-7. shots 中每条镜头都必须输出 durationSec，单位为秒；请根据动作复杂度、对白长度、情绪停顿、景别变化和信息密度合理分配镜头时间，不要平均分配，也不要为了凑时长硬拉长。
+7. 场景参考图中的环境动态必须按“持续动态 / 情节触发 / 静态锁定”执行。每镜最多安排一个主要环境反应，烟雾、蒸汽、尘埃、水、风、机械与反射要有来源并遵守物理规律；固定照明默认稳定，闪烁或明暗变化必须由故障、报警、断电、冲击、设备启动、火焰或移动遮挡等明确情节触发，并写清变化后的落幅状态。
+8. shots 中每条镜头都必须输出 durationSec，单位为秒；请根据动作复杂度、对白长度、情绪停顿、景别变化和信息密度合理分配镜头时间，不要平均分配，也不要为了凑时长硬拉长。
+9. 每条镜头都必须输出 sceneRef；同一场次的镜头连续排列，场次切换时 sceneRef 同步切换，镜头 id 在整张表中从 1 连续递增。
 
 只输出形如 { "shots": [ ... ], "narrativeBeats": [ ... ] } 的 JSON。
 
 ${JSON.stringify(script)}`;
 }
 
-function buildStoryboardUserPromptFromRawText(t: string): string {
-  return `以下为当前单场次的剧本或剧情文本。请先自行提炼场面命题，再分析主次机制、空间结构、人物功能、势能递进与英雄画面，然后把这些判断落实为镜头表，但最终只输出合法 JSON。禁止新增第二场或跨场扩写，所有镜头必须使用同一个 sceneRef。
+function buildStoryboardUserPromptFromRawText(
+  t: string,
+  inputConstraints: string[] = extractProjectConstraintsFromTaggedText(t),
+): string {
+  const constraintChecklist = buildProjectConstraintExecutionChecklist(inputConstraints);
+  const constraintExecutionBlock = constraintChecklist
+    ? `\n【项目约束逐项执行清单】\n${constraintChecklist}\n\n执行规则：先在内部逐项核对清单，再设计镜头。画幅、场景、摄影、光学、色彩、灯光和整体表演风格等全局条目必须作用于每个相关镜头；停顿、错愕、嘴硬、强行挽尊等表演条目只在有人物表演的相关镜头中转化为可见动作、节奏或反应。note 应用“约束落实：C编号—具体处理”说明本镜头实际采用的条目，禁止只复制约束原文。根级 projectConstraints 必须按输入块原样保留，每个来源块只输出一条，不拆分、不改写、不重复。\n`
+    : '';
+  return `以下为包含一个或多个场次的剧本或剧情文本。请先识别原文中的场次边界，再逐场提炼场面命题，分析主次机制、空间结构、人物功能、势能递进与英雄画面，然后把全部场次按原始顺序落实为同一张镜头表，但最终只输出合法 JSON。必须覆盖输入中的全部场次，禁止遗漏、合并、回跳或新增场次。
 
 硬性要求：
 1. 不得跳过场面机制分析后直接切镜。
@@ -274,9 +284,12 @@ function buildStoryboardUserPromptFromRawText(t: string): string {
 5. 若信息不足，可以合理推定空间层次、危险源、可借力物，但应体现在 note 或 narrativeBeats 中。
 6. 只有在同场连续镜头明确适合 15 秒内合并时，才使用 mergedMembers。
 7. 若输入包含“视觉场景参考图 / 图片场景分析”，必须把图片当作场景设定硬约束：所有镜头的地点、时代、空间方向、光影色彩、美术质感、可见道具/建筑/环境元素和氛围都必须与图片一致，并在 sceneRef、description 或 note 中落地，不得生成与参考图冲突的场景设定。
-8. shots 中每条镜头都必须输出 durationSec，单位为秒；请根据动作复杂度、对白长度、情绪停顿、景别变化和信息密度合理分配镜头时间，不要平均分配，也不要为了凑时长硬拉长。
-9. 若输入包含“【项目约束｜名称】”，它是跨镜 HARD 约束，不是剧情正文。必须把与当前镜头有关的画幅、时段、场景、摄影、镜头光学、flare、色彩和灯光要求落实到 description 或 note；不得把约束文字误当成台词或新剧情。
-10. “【分镜正文｜名称】”才是人物、事件、动作和对白的主要来源；“【参考资料｜名称】”只能补充，不得覆盖项目约束和分镜正文。
+8. 场景参考图中的动态信息必须分为持续动态、情节触发与静态锁定。烟雾、蒸汽、尘埃、水、风、机械、火花和反射必须有来源并遵守气流、重力、惯性、遮挡与衰减；固定灯具默认稳定，只有故障、报警、断电、冲击、设备启动、旋转灯、火焰或移动遮挡等明确原因才能发生闪烁或明暗变化。每镜最多一个主要环境反应，并在 note 写清触发原因与落幅状态。
+9. shots 中每条镜头都必须输出 durationSec，单位为秒；请根据动作复杂度、对白长度、情绪停顿、景别变化和信息密度合理分配镜头时间，不要平均分配，也不要为了凑时长硬拉长。
+10. 若输入包含“【项目约束｜名称】”，它是跨镜 HARD 约束，不是剧情正文。必须把与当前镜头有关的画幅、时段、场景、摄影、镜头光学、flare、色彩和灯光要求落实到 description 或 note；不得把约束文字误当成台词或新剧情。
+11. “【分镜正文｜名称】”才是人物、事件、动作和对白的主要来源；“【参考资料｜名称】”只能补充，不得覆盖项目约束和分镜正文。
+12. 每条镜头都必须输出 sceneRef；同一场次的镜头连续排列，切场时 sceneRef 同步切换，镜头 id 在整张表中从 1 连续递增。narrativeBeats 必须标明各自对应的场次。
+${constraintExecutionBlock}
 
 只输出形如 { "shots": [ ... ], "narrativeBeats": [ ... ], "projectConstraints": [ ... ] } 的 JSON。projectConstraints 只保留输入中的项目约束，不得混入剧情摘要。
 
@@ -332,10 +345,11 @@ export async function runStoryboardDesignerFromScriptText(
   if (!t) {
     return { shots: [], narrativeBeats: [] };
   }
+  const inputConstraints = extractProjectConstraintsFromTaggedText(t);
   const sys = `${executionSystemPrompt.trim()}\n\n【输出 JSON 形状参考】\n${STORYBOARD_DEPT_OUTPUT_SHAPE}`;
   const parsed = await invokeLlmJsonObjectStream({
     systemPrompt: sys,
-    userPrompt: buildStoryboardUserPromptFromRawText(t),
+    userPrompt: buildStoryboardUserPromptFromRawText(t, inputConstraints),
     temperature: 0.35,
     feature: 'storyboard-generate',
     onDelta,
@@ -343,6 +357,5 @@ export async function runStoryboardDesignerFromScriptText(
     signal,
   });
   const output = assertStoryboardOutput(parsed);
-  const inputConstraints = extractProjectConstraintsFromTaggedText(t);
   return applyProjectConstraintsToStoryboardOutput(output, inputConstraints);
 }

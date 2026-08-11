@@ -108,3 +108,18 @@ test('V2.7 keeps V2.6 adjacent detailed mount normalization', () => {
     /挂载：\|@=角色A\|\|@=交互道具\|\|@=主场景\|\|@=金属刮擦声\|/,
   );
 });
+
+test('Studio Canvas 2.7 prompt cards have no 15 second hard limit', () => {
+  const agents = read('src/agents/promptAgents.ts');
+  const deptSpec = read('src/agents/promptDeptSpec.ts');
+  const loader = read('src/services/skillLoader.ts');
+
+  assert.doesNotMatch(agents, /duration > 15/);
+  assert.match(agents, /单卡不设15秒硬上限/);
+  assert.match(deptSpec, /不得截断到 15 秒/);
+  assert.match(loader, /运行时时长协议｜最高优先级/);
+  assert.match(agents, /seedance2_segmented_timeline_v2/);
+  assert.doesNotMatch(agents, /assertContinuousFifteenSecondTimeline/);
+  assert.doesNotMatch(agents, /timeline must end exactly at 15\.0s/);
+  assert.doesNotMatch(agents, /【15 秒时间轴硬规则】/);
+});

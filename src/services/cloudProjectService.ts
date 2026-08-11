@@ -6,6 +6,8 @@ import {
 } from '@/services/studioProjectPersistence';
 import { getSupabaseClient, isSaasAuthEnabled, isSaasMockEnabled } from '@/services/authClient';
 import type { StudioRFNode } from '@/types/reactFlow';
+import type { ProjectSettings } from '@/types/studio';
+import { normalizeProjectSettings } from '@/services/projectSettings';
 import { toPersistableNodesAndEdges } from '@/utils/studioNodePersistence';
 
 export type CloudProjectSummary = {
@@ -58,7 +60,7 @@ function toTimestamp(value: number | string | null | undefined): number {
 function buildSnapshot(
   nodes: StudioRFNode[],
   edges: Edge[],
-  meta: { projectId?: string | null; projectName: string },
+  meta: { projectId?: string | null; projectName: string; projectSettings?: ProjectSettings },
 ): StudioProjectFilePayload {
   const { nodes: persistableNodes, edges: persistableEdges } = toPersistableNodesAndEdges(nodes, edges);
   return {
@@ -68,6 +70,7 @@ function buildSnapshot(
     edges: persistableEdges,
     projectId: meta.projectId ?? undefined,
     projectName: meta.projectName,
+    projectSettings: normalizeProjectSettings(meta.projectSettings),
   };
 }
 
@@ -143,6 +146,7 @@ function saveMockCloudProject(params: {
   projectName: string;
   nodes: StudioRFNode[];
   edges: Edge[];
+  projectSettings?: ProjectSettings;
 }): CloudProjectRecord {
   const projects = readMockProjects();
   const now = Date.now();
@@ -150,6 +154,7 @@ function saveMockCloudProject(params: {
   const snapshot = buildSnapshot(params.nodes, params.edges, {
     projectId: id,
     projectName: params.projectName,
+    projectSettings: params.projectSettings,
   });
   const existingIndex = projects.findIndex((project) => project.id === id);
   const nextProject: MockProjectRecord = {
@@ -253,6 +258,7 @@ export async function saveCloudProject(params: {
   projectName: string;
   nodes: StudioRFNode[];
   edges: Edge[];
+  projectSettings?: ProjectSettings;
 }): Promise<CloudProjectRecord> {
   if (isSaasMockEnabled()) {
     return saveMockCloudProject(params);
@@ -261,6 +267,7 @@ export async function saveCloudProject(params: {
   const snapshot = buildSnapshot(params.nodes, params.edges, {
     projectId: params.projectId,
     projectName: params.projectName,
+    projectSettings: params.projectSettings,
   });
   const payload = await cloudFetch<{ project: CloudProjectApiRecord }>(
     params.projectId ? `/api/projects/${encodeURIComponent(params.projectId)}` : '/api/projects',

@@ -4,9 +4,12 @@ const rawSupabaseUrl = import.meta.env.VITE_SUPABASE_URL?.trim() ?? '';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim() ?? '';
 const saasMock = import.meta.env.VITE_SAAS_MOCK?.trim().toLowerCase() ?? '';
 const testInviteAuth = import.meta.env.VITE_TEST_INVITE_AUTH?.trim().toLowerCase() ?? '';
+const lanDirectAccess = import.meta.env.VITE_LAN_DIRECT_ACCESS?.trim().toLowerCase() ?? '';
 const MOCK_AUTH_KEY = 'studio_canvas_saas_mock_auth_v1';
 const ACTIVATED_TEST_INVITE_AUTH_KEY = 'studio_canvas_saas_test_invite_activations_v1';
 const REMEMBERED_LOGIN_EMAIL_KEY = 'studio_canvas_remembered_login_email_v1';
+const LAN_DIRECT_CLIENT_ID_KEY = 'studio_canvas_lan_direct_client_id_v1';
+export const LAN_DIRECT_ACCESS_TOKEN = 'lan-direct-access-token';
 
 export const STUDIO_AUTH_MOCK_EVENT = 'studio-auth-mock-change';
 
@@ -57,6 +60,43 @@ export function isSaasMockEnabled(): boolean {
 export function isTestInviteAuthEnabled(): boolean {
   return !isDesktopRuntime()
     && (testInviteAuth === '1' || testInviteAuth === 'true' || testInviteAuth === 'yes');
+}
+
+function isPrivateNetworkHostname(value: string): boolean {
+  const hostname = value.trim().replace(/^\[|\]$/g, '').toLowerCase();
+  const ipv4 = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const octets = ipv4.slice(1).map(Number);
+    if (octets.some((octet) => octet < 0 || octet > 255)) return false;
+    return octets[0] === 10
+      || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31)
+      || (octets[0] === 192 && octets[1] === 168)
+      || (octets[0] === 169 && octets[1] === 254);
+  }
+  return /^(?:fc|fd)[0-9a-f]{2}:/i.test(hostname) || /^fe[89ab][0-9a-f]:/i.test(hostname);
+}
+
+export function isLanDirectAccessEnabled(): boolean {
+  if (isDesktopRuntime() || typeof window === 'undefined') return false;
+  const enabled = lanDirectAccess === '1' || lanDirectAccess === 'true' || lanDirectAccess === 'yes';
+  return enabled && isPrivateNetworkHostname(window.location.hostname);
+}
+
+function getLanDirectClientEmail(): string {
+  if (typeof window === 'undefined') return 'lan-user@studio-canvas.local';
+  let clientId = '';
+  try {
+    clientId = window.localStorage.getItem(LAN_DIRECT_CLIENT_ID_KEY) ?? '';
+    if (!/^[a-z0-9-]{8,64}$/i.test(clientId)) {
+      clientId = typeof crypto?.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
+      window.localStorage.setItem(LAN_DIRECT_CLIENT_ID_KEY, clientId);
+    }
+  } catch {
+    clientId = 'browser';
+  }
+  return `lan-${clientId.toLowerCase()}@studio-canvas.local`;
 }
 
 export function isSaasHostedMode(): boolean {
@@ -183,15 +223,17 @@ function buildMockAuthSnapshot(
   refreshToken = 'mock-refresh-token',
 ): AuthSnapshot {
   const now = Math.floor(Date.now() / 1000);
+  const isTestInvite = accessToken.startsWith('test-invite.');
+  const isLanDirect = accessToken === LAN_DIRECT_ACCESS_TOKEN;
   const user = {
-    app_metadata: { provider: accessToken.startsWith('test-invite.') ? 'test-invite' : 'mock' },
+    app_metadata: { provider: isTestInvite ? 'test-invite' : isLanDirect ? 'lan-direct' : 'mock' },
     aud: 'authenticated',
     created_at: new Date().toISOString(),
     email,
-    id: accessToken.startsWith('test-invite.') ? `test-invite-${email}` : 'mock-user-local',
+    id: isTestInvite ? `test-invite-${email}` : isLanDirect ? `lan-direct-${email}` : 'mock-user-local',
     role: 'authenticated',
     updated_at: new Date().toISOString(),
-    user_metadata: accessToken.startsWith('test-invite.') ? { testInvite: true } : {},
+    user_metadata: isTestInvite ? { testInvite: true } : isLanDirect ? { lanDirect: true } : {},
   } as unknown as User;
 
   const session = {
@@ -207,6 +249,13 @@ function buildMockAuthSnapshot(
 }
 
 export function getLocalAuthSnapshot(): AuthSnapshot {
+  if (isLanDirectAccessEnabled()) {
+    return buildMockAuthSnapshot(
+      getLanDirectClientEmail(),
+      LAN_DIRECT_ACCESS_TOKEN,
+      'lan-direct-refresh-token',
+    );
+  }
   const stored = readStoredLocalAuth();
   const isTrustedLocalSession =
     Boolean(stored) &&

@@ -5,6 +5,7 @@ import {
   normalizeFilmStoryboardSkillId,
   normalizeMountedSkillIdsForKind,
 } from '@/services/skillLoader';
+import { normalizeProjectAspectRatio } from '@/services/projectSettings';
 import type { StoryboardOutput, StudioNodeData } from '@/types/studio';
 import type { StudioRFNode } from '@/types/reactFlow';
 import {
@@ -13,6 +14,7 @@ import {
 } from '@/store/workflow';
 import { recoverInterruptedTextPolish } from '@/services/textPolishLifecycle';
 import { storyboardLegacyStatePatch } from '@/utils/storyboardLegacyRecovery';
+import { applyProjectConstraintsToStoryboardOutput } from '@/utils/textNodeContext';
 
 /** 持久化恢复后由 store 注入，供节点 / 右键菜单调用；勿依赖 JSON 往返保留 */
 export type StudioPersistenceRuntimeApi = {
@@ -80,6 +82,21 @@ export function toPersistableNodesAndEdges(
 }
 
 function normalizeTransientNodeData(data: StudioNodeData): StudioNodeData {
+  // 绘图请求属于当前浏览器进程，刷新、热更新或恢复工程后不可能继续。
+  // 所有带绘图能力的节点都必须清掉遗留 busy 状态，不能只处理 image_node。
+  if (data.imageGenerationStatus === 'generating') {
+    const isImageNode = data.type === 'image_node';
+    return {
+      ...data,
+      imageGenerationStatus: 'idle',
+      imageGenerationPhase: undefined,
+      imageGenerationTask: undefined,
+      imageGenerationCompletedPages: undefined,
+      imageGenerationTotalPages: undefined,
+      status: isImageNode ? (data.imageDataUrl ? 'APPROVED' : 'NOT_STARTED') : data.status,
+      generation_error: '上一次图片生成被中断，请重新生成。',
+    };
+  }
   const normalizedPromptStatus =
     data.type === 'prompt' ? normalizePromptDepartmentStatus(data.status) : data.status;
   if (normalizedPromptStatus !== data.status) {
@@ -89,6 +106,32 @@ function normalizeTransientNodeData(data: StudioNodeData): StudioNodeData {
       review_result: null,
       ai_review_feedback: null,
       leader_review_suggested_pass: undefined,
+    };
+  }
+  if (data.type === 'film_video_prompt_node') {
+    const duration = Number(data.film_video_prompt_duration_sec);
+    const hasValidDuration = Number.isFinite(duration) && duration > 0;
+    const legacyDefaultDuration = data.film_video_prompt_duration_source == null && duration === 15;
+    const migratedData: StudioNodeData = {
+      ...data,
+      film_video_prompt_duration_sec:
+        legacyDefaultDuration || !hasValidDuration ? undefined : duration,
+      film_video_prompt_duration_source:
+        legacyDefaultDuration || !hasValidDuration
+          ? 'auto'
+          : data.film_video_prompt_duration_source ?? 'node',
+    };
+    if (migratedData.status !== 'IN_PROGRESS') return migratedData;
+    const hasOutput = migratedData.output != null;
+    return {
+      ...migratedData,
+      status: hasOutput ? 'APPROVED' : 'NOT_STARTED',
+      generation_error: '',
+      streaming_preview: '',
+      generation_phase: undefined,
+      review_result: hasOutput
+        ? migratedData.review_result || '上一次运行被中断，已保留已有结果。'
+        : '上一次运行被中断，请重新运行。',
     };
   }
   if (data.type === 'storyboard') {
@@ -102,15 +145,6 @@ function normalizeTransientNodeData(data: StudioNodeData): StudioNodeData {
       output: storyboardOutput,
       storyboard_ai_snapshot: storyboardSnapshot,
       generation_error: hasStoryboardOutput ? undefined : data.generation_error,
-    };
-  }
-  if (data.type === 'image_node' && data.imageGenerationStatus === 'generating') {
-    return {
-      ...data,
-      imageGenerationStatus: 'idle',
-      imageGenerationTask: undefined,
-      status: data.imageDataUrl ? 'APPROVED' : 'NOT_STARTED',
-      generation_error: '上一次图片生成被中断，请重新生成。',
     };
   }
   if (data.status !== 'IN_PROGRESS') return data;
@@ -151,13 +185,14 @@ export function normalizeStoryboardOutputValue(raw: unknown): StoryboardOutput |
   }
   const parsed = tryParseStoryboardOutput(v);
   if (!parsed) return null;
-  return {
+  const normalized: StoryboardOutput = {
     shots: Array.isArray(parsed.shots) ? parsed.shots : [],
     narrativeBeats: Array.isArray(parsed.narrativeBeats) ? parsed.narrativeBeats : [],
     ...(parsed.projectConstraints?.length
       ? { projectConstraints: parsed.projectConstraints }
       : {}),
   };
+  return applyProjectConstraintsToStoryboardOutput(normalized);
 }
 
 /** 从磁盘 / IDB 读入后：规范化镜头表与分镜 output，保证表格数组完整可渲染 */
@@ -201,9 +236,16 @@ export function normalizeRestoredStudioNode(node: StudioRFNode): StudioRFNode {
       data: {
         ...safeNode.data,
         text_image_task_mode:
-          imageMode === 'skill_analysis' || imageMode === 'continue_shot'
+          imageMode === 'skill_analysis' ||
+          imageMode === 'normalize_storyboard' ||
+          imageMode === 'continue_shot'
             ? imageMode
             : 'extract_shot',
+        text_polish_mode:
+          safeNode.data.text_polish_mode === 'simple' ||
+          safeNode.data.text_polish_mode === 'storyboard'
+            ? safeNode.data.text_polish_mode
+            : 'deep',
         text_storyboard_skill_id: normalizeFilmStoryboardSkillId(
           safeNode.data.text_storyboard_skill_id,
         ),
@@ -216,6 +258,9 @@ export function normalizeRestoredStudioNode(node: StudioRFNode): StudioRFNode {
       data: {
         ...safeNode.data,
         film_storyboard_skill_id: normalizeFilmStoryboardSkillId(safeNode.data.film_storyboard_skill_id),
+        film_storyboard_aspect_ratio: normalizeProjectAspectRatio(
+          safeNode.data.film_storyboard_aspect_ratio,
+        ),
       },
     };
   }

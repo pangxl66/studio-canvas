@@ -8,6 +8,7 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
   type UIEvent as ReactUIEvent,
 } from 'react';
 import { createPortal } from 'react-dom';
@@ -46,7 +47,7 @@ type EditableField =
 
 const SHOT_LIST_EDIT_COMMIT_DELAY_MS = 350;
 const SHOT_LIST_VIRTUALIZE_AFTER_ROWS = 24;
-const SHOT_LIST_VIRTUAL_ROW_HEIGHT = 104;
+const SHOT_LIST_VIRTUAL_ROW_HEIGHT = 168;
 const SHOT_LIST_VIRTUAL_OVERSCAN = 5;
 type ShotListContextMenuState = {
   x: number;
@@ -100,6 +101,7 @@ function ShotCanvasRowImpl({
   selectedGroupCount,
   hovered,
   promptLinkCount,
+  virtualized,
   onHoverPort,
   onSelectGesture,
   onDragRangeEnter,
@@ -115,6 +117,7 @@ function ShotCanvasRowImpl({
   selectedGroupCount: number;
   hovered: boolean;
   promptLinkCount: number;
+  virtualized: boolean;
   onHoverPort: (hovering: boolean) => void;
   onSelectGesture: (
     index: number,
@@ -131,6 +134,10 @@ function ShotCanvasRowImpl({
   stopCanvas: (e: ReactPointerEvent | ReactMouseEvent) => void;
 }) {
   const [editingField, setEditingField] = useState<EditableField | null>(null);
+  const [editingFieldSize, setEditingFieldSize] = useState<{
+    width: number;
+    height: number;
+  } | null>(null);
   const [sceneRef, setSceneRef] = useState(sh.sceneRef ?? '');
   const [type, setType] = useState(sh.type);
   const [movement, setMovement] = useState(sh.movement);
@@ -179,16 +186,47 @@ function ShotCanvasRowImpl({
   const endEdit = useCallback(() => {
     onFlushPersist();
     setEditingField(null);
+    setEditingFieldSize(null);
   }, [onFlushPersist]);
+
+  const beginEdit = useCallback(
+    (field: EditableField, event: ReactMouseEvent<HTMLButtonElement>) => {
+      stopCanvas(event);
+      setEditingFieldSize({
+        width: event.currentTarget.offsetWidth,
+        height: event.currentTarget.offsetHeight,
+      });
+      setEditingField(field);
+    },
+    [stopCanvas],
+  );
 
   const cellDisplay = (text: string, emptyLabel: string) =>
     text.trim() ? text : emptyLabel;
   const shotNoLabel = sh.shotNo?.trim() || `#${sh.id}`;
   const outputLabel = promptLinkCount > 0 ? `已接入 ${promptLinkCount}` : 'Prompt';
 
+  const editorBoxStyle = editingFieldSize == null
+    ? undefined
+    : {
+        width: editingFieldSize.width,
+        minWidth: editingFieldSize.width,
+        maxWidth: editingFieldSize.width,
+        height: editingFieldSize.height,
+        minHeight: editingFieldSize.height,
+        maxHeight: editingFieldSize.height,
+      };
+  const renderEditorShell = (editor: ReactNode) => (
+    <span className="shot-list-canvas__editor-shell" style={editorBoxStyle}>
+      {editor}
+    </span>
+  );
+
   return (
     <tr
-      className={`shot-list-canvas__row ${selected ? 'shot-list-canvas__row--selected ' : ''}${
+      className={`shot-list-canvas__row ${
+        virtualized ? 'shot-list-canvas__row--virtualized ' : ''
+      }${selected ? 'shot-list-canvas__row--selected ' : ''}${
         hovered ? 'shot-list-canvas__row--port-hovered ' : ''
       }${
         selected && selectedGroupCount >= 2 ? 'shot-list-canvas__row--group-ready ' : ''
@@ -253,7 +291,7 @@ function ShotCanvasRowImpl({
         </button>
       </td>
       <td className="shot-list-canvas__td shot-list-canvas__td--scene">
-        {editingField === 'sceneRef' ? (
+        {editingField === 'sceneRef' ? renderEditorShell(
           <input
             type="text"
             className="shot-list-canvas__input nodrag nopan nowheel"
@@ -275,17 +313,14 @@ function ShotCanvasRowImpl({
             className="shot-list-canvas__cell-display nodrag nopan nowheel"
             onPointerDown={stopCanvas}
             onMouseDown={stopCanvas}
-            onClick={(e) => {
-              stopCanvas(e);
-              setEditingField('sceneRef');
-            }}
+            onClick={(e) => beginEdit('sceneRef', e)}
           >
             {cellDisplay(sh.sceneRef ?? '', '点击编辑场景')}
           </button>
         )}
       </td>
       <td className="shot-list-canvas__td shot-list-canvas__td--type">
-        {editingField === 'type' ? (
+        {editingField === 'type' ? renderEditorShell(
           <input
             type="text"
             className="shot-list-canvas__input nodrag nopan nowheel"
@@ -307,17 +342,14 @@ function ShotCanvasRowImpl({
             className="shot-list-canvas__cell-display nodrag nopan nowheel"
             onPointerDown={stopCanvas}
             onMouseDown={stopCanvas}
-            onClick={(e) => {
-              stopCanvas(e);
-              setEditingField('type');
-            }}
+            onClick={(e) => beginEdit('type', e)}
           >
             {cellDisplay(sh.type, '点击编辑')}
           </button>
         )}
       </td>
       <td className="shot-list-canvas__td shot-list-canvas__td--movement">
-        {editingField === 'movement' ? (
+        {editingField === 'movement' ? renderEditorShell(
           <input
             type="text"
             className="shot-list-canvas__input nodrag nopan nowheel"
@@ -339,17 +371,14 @@ function ShotCanvasRowImpl({
             className="shot-list-canvas__cell-display nodrag nopan nowheel"
             onPointerDown={stopCanvas}
             onMouseDown={stopCanvas}
-            onClick={(e) => {
-              stopCanvas(e);
-              setEditingField('movement');
-            }}
+            onClick={(e) => beginEdit('movement', e)}
           >
             {cellDisplay(sh.movement, '点击编辑')}
           </button>
         )}
       </td>
       <td className="shot-list-canvas__td shot-list-canvas__td--duration">
-        {editingField === 'durationSec' ? (
+        {editingField === 'durationSec' ? renderEditorShell(
           <input
             type="text"
             className="shot-list-canvas__input nodrag nopan nowheel"
@@ -371,17 +400,14 @@ function ShotCanvasRowImpl({
             className="shot-list-canvas__cell-display nodrag nopan nowheel"
             onPointerDown={stopCanvas}
             onMouseDown={stopCanvas}
-            onClick={(e) => {
-              stopCanvas(e);
-              setEditingField('durationSec');
-            }}
+            onClick={(e) => beginEdit('durationSec', e)}
           >
             {formatShotDuration(sh.durationSec) || '点击填时间'}
           </button>
         )}
       </td>
       <td className="shot-list-canvas__td">
-        {editingField === 'description' ? (
+        {editingField === 'description' ? renderEditorShell(
           <textarea
             className="shot-list-canvas__textarea nodrag nopan nowheel"
             value={description}
@@ -403,17 +429,14 @@ function ShotCanvasRowImpl({
             className="shot-list-canvas__cell-display shot-list-canvas__cell-display--multiline nodrag nopan nowheel"
             onPointerDown={stopCanvas}
             onMouseDown={stopCanvas}
-            onClick={(e) => {
-              stopCanvas(e);
-              setEditingField('description');
-            }}
+            onClick={(e) => beginEdit('description', e)}
           >
             {cellDisplay(sh.description, '点击编辑画面描述')}
           </button>
         )}
       </td>
       <td className="shot-list-canvas__td shot-list-canvas__td--note">
-        {editingField === 'content' ? (
+        {editingField === 'content' ? renderEditorShell(
           <textarea
             className="shot-list-canvas__textarea nodrag nopan nowheel"
             value={content}
@@ -435,17 +458,14 @@ function ShotCanvasRowImpl({
             className="shot-list-canvas__cell-display shot-list-canvas__cell-display--multiline nodrag nopan nowheel"
             onPointerDown={stopCanvas}
             onMouseDown={stopCanvas}
-            onClick={(e) => {
-              stopCanvas(e);
-              setEditingField('content');
-            }}
+            onClick={(e) => beginEdit('content', e)}
           >
             {cellDisplay(sh.content, '点击编辑台词')}
           </button>
           )}
         </td>
       <td className="shot-list-canvas__td">
-        {editingField === 'sound' ? (
+        {editingField === 'sound' ? renderEditorShell(
           <textarea
             className="shot-list-canvas__textarea nodrag nopan nowheel"
             value={sound}
@@ -467,17 +487,14 @@ function ShotCanvasRowImpl({
             className="shot-list-canvas__cell-display shot-list-canvas__cell-display--multiline nodrag nopan nowheel"
             onPointerDown={stopCanvas}
             onMouseDown={stopCanvas}
-            onClick={(e) => {
-              stopCanvas(e);
-              setEditingField('sound');
-            }}
+            onClick={(e) => beginEdit('sound', e)}
           >
             {cellDisplay(sh.sound ?? '', '点击编辑音效')}
           </button>
         )}
       </td>
       <td className="shot-list-canvas__td">
-        {editingField === 'note' ? (
+        {editingField === 'note' ? renderEditorShell(
           <textarea
             className="shot-list-canvas__textarea nodrag nopan nowheel"
             value={note}
@@ -499,10 +516,7 @@ function ShotCanvasRowImpl({
             className="shot-list-canvas__cell-display shot-list-canvas__cell-display--multiline nodrag nopan nowheel"
             onPointerDown={stopCanvas}
             onMouseDown={stopCanvas}
-            onClick={(e) => {
-              stopCanvas(e);
-              setEditingField('note');
-            }}
+            onClick={(e) => beginEdit('note', e)}
           >
             {cellDisplay(sh.note ?? '', '点击编辑备注')}
           </button>
@@ -576,7 +590,8 @@ const ShotCanvasRow = memo(
     previous.selected === next.selected &&
     previous.selectedGroupCount === next.selectedGroupCount &&
     previous.hovered === next.hovered &&
-    previous.promptLinkCount === next.promptLinkCount,
+    previous.promptLinkCount === next.promptLinkCount &&
+    previous.virtualized === next.virtualized,
 );
 
 export function ShotListEmbeddedEditor({
@@ -1317,6 +1332,20 @@ export function ShotListEmbeddedEditor({
         onScroll={handleVirtualScroll}
       >
         <table className="shot-list-canvas__table">
+          <colgroup>
+            <col className="shot-list-canvas__col shot-list-canvas__col--check" />
+            <col className="shot-list-canvas__col shot-list-canvas__col--id" />
+            <col className="shot-list-canvas__col shot-list-canvas__col--scene" />
+            <col className="shot-list-canvas__col shot-list-canvas__col--type" />
+            <col className="shot-list-canvas__col shot-list-canvas__col--movement" />
+            <col className="shot-list-canvas__col shot-list-canvas__col--duration" />
+            <col className="shot-list-canvas__col shot-list-canvas__col--description" />
+            <col className="shot-list-canvas__col shot-list-canvas__col--dialogue" />
+            <col className="shot-list-canvas__col shot-list-canvas__col--sound" />
+            <col className="shot-list-canvas__col shot-list-canvas__col--note" />
+            <col className="shot-list-canvas__col shot-list-canvas__col--op" />
+            <col className="shot-list-canvas__col shot-list-canvas__col--port" />
+          </colgroup>
           <thead>
             <tr>
               <th className="shot-list-canvas__th shot-list-canvas__th--check" scope="col">
@@ -1372,6 +1401,7 @@ export function ShotListEmbeddedEditor({
                 selectedGroupCount={selectedWireIds.length}
                 hovered={hoveredWireId === (sh.wireId ?? String(sh.id))}
                 promptLinkCount={promptLinkCounts.get(sh.wireId ?? String(sh.id)) ?? 0}
+                virtualized={virtualWindow.enabled}
                 onHoverPort={(hovering) => setHoveredWireId(hovering ? (sh.wireId ?? String(sh.id)) : null)}
                 onSelectGesture={startSelectionGesture}
                 onDragRangeEnter={extendRangeSelect}

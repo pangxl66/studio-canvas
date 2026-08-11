@@ -40,6 +40,7 @@ import {
   type StudioRecentProjectRef,
 } from '@/services/studioProjectPersistence';
 import { useStudioStore } from '@/store/useStudioStore';
+import { STUDIO_OPEN_PROJECT_SETTINGS_EVENT } from '@/components/ProjectGlobalSettings';
 
 const UUID_LIKE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -213,11 +214,13 @@ export function StudioProjectMenu() {
         const restoredSnapshot = createStudioProjectPayload(snapshot.nodes, snapshot.edges, {
           projectId,
           projectName,
+          projectSettings: snapshot.projectSettings,
         });
         await queueStudioProjectSnapshot(restoredSnapshot);
         hydrateProject(restoredSnapshot.nodes, restoredSnapshot.edges, {
           projectId: projectId ?? null,
           projectName,
+          projectSettings: restoredSnapshot.projectSettings,
           broadcastText: `已恢复 ${formatTime(version.savedAt)} 的历史版本。`,
         });
         if (projectId) {
@@ -256,10 +259,12 @@ export function StudioProjectMenu() {
       edges: liveEdges,
       currentProjectId: projectId,
       currentProjectName: projectName,
+      projectSettings,
     } = useStudioStore.getState();
     const body = stringifyStudioProjectPayloadWithMeta(liveNodes, liveEdges, {
       projectId: projectId ?? undefined,
       projectName,
+      projectSettings,
     });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const blob = new Blob([body], { type: 'application/json;charset=utf-8' });
@@ -336,6 +341,7 @@ export function StudioProjectMenu() {
         hydrateProject(record.nodes, record.edges, {
           projectId: record.projectId,
           projectName: record.projectName,
+          projectSettings: record.projectSettings,
           broadcastText: `已打开工程“${record.projectName}”。`,
         });
         if (record.projectId) {
@@ -407,11 +413,13 @@ export function StudioProjectMenu() {
             createStudioProjectPayload(payload.nodes, payload.edges, {
               projectId: nextProjectId,
               projectName: nextProjectName,
+              projectSettings: payload.projectSettings,
             }),
           );
           hydrateProject(payload.nodes, payload.edges, {
             projectId: nextProjectId,
             projectName: nextProjectName,
+            projectSettings: payload.projectSettings,
             broadcastText: `已导入工程文件，包含 ${payload.nodes.length} 个节点和 ${payload.edges.length} 条连线。`,
           });
           await rememberRecent(nextProjectId, nextProjectName, 'file');
@@ -453,6 +461,7 @@ export function StudioProjectMenu() {
       edges: liveEdges,
       currentProjectId: projectIdInState,
       currentProjectName: projectNameInState,
+      projectSettings,
     } = useStudioStore.getState();
     const suggestedName = projectNameInState || '未命名项目';
     const projectName = projectIdInState
@@ -471,6 +480,7 @@ export function StudioProjectMenu() {
           createStudioProjectPayload(liveNodes, liveEdges, {
             projectId,
             projectName,
+            projectSettings,
           }),
         );
       }
@@ -495,6 +505,50 @@ export function StudioProjectMenu() {
     setCurrentProjectMeta,
   ]);
 
+  const saveProjectAsWorkspace = useCallback(async () => {
+    const {
+      nodes: liveNodes,
+      edges: liveEdges,
+      currentProjectName: projectNameInState,
+      projectSettings,
+    } = useStudioStore.getState();
+    const suggestedName = projectNameInState.trim()
+      ? `${projectNameInState.trim()} 副本`
+      : '未命名项目副本';
+    const projectName = window.prompt('另存为工程名称', suggestedName)?.trim();
+    if (!projectName) return;
+
+    const projectId = createStudioProjectId();
+    setProjectActionBusy(true);
+    setProjectActionError(null);
+    try {
+      await queueStudioProjectSnapshot(
+        createStudioProjectPayload(liveNodes, liveEdges, {
+          projectId,
+          projectName,
+          projectSettings,
+        }),
+      );
+      setCurrentProjectMeta(projectId, projectName);
+      await rememberRecent(projectId, projectName, 'workspace');
+      pushMessage({
+        role: 'broadcast',
+        text: `已将当前工程另存为“${projectName}”，原工程保持不变。`,
+      });
+      closeMenus();
+    } catch (error) {
+      reportProjectActionError('另存为工程失败，原工程未被修改', error);
+    } finally {
+      setProjectActionBusy(false);
+    }
+  }, [
+    closeMenus,
+    pushMessage,
+    rememberRecent,
+    reportProjectActionError,
+    setCurrentProjectMeta,
+  ]);
+
   const saveProjectToCloud = useCallback(async () => {
     if (!cloudEnabled) return;
 
@@ -503,6 +557,7 @@ export function StudioProjectMenu() {
       edges: liveEdges,
       currentProjectId: projectIdInState,
       currentProjectName: projectNameInState,
+      projectSettings,
     } = useStudioStore.getState();
     const suggestedName = projectNameInState || '未命名工程';
     const projectName = window.prompt('云端工程名称', suggestedName)?.trim();
@@ -515,9 +570,10 @@ export function StudioProjectMenu() {
         projectName,
         nodes: liveNodes,
         edges: liveEdges,
+        projectSettings,
       });
       setCurrentProjectMeta(record.id, record.name);
-      await putStudioProjectRecord(record.id, record.name, liveNodes, liveEdges);
+      await putStudioProjectRecord(record.id, record.name, liveNodes, liveEdges, projectSettings);
       await setActiveStudioProjectRef({ projectId: record.id, projectName: record.name });
       await rememberRecent(record.id, record.name, 'workspace');
       await refreshProjectData();
@@ -566,9 +622,16 @@ export function StudioProjectMenu() {
         hydrateProject(record.snapshot.nodes, record.snapshot.edges, {
           projectId: record.id,
           projectName: record.name,
+          projectSettings: record.snapshot.projectSettings,
           broadcastText: `已打开云端工程「${record.name}」。`,
         });
-        await putStudioProjectRecord(record.id, record.name, record.snapshot.nodes, record.snapshot.edges);
+        await putStudioProjectRecord(
+          record.id,
+          record.name,
+          record.snapshot.nodes,
+          record.snapshot.edges,
+          record.snapshot.projectSettings,
+        );
         await setActiveStudioProjectRef({ projectId: record.id, projectName: record.name });
         await rememberRecent(record.id, record.name, 'workspace');
         await refreshProjectData();
@@ -608,11 +671,15 @@ export function StudioProjectMenu() {
     try {
       await persistence.flushCurrentProjectSnapshot();
       const projectId = createNewProject(projectName);
-      const { currentProjectName: nextProjectName } = useStudioStore.getState();
+      const {
+        currentProjectName: nextProjectName,
+        projectSettings,
+      } = useStudioStore.getState();
       await queueStudioProjectSnapshot(
         createStudioProjectPayload([], [], {
           projectId,
           projectName: nextProjectName,
+          projectSettings,
         }),
       );
       await rememberRecent(projectId, nextProjectName, 'workspace');
@@ -735,6 +802,17 @@ export function StudioProjectMenu() {
             </button>
             <button
               type="button"
+              className="studio-project-menu__item studio-project-menu__item--project-settings"
+              onClick={() => {
+                closeMenus();
+                window.dispatchEvent(new Event(STUDIO_OPEN_PROJECT_SETTINGS_EVENT));
+              }}
+            >
+              <span>项目全局设定</span>
+              <small>{useStudioStore.getState().projectSettings.aspectRatio}</small>
+            </button>
+            <button
+              type="button"
               className="studio-project-menu__item"
               disabled={projectActionBusy}
               onClick={openFilePicker}
@@ -764,6 +842,14 @@ export function StudioProjectMenu() {
               onClick={() => void saveProjectToWorkspace()}
             >
               <span>保存到工作区</span>
+            </button>
+            <button
+              type="button"
+              className="studio-project-menu__item"
+              disabled={projectActionBusy}
+              onClick={() => void saveProjectAsWorkspace()}
+            >
+              <span>另存为工程…</span>
             </button>
             {projectActionError || persistence.error ? (
               <div className="studio-project-menu__save-error" role="alert">

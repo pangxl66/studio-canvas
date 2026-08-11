@@ -28,9 +28,11 @@ import {
 } from '@/services/storyboardPromptInputs';
 import {
   DEFAULT_STORYBOARD_SKILL_ID,
+  DEFAULT_VIDEO_PROMPT_SKILL_ID,
   getSkillById,
   listSkillsInFolder,
   normalizeFilmStoryboardSkillId,
+  normalizeFilmVideoPromptSkillId,
 } from '@/services/skillLoader';
 import { normalizeStoryboardAspectRatio } from '@/services/aiFilmmakingPrompts';
 import {
@@ -40,7 +42,11 @@ import {
   type ImageGenerationModelId,
 } from '@/services/imageGenerationModels';
 import { IMAGE_NODE_INPUT_HANDLE_ID } from '@/utils/mediaNodeHandles';
-import { FILM_INPUT_HANDLE_ID, FILM_OUTPUT_HANDLE_ID } from '@/store/slices/aiFilmmakingStore';
+import {
+  FILM_INPUT_HANDLE_ID,
+  FILM_OUTPUT_HANDLE_ID,
+  collectFilmPromptSource,
+} from '@/store/slices/aiFilmmakingStore';
 import { useStudioStore } from '@/store/useStudioStore';
 import { useStudioGraphContentNodes } from '@/hooks/useStudioGraphContent';
 import type {
@@ -81,10 +87,10 @@ const NODE_META: Record<
     accent: 'storyboard',
   },
   film_video_prompt_node: {
-    eyebrow: 'SEEDANCE',
-    title: '影视分镜提示词',
+    eyebrow: 'IMAGE → VIDEO',
+    title: '视频提示词',
     action: '生成视频提示词',
-    empty: '连接文本、角色设定、影视分镜图或图片参考后，自动识别 A/B/C 模式。',
+    empty: '连接影视分镜图或其右侧九宫格图片后，先分析逐格表演与动作接力，再生成视频提示词。',
     accent: 'video',
   },
 };
@@ -120,7 +126,7 @@ function videoModeLabel(data: StudioNodeData): string | null {
   if (data.type !== 'film_video_prompt_node') return null;
   const mode = data.output && typeof data.output === 'object' ? (data.output as { videoMode?: unknown }).videoMode : null;
   if (mode === 'A' || mode === 'B' || mode === 'C') return `模式 ${mode}`;
-  return '自动识别';
+  return '等待九宫格';
 }
 
 function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
@@ -135,6 +141,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
   const nodes = useStudioGraphContentNodes();
   const edges = useStudioStore((state) => state.edges);
   const currentProjectId = useStudioStore((state) => state.currentProjectId);
+  const projectSettings = useStudioStore((state) => state.projectSettings);
   const imageAbortRef = useRef<AbortController | null>(null);
   const storyboardModelMenuRef = useRef<HTMLDivElement>(null);
   const [storyboardModelMenuOpen, setStoryboardModelMenuOpen] = useState(false);
@@ -142,10 +149,73 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
   const meta = isFilmKind(data.type) ? NODE_META[data.type] : NODE_META.film_video_prompt_node;
   const busy = data.status === 'IN_PROGRESS';
   const imageBusy = data.imageGenerationStatus === 'generating';
+  const imagePhaseLabel =
+    data.imageGenerationPhase === 'preparing_references'
+      ? '读取参考图'
+      : data.imageGenerationPhase === 'requesting_model'
+        ? '请求图片模型'
+        : data.imageGenerationPhase === 'validating_result'
+          ? '校验生成结果'
+          : data.imageGenerationPhase === 'creating_output'
+            ? '创建图片节点'
+            : '准备绘图';
   const anyBusy = busy || imageBusy;
   const text = textFromData(data);
   const hasText = Boolean(text);
   const isStoryboardNode = data.type === 'film_storyboard_node';
+  const isVideoPromptNode = data.type === 'film_video_prompt_node';
+
+  useEffect(() => {
+    if (!imageBusy || imageAbortRef.current) return;
+    patchNodeData(
+      id,
+      {
+        imageGenerationStatus: 'idle',
+        imageGenerationPhase: undefined,
+        imageGenerationCompletedPages: undefined,
+        imageGenerationTotalPages: undefined,
+        generation_error: '检测到已中断的绘图任务，请重新生成。',
+      },
+      false,
+    );
+  }, [id, imageBusy, patchNodeData]);
+  const videoPromptSource = useMemo(
+    () =>
+      isVideoPromptNode
+        ? collectFilmPromptSource(id, 'film_video_prompt_node', nodes, edges)
+        : null,
+    [edges, id, isVideoPromptNode, nodes],
+  );
+  const videoPromptSkills = useMemo(
+    () => (isVideoPromptNode ? listSkillsInFolder('video_prompt') : []),
+    [isVideoPromptNode],
+  );
+  const selectedVideoPromptSkillId = isVideoPromptNode
+    ? normalizeFilmVideoPromptSkillId(data.film_video_prompt_skill_id)
+    : DEFAULT_VIDEO_PROMPT_SKILL_ID;
+  const videoPromptDurationIsExplicit = Boolean(
+    data.film_video_prompt_duration_source === 'node' ||
+      (data.film_video_prompt_duration_source == null &&
+        Number.isFinite(Number(data.film_video_prompt_duration_sec)) &&
+        Number(data.film_video_prompt_duration_sec) > 0 &&
+        Number(data.film_video_prompt_duration_sec) !== 15),
+  );
+  const videoPromptSourceStale = Boolean(
+    isVideoPromptNode &&
+      data.film_video_prompt_source_signature &&
+      videoPromptSource?.sourceSignature &&
+      data.film_video_prompt_source_signature !== videoPromptSource.sourceSignature,
+  );
+  const videoPromptAnalysis = isVideoPromptNode ? data.film_video_prompt_analysis : undefined;
+  const videoPromptPanelCount = Math.max(
+    0,
+    Math.round(
+      videoPromptSource?.primaryImage?.panelCount ??
+        videoPromptSource?.summary.storyboardPanelCount ??
+        videoPromptAnalysis?.panels.length ??
+        0,
+    ),
+  );
   const storyboardOutputImageNodeIds = useMemo(
     () =>
       isStoryboardNode
@@ -337,27 +407,95 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
     (event: ChangeEvent<HTMLSelectElement>) => {
       const nextId = normalizeFilmStoryboardSkillId(event.target.value);
       const skill = getSkillById(nextId);
-      patchNodeData(id, { film_storyboard_skill_id: nextId, generation_error: undefined }, false);
+      patchNodeData(
+        id,
+        {
+          film_storyboard_skill_id: nextId,
+          film_storyboard_skill_source:
+            nextId === projectSettings.defaultSkills.storyboardSkillId ? 'project' : 'node',
+          generation_error: undefined,
+        },
+        false,
+      );
       pushMessage({
         role: 'system',
         text: `影视分镜图 Skill 已切换为：${skill?.name ?? nextId}。`,
         nodeId: id,
       });
     },
+    [id, patchNodeData, projectSettings.defaultSkills.storyboardSkillId, pushMessage],
+  );
+
+  const onVideoPromptSkillChange = useCallback(
+    (event: ChangeEvent<HTMLSelectElement>) => {
+      const nextId = normalizeFilmVideoPromptSkillId(event.target.value);
+      const skill = getSkillById(nextId);
+      patchNodeData(
+        id,
+        {
+          film_video_prompt_skill_id: nextId,
+          generation_error: undefined,
+        },
+        false,
+      );
+      pushMessage({
+        role: 'system',
+        text: `视频提示词规范已切换为：${skill?.name ?? nextId}。`,
+        nodeId: id,
+      });
+    },
     [id, patchNodeData, pushMessage],
+  );
+
+  const onVideoPromptDurationChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      if (!event.target.value.trim()) {
+        patchNodeData(
+          id,
+          {
+            film_video_prompt_duration_sec: undefined,
+            film_video_prompt_duration_source: 'auto',
+            generation_error: undefined,
+          },
+          false,
+        );
+        return;
+      }
+      const value = Number(event.target.value);
+      if (!Number.isFinite(value)) return;
+      patchNodeData(
+        id,
+        {
+          film_video_prompt_duration_sec: Math.max(1, Math.round(value * 10) / 10),
+          film_video_prompt_duration_source: 'node',
+          generation_error: undefined,
+        },
+        false,
+      );
+    },
+    [id, patchNodeData],
   );
 
   const onStoryboardAspectRatioChange = useCallback(
     (event: ChangeEvent<HTMLSelectElement>) => {
       const nextRatio = normalizeStoryboardAspectRatio(event.target.value);
-      patchNodeData(id, { film_storyboard_aspect_ratio: nextRatio, generation_error: undefined }, false);
+      patchNodeData(
+        id,
+        {
+          film_storyboard_aspect_ratio: nextRatio,
+          film_storyboard_aspect_ratio_source:
+            nextRatio === projectSettings.aspectRatio ? 'project' : 'node',
+          generation_error: undefined,
+        },
+        false,
+      );
       pushMessage({
         role: 'system',
-        text: `分镜宫格画幅已切换为：${nextRatio === '9:16' ? '9:16 竖屏' : '16:9 横屏'}。`,
+        text: `分镜宫格画幅已切换为：${nextRatio === '9:16' ? '9:16 竖屏' : nextRatio === '21:9' ? '21:9 超宽' : '16:9 横屏'}。`,
         nodeId: id,
       });
     },
-    [id, patchNodeData, pushMessage],
+    [id, patchNodeData, projectSettings.aspectRatio, pushMessage],
   );
 
   const selectStoryboardModel = useCallback(
@@ -430,8 +568,22 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
 
   const onGenerateStoryboardImage = useCallback(async () => {
     if (imageBusy) {
-      imageAbortRef.current?.abort();
-      pushMessage({ role: 'system', text: '正在停止分镜宫格图片生成……', nodeId: id });
+      if (imageAbortRef.current) {
+        imageAbortRef.current.abort();
+        pushMessage({ role: 'system', text: '正在停止分镜宫格图片生成……', nodeId: id });
+      } else {
+        patchNodeData(
+          id,
+          {
+            imageGenerationStatus: 'idle',
+            imageGenerationPhase: undefined,
+            imageGenerationCompletedPages: undefined,
+            imageGenerationTotalPages: undefined,
+            generation_error: '已清理中断的绘图状态，请重新生成。',
+          },
+          false,
+        );
+      }
       return;
     }
     if (!storyboardSource.shots.length) {
@@ -465,6 +617,9 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
 
     const skill = getSkillById(effectiveStoryboardSkillId);
     const extraInstruction = [
+      projectSettings.overallStyle.enabled && projectSettings.overallStyle.text.trim()
+        ? `项目整体风格（用户原文，必须继承）：\n${projectSettings.overallStyle.text.trim().slice(0, 12000)}`
+        : '',
       data.raw_text?.trim()
         ? `用户已生成或编辑的宫格导演提示词（优先执行，但不得覆盖镜头数量、顺序、画幅和参考图硬约束）：\n${data.raw_text.trim().slice(0, 8000)}`
         : '',
@@ -481,9 +636,11 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
       id,
       {
         imageGenerationStatus: 'generating',
+        imageGenerationPhase: 'preparing_references',
         imageGenerationCompletedPages: 0,
         imageGenerationTotalPages: sourcePages.length,
         generation_error: undefined,
+        output_stale_reason: null,
       },
       false,
     );
@@ -506,6 +663,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
         const preparedReferences = await prepareStoryboardReferenceImages(
           pageReferences,
           storyboardBusinessReferenceLimit,
+          abortController.signal,
         );
         const referenceInstruction = buildStoryboardReferenceInstruction(pageReferences, 2);
         const panelReferenceInstructions = pageSources.map((source) =>
@@ -537,6 +695,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
           selectedStoryboardAspectRatio,
         );
         const requestReferences = [layoutReference, ...preparedReferences];
+        patchNodeData(id, { imageGenerationPhase: 'requesting_model' }, false);
         let rawResult;
         let usedFallbackSize = false;
         try {
@@ -566,6 +725,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
           nativeSizeFallbackCount += 1;
         }
         const measuredResult = await measureStoryboardGridImage(rawResult);
+        patchNodeData(id, { imageGenerationPhase: 'validating_result' }, false);
         if (pageSources.length === 6 && measuredResult.width && measuredResult.height) {
           const expectedCanvasRatio = isPortrait ? 3 / 8 : 8 / 3;
           const actualCanvasRatio = measuredResult.width / measuredResult.height;
@@ -624,6 +784,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
       }
 
       const now = Date.now();
+      patchNodeData(id, { imageGenerationPhase: 'creating_output' }, false);
       const firstPage = generatedPages[0];
       const previousOutput: Record<string, unknown> =
         data.output && typeof data.output === 'object' ? { ...(data.output as Record<string, unknown>) } : {};
@@ -744,6 +905,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
           imageGenerationAspectRatio: selectedStoryboardAspectRatio,
           imageGenerationCompletedAt: now,
           imageGenerationStatus: 'idle',
+          imageGenerationPhase: undefined,
           imageGenerationCompletedPages: undefined,
           imageGenerationTotalPages: undefined,
           storyboardGridImages: persistedPageMetadata,
@@ -799,6 +961,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
         id,
         {
           imageGenerationStatus: 'idle',
+          imageGenerationPhase: undefined,
           imageGenerationCompletedPages: undefined,
           imageGenerationTotalPages: undefined,
           generation_error: cancelled ? undefined : message,
@@ -820,6 +983,8 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
     onConnect,
     patchNodeData,
     promptOnlyStoryboardMode,
+    projectSettings.overallStyle.enabled,
+    projectSettings.overallStyle.text,
     pushMessage,
     reactFlow,
     referenceSignature,
@@ -857,14 +1022,18 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
         </div>
         <span className={`ai-film-node__status ${anyBusy ? 'ai-film-node__status--busy' : ''}`}>
           {imageBusy
-            ? `绘图 ${data.imageGenerationCompletedPages ?? 0}/${data.imageGenerationTotalPages ?? storyboardPageCount}`
+            ? `绘图 ${data.imageGenerationCompletedPages ?? 0}/${data.imageGenerationTotalPages ?? storyboardPageCount} · ${imagePhaseLabel}`
             : busy
               ? '生成中'
               : storyboardImageStale
                 ? '需重生成'
-                : hasImage
-                ? '已出图'
-                : modeLabel ?? '待生成'}
+                : videoPromptSourceStale
+                  ? '来源已变化'
+                  : isVideoPromptNode && videoPromptAnalysis
+                    ? `已分析 ${videoPromptAnalysis.panels.length} 格`
+                    : hasImage
+                      ? '已出图'
+                      : modeLabel ?? '待生成'}
         </span>
       </header>
       <section className={`ai-film-node__body ${hasText || hasImage ? 'ai-film-node__body--filled' : ''}`}>
@@ -904,7 +1073,12 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
       {data.generation_error?.trim() ? (
         <div className="ai-film-node__error">{data.generation_error.trim()}</div>
       ) : null}
-      <footer className={`ai-film-node__footer nodrag nopan ${isStoryboardNode ? 'ai-film-node__footer--stacked' : ''}`}>
+      {data.output_stale_reason?.trim() ? (
+        <div className="ai-film-node__error ai-film-node__error--stale">
+          {data.output_stale_reason.trim()}
+        </div>
+      ) : null}
+      <footer className={`ai-film-node__footer nodrag nopan ${isStoryboardNode || isVideoPromptNode ? 'ai-film-node__footer--stacked' : ''}`}>
         {isStoryboardNode ? (
           <>
             <label className="ai-film-node__skill">
@@ -917,6 +1091,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
               >
                 <option value="16:9">16:9 横屏</option>
                 <option value="9:16">9:16 竖屏</option>
+                <option value="21:9">21:9 超宽</option>
               </select>
             </label>
             <div className="ai-film-node__skill ai-film-node__model-picker">
@@ -1111,6 +1286,82 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
             {storyboardImageStale ? <span className="ai-film-node__source-stale">镜头、Prompt 或参考图已变化</span> : null}
           </div>
         ) : null}
+        {isVideoPromptNode ? (
+          <>
+            <div className="ai-film-node__video-controls">
+              <label className="ai-film-node__skill">
+                <span>视频规范</span>
+                <select
+                  className="ai-film-node__skill-select"
+                  value={selectedVideoPromptSkillId}
+                  onChange={onVideoPromptSkillChange}
+                  disabled={anyBusy}
+                >
+                  {videoPromptSkills.map((skill) => (
+                    <option key={skill.id} value={skill.id}>
+                      {skill.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="ai-film-node__skill ai-film-node__duration-field">
+                <span>总时长（留空沿用上游）</span>
+                <span className="ai-film-node__duration-input">
+                  <input
+                    type="number"
+                    min="1"
+                    step="0.5"
+                    value={videoPromptDurationIsExplicit ? data.film_video_prompt_duration_sec : ''}
+                    placeholder="自动"
+                    onChange={onVideoPromptDurationChange}
+                    disabled={anyBusy}
+                    aria-label="视频提示词总时长"
+                  />
+                  <em>秒</em>
+                </span>
+              </label>
+            </div>
+            <div className="ai-film-node__source-meta ai-film-node__source-meta--video">
+              <span>
+                {videoPromptSource?.primaryImage?.dataUrl
+                  ? `已读取九宫格图片 · ${videoPromptPanelCount || 9} 面板`
+                  : '等待连接最终九宫格图片'}
+              </span>
+              {videoPromptSource?.summary.storyboardDurationSec ? (
+                <span>上游镜头共 {videoPromptSource.summary.storyboardDurationSec} 秒</span>
+              ) : null}
+              {videoPromptAnalysis ? <span>表演分析 {videoPromptAnalysis.panels.length} 格</span> : null}
+              {videoPromptSourceStale ? (
+                <span className="ai-film-node__source-stale">上游图片或分镜已变化，请重新分析</span>
+              ) : null}
+            </div>
+            {videoPromptAnalysis ? (
+              <details className="ai-film-node__performance-analysis">
+                <summary>
+                  <span>表演与动作接力分析</span>
+                  <b>{videoPromptAnalysis.panels.length} 格</b>
+                </summary>
+                <div className="ai-film-node__performance-copy">
+                  {videoPromptAnalysis.performanceBaseline ? (
+                    <p><strong>表演基线</strong>{videoPromptAnalysis.performanceBaseline}</p>
+                  ) : null}
+                  {videoPromptAnalysis.spatialContinuity ? (
+                    <p><strong>空间连续</strong>{videoPromptAnalysis.spatialContinuity}</p>
+                  ) : null}
+                  <ol>
+                    {videoPromptAnalysis.panels.map((panel) => (
+                      <li key={panel.panelIndex}>
+                        <b>面板 {panel.panelIndex}</b>
+                        <span>{panel.performance}</span>
+                        <small>{panel.startState} → {panel.endState}</small>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              </details>
+            ) : null}
+          </>
+        ) : null}
         <div className={`ai-film-node__actions ${isStoryboardNode ? 'ai-film-node__actions--storyboard' : ''}`}>
           <button
             type="button"
@@ -1118,7 +1369,13 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
             onClick={onRun}
             disabled={imageBusy}
           >
-            {busy ? '停止' : meta.action}
+            {busy
+              ? '停止'
+              : isVideoPromptNode && videoPromptSourceStale
+                ? '更新视频提示词'
+                : isVideoPromptNode && videoPromptAnalysis
+                  ? '重新分析并生成'
+                  : meta.action}
           </button>
           {isStoryboardNode ? (
             <button

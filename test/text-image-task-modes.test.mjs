@@ -54,20 +54,25 @@ test('storyboard Skill analysis uses the selected method without generating a ne
   assert.match(user, /关注高低差/);
 });
 
-test('text-node UI exposes three explicit image tasks and defaults to extraction', () => {
+test('text-node UI exposes four explicit image tasks and defaults to extraction', () => {
   const node = read('src/components/TextNode.tsx');
   const store = read('src/store/slices/textStore.ts');
   const studio = read('src/store/useStudioStore.ts');
 
   assert.equal(imageTaskLabel('extract_shot'), '提取当前分镜');
   assert.equal(imageTaskLabel('skill_analysis'), '分镜 Skill 分析');
+  assert.equal(imageTaskLabel('normalize_storyboard'), '识别并整理分镜');
   assert.equal(imageTaskLabel('continue_shot'), '下一镜推算');
   assert.match(studio, /text_image_task_mode:\s*'extract_shot'/);
   assert.match(node, />\s*提取当前分镜\s*</);
   assert.match(node, />\s*分镜 Skill 分析\s*</);
+  assert.match(node, />\s*识别并整理\s*</);
+  assert.match(node, /当前整理 Skill/);
+  assert.match(node, /STORYBOARD_TEXT_NORMALIZER_SKILL_NAME/);
   assert.match(node, />\s*下一镜推算\s*</);
   assert.match(node, /连线只挂载图片，点击生成后才执行所选任务/);
   assert.match(store, /feature:\s*[\s\S]*?'image-storyboard-skill-analysis'/);
+  assert.match(store, /'image-storyboard-normalize'/);
   assert.match(store, /'image-next-shot'/);
   assert.match(store, /'image-shot-extraction'/);
 });

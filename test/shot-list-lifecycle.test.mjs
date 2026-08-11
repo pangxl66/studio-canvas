@@ -44,11 +44,59 @@ test('shot-list root leaves row output handle events available to React Flow', (
   assert.match(styles, /\.shot-list-canvas__manual-connection-layer\s*\{[\s\S]*?pointer-events: none;/);
   assert.match(canvas, /<ShotListPersistentConnectionLayer\s*\/>/);
   assert.match(persistentLayer, /data-edge-id=\{path\.edgeId\}/);
-  assert.match(persistentLayer, /new MutationObserver\(scheduleMeasure\)/);
+  assert.match(persistentLayer, /new MutationObserver\(\(records\) =>/);
+  assert.match(persistentLayer, /resolveAndScheduleMeasure\(\)/);
   assert.match(persistentLayer, /state\.onEdgesChange\(/);
   assert.match(styles, /\.shot-list-canvas__persistent-connection-layer\s*\{[\s\S]*?pointer-events: none;/);
   assert.match(canvas, /SHOT_LIST_CONNECTION_PICKER_EVENT/);
   assert.match(canvas, /setNodePicker\(payload\)/);
+});
+
+test('shot-list editors preserve the exact cell box without layout jumps', () => {
+  const editor = read('src/components/ShotListEmbeddedEditor.tsx');
+  const styles = read('src/index.css');
+
+  assert.match(editor, /const SHOT_LIST_VIRTUAL_ROW_HEIGHT = 168;/);
+  assert.match(editor, /width: event\.currentTarget\.offsetWidth/);
+  assert.match(editor, /height: event\.currentTarget\.offsetHeight/);
+  assert.match(editor, /minWidth: editingFieldSize\.width/);
+  assert.match(editor, /maxHeight: editingFieldSize\.height/);
+  assert.match(editor, /style=\{editorBoxStyle\}/);
+  assert.match(editor, /renderEditorShell\(/);
+  assert.doesNotMatch(editor, /autoSizeTextarea/);
+  assert.match(
+    styles,
+    /\.shot-list-canvas__th--movement,[\s\S]*?\.shot-list-canvas__td--movement\s*\{[\s\S]*?width: 220px;[\s\S]*?min-width: 220px;/,
+  );
+  assert.match(editor, /virtualized=\{virtualWindow\.enabled\}/);
+  assert.match(
+    styles,
+    /\.shot-list-canvas__cell-display--multiline\s*\{[\s\S]*?max-height: none;[\s\S]*?overflow: visible;/,
+  );
+  assert.match(
+    styles,
+    /\.shot-list-canvas__textarea\s*\{[\s\S]*?min-height: 112px;[\s\S]*?max-height: none;/,
+  );
+  assert.match(
+    styles,
+    /\.shot-list-canvas__textarea\s*\{[\s\S]*?resize: none;[\s\S]*?overflow-y: auto;/,
+  );
+  assert.match(
+    styles,
+    /\.shot-list-canvas__editor-shell\s*\{[\s\S]*?position: relative;[\s\S]*?overflow: hidden;/,
+  );
+  assert.match(
+    styles,
+    /\.shot-list-canvas__editor-shell > \.shot-list-canvas__input,[\s\S]*?position: absolute;[\s\S]*?height: 100%;/,
+  );
+  assert.match(editor, /<colgroup>[\s\S]*shot-list-canvas__col--description[\s\S]*<\/colgroup>/);
+  assert.match(styles, /\.shot-list-canvas__table\s*\{[\s\S]*?table-layout: fixed;/);
+  assert.match(styles, /\.shot-list-canvas__col--movement\s*\{\s*width: 220px;/);
+  assert.match(styles, /\.shot-list-canvas__col--description\s*\{\s*width: 621px;/);
+  assert.match(
+    styles,
+    /\.shot-list-canvas__row--virtualized[\s\S]*?height: 168px;[\s\S]*?overflow-y: auto;/,
+  );
 });
 
 test('shot-list manual fallback sends the exact row handle and drop point to the canvas', () => {

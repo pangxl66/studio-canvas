@@ -9,6 +9,8 @@ export type NodePickerState = {
   flowX: number;
   flowY: number;
   fromNodeId: string;
+  /** When present, the picker was opened from the unified multi-selection output. */
+  fromNodeIds?: string[];
   fromHandleId: string | null;
   fromHandleType: 'source' | 'target' | null;
 };

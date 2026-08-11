@@ -14,6 +14,7 @@ type SkillJson = {
   slot?: unknown;
   prompt_slot?: unknown;
   system_instruction?: string;
+  reference_files?: unknown;
   export_extensions?: unknown;
   activation?: {
     when?: unknown;
@@ -49,11 +50,12 @@ function sectionBlock(title: string, lines: string[]): string {
   return `【${title}】\n${lines.map((line, idx) => `${idx + 1}. ${line}`).join('\n')}`;
 }
 
-function buildStructuredInstruction(mod: SkillJson): string {
+function buildStructuredInstruction(mod: SkillJson, referencedInstruction = ''): string {
   const blocks: string[] = [];
   const base =
     typeof mod.system_instruction === 'string' ? mod.system_instruction.trim() : '';
   if (base) blocks.push(base);
+  if (referencedInstruction) blocks.push(referencedInstruction);
 
   const when = normalizeStringList(mod.activation?.when);
   const avoid = normalizeStringList(mod.activation?.avoid);
@@ -113,16 +115,110 @@ function parseSkillSlot(mod: SkillJson, folder: SkillFolder): SkillSlotKind | un
 
 function parseFolderAndBase(pathKey: string): { folder: SkillFolder; base: string } | null {
   const norm = pathKey.replace(/\\/g, '/');
-  const m = norm.match(/skills\/(writing|storyboard|prompt)\/([^/]+)\.json$/i);
+  const m = norm.match(/skills\/(writing|storyboard|prompt|video_prompt)\/([^/]+)\.json$/i);
   if (!m) return null;
   const folder = m[1].toLowerCase() as SkillFolder;
   const base = m[2];
   return { folder, base };
 }
 
+function resolveSkillReferencePath(sourcePath: string, referencePath: string): string | null {
+  const reference = referencePath.trim().replace(/\\/g, '/');
+  if (!reference || reference.startsWith('/') || /^[a-z]+:/i.test(reference)) return null;
+  const parts = sourcePath.replace(/\\/g, '/').split('/');
+  parts.pop();
+  for (const segment of reference.split('/')) {
+    if (!segment || segment === '.') continue;
+    if (segment === '..') {
+      parts.pop();
+      continue;
+    }
+    parts.push(segment);
+  }
+  const resolved = parts.join('/');
+  return resolved.startsWith('../skills/') ? resolved : null;
+}
+
+function buildReferencedInstruction(mod: SkillJson, sourcePath: string): string {
+  const references = normalizeStringList(mod.reference_files);
+  if (!references.length) return '';
+  const blocks: string[] = [];
+  for (const reference of references) {
+    const resolved = resolveSkillReferencePath(sourcePath, reference);
+    const content = resolved ? rawTextModules[resolved]?.trim() : '';
+    if (!content) continue;
+    blocks.push(`【技能参考文件：${reference}】\n${content}`);
+  }
+  return blocks.join('\n\n');
+}
+
+function relaxPromptDurationLimits(instruction: string): string {
+  const replacements: ReadonlyArray<readonly [string, string]> = [
+    [
+      '总时长根据动作量、镜头复杂度和情绪停顿合理估算，每张 seedanceCard 必须在15秒以内，不默认铺满15秒。',
+      '总时长根据节点指定值、上游镜头总时长、动作量、镜头复杂度和情绪停顿确定；seedanceCard 不设15秒硬上限，也不得无理由拉长。',
+    ],
+    [
+      '只有确有三阶段以上连续变化时才使用12至15秒。',
+      '三阶段以上连续变化可以使用12秒以上，最终时长按动作完整性与上游时长确定。',
+    ],
+    ['禁止无理由填满15秒。', '禁止无理由填满预设时长。'],
+    [
+      '15秒上限作用于每张 seedanceCard。多个输入分镜可以对应多张卡片，每张分别不超过15秒。',
+      'seedanceCard 不设15秒硬上限。多个输入分镜可以对应多张卡片，每张按节点指定值或上游镜头真实时长完整生成。',
+    ],
+    [
+      '只有输入明确要求合并，或多个分镜共同构成同一连续镜头且总时长不超过15秒时才允许合并',
+      '只有输入明确要求合并，或多个分镜共同构成同一连续镜头且动作与运镜适合在同一连续时间轴内完成时才允许合并',
+    ],
+    ['每张卡片是否不超过15秒。', '每张卡片时长是否与节点指定值或上游镜头真实时长一致。'],
+    [
+      '- 单次输出严格锁定为 15.0 秒，不是 15 秒以内，也不能超出 15 秒。',
+      '- 单次输出时长由节点指定值或上游镜头真实时长决定，不设 15 秒硬上限。',
+    ],
+    [
+      '- 时间轴必须从 00.0s 开始，到 15.0s 结束，精度到 0.0s。',
+      '- 时间轴必须从 00.0s 开始，到当前卡片实际总时长结束，精度到 0.0s。',
+    ],
+    [
+      '- 必须根据分镜数量与动作密度合理分配每段时长；多分镜组合时，不允许漏镜头、不允许把 15 秒扩写成 30 秒或 50 秒。',
+      '- 必须根据分镜数量、上游时长与动作密度合理分配每段时长；多分镜组合时不允许漏镜头或擅自压缩、扩写总时长。',
+    ],
+    [
+      '转译为 Seedance 2.0 可直接读取的 15.0 秒分段式视听提示词。',
+      '转译为 Seedance 2.0 可直接读取、按真实总时长组织的分段式视听提示词。',
+    ],
+  ];
+  let relaxed = instruction;
+  for (const [legacyRule, replacement] of replacements) {
+    relaxed = relaxed.replaceAll(legacyRule, replacement);
+  }
+  return relaxed.concat(
+    '\n\n【运行时时长协议｜最高优先级】当前节点生成的 seedanceCard 不设 15 秒硬上限。优先使用节点明确指定时长；未指定时使用上游镜头或镜头组的真实总时长；两者都不存在时才回退为 15 秒。时间轴必须从 0 开始、连续无重叠无空洞，并准确结束于当前卡片实际总时长。任何旧版“15秒以内”“正好15秒”“单卡不超过15秒”或“合并总时长不超过15秒”规则均已失效。不得为了适配旧限制而删镜头、漏动作、压缩表演或截断落幅。',
+  );
+}
+
 function applyRuntimeSkillCompatibility(instruction: string, id: string): string {
-  if (id !== 'prompt/studio_canvas_prompt_spec_v2_7_camera_matching') return instruction;
-  return instruction
+  let compatible = instruction;
+  if (id === 'prompt/seedance_2_5_multimodal_film_prompt_v10') {
+    return compatible
+      .replaceAll('用户计划一次生成 15 秒以上内容', '用户计划一次生成较长连续内容')
+      .replaceAll(
+        '仅在完全没有时长信息时回退15秒',
+        '完全没有时长信息时按动作预算、对白、表演停顿、运镜复杂度和完整落幅所需时间自主估算，不套用固定默认秒数',
+      )
+      .concat(
+        '\n\n【Seedance 2.5 时长与组合协议｜最终覆盖】不设固定秒数上限，也不使用固定默认秒数。有节点指定时长或上游 durationSec 时严格沿用；完全没有时长信息时，根据动作、对白、表演停顿、运镜复杂度与完整落幅自主估算。多镜头组合不设15秒最低门槛，较短连续段同样可以组合；组合或拆组只由连续性、动作对白、覆盖剪辑与单次生成承载能力决定，不得以总时长阈值决定。不得为套用预设时长压缩、截断、删镜头或漏动作。',
+      );
+  }
+  if (
+    id.startsWith('prompt/studio_canvas_prompt_spec_') ||
+    id === 'prompt/seedance2_segmented_prompt_v1'
+  ) {
+    compatible = relaxPromptDurationLimits(compatible);
+  }
+  if (id !== 'prompt/studio_canvas_prompt_spec_v2_7_camera_matching') return compatible;
+  return compatible
     .replace(
       '一般单镜建议挂载5至12项；复杂群像、载具或大型场景可增加至15项',
       '一般单镜建议挂载5至15项；复杂群像、载具或大型场景不设固定数量上限，但每项都必须有明确来源并具有执行价值',
@@ -132,11 +228,20 @@ function applyRuntimeSkillCompatibility(instruction: string, id: string): string
     );
 }
 
-function normalizeSkill(mod: SkillJson, id: string, folder: SkillFolder, fileName: string): SkillFileRecord | null {
+function normalizeSkill(
+  mod: SkillJson,
+  id: string,
+  folder: SkillFolder,
+  fileName: string,
+  sourcePath: string,
+): SkillFileRecord | null {
   const name = typeof mod.name === 'string' ? mod.name.trim() : '';
   const description = typeof mod.description === 'string' ? mod.description.trim() : '';
   const version = typeof mod.version === 'string' ? mod.version.trim() : '';
-  const system_instruction = applyRuntimeSkillCompatibility(buildStructuredInstruction(mod), id);
+  const system_instruction = applyRuntimeSkillCompatibility(
+    buildStructuredInstruction(mod, buildReferencedInstruction(mod, sourcePath)),
+    id,
+  );
   if (!name || !system_instruction) return null;
   const export_extensions = parseExportExtensions(mod.export_extensions);
   const slot = parseSkillSlot(mod, folder);
@@ -154,6 +259,11 @@ function normalizeSkill(mod: SkillJson, id: string, folder: SkillFolder, fileNam
 }
 
 const rawModules = import.meta.glob<{ default: SkillJson }>('../skills/**/*.json', { eager: true });
+const rawTextModules = import.meta.glob<string>('../skills/**/*.{md,txt}', {
+  query: '?raw',
+  import: 'default',
+  eager: true,
+});
 
 export const STUDIO_CANVAS_PROMPT_V1_SKILL_ID = 'prompt/studio_canvas_prompt_spec_v1';
 export const STUDIO_CANVAS_PROMPT_V23_SKILL_ID = 'prompt/studio_canvas_prompt_spec_v2_3_production';
@@ -165,8 +275,13 @@ export const STUDIO_CANVAS_PROMPT_V26_SKILL_ID =
   'prompt/studio_canvas_prompt_spec_v2_6_detailed_mount';
 export const STUDIO_CANVAS_PROMPT_V27_SKILL_ID =
   'prompt/studio_canvas_prompt_spec_v2_7_camera_matching';
+export const SEEDANCE25_MULTIMODAL_PROMPT_V10_SKILL_ID =
+  'prompt/seedance_2_5_multimodal_film_prompt_v10';
+export const SEEDANCE25_PERFORMANCE_PROMPT_V11_SKILL_ID =
+  'prompt/seedance_2_5_multimodal_film_prompt_v11_performance';
 export const DEFAULT_PROMPT_STYLE_SKILL_ID = STUDIO_CANVAS_PROMPT_V27_SKILL_ID;
 export const DEFAULT_STORYBOARD_SKILL_ID = 'storyboard/xuke_storyboard_v1';
+export const DEFAULT_VIDEO_PROMPT_SKILL_ID = 'video_prompt/storyboard_grid_seedance_v1';
 
 const registry = new Map<string, SkillFileRecord>();
 const allSkills: SkillFileRecord[] = [];
@@ -179,6 +294,11 @@ const HIDDEN_SKILL_IDS = new Set<string>([
   'prompt/seedance2_segmented_prompt_v1',
 ]);
 const SKILL_ID_ALIASES = new Map<string, string>([
+  // Preserve old projects while upgrading their selected Seedance style to v10.
+  [
+    'prompt/seedance_2_5_multimodal_film_prompt_v9',
+    SEEDANCE25_MULTIMODAL_PROMPT_V10_SKILL_ID,
+  ],
   // Previous defaults remain on disk for rollback. Existing Prompt nodes
   // transparently advance to the current Studio Canvas specification.
   [STUDIO_CANVAS_PROMPT_V25_SKILL_ID, DEFAULT_PROMPT_STYLE_SKILL_ID],
@@ -195,11 +315,30 @@ for (const [pathKey, mod] of Object.entries(rawModules)) {
   const parsed = parseFolderAndBase(pathKey.replace(/\\/g, '/'));
   if (!parsed) continue;
   const id = `${parsed.folder}/${parsed.base}`;
-  const rec = normalizeSkill(mod.default ?? {}, id, parsed.folder, `${parsed.base}.json`);
+  const rec = normalizeSkill(
+    mod.default ?? {},
+    id,
+    parsed.folder,
+    `${parsed.base}.json`,
+    pathKey.replace(/\\/g, '/'),
+  );
   if (rec) {
     registry.set(id, rec);
     allSkills.push(rec);
   }
+}
+
+// The eight-dimensional option consumes a frozen v10 base card and returns only
+// the replacement bodies for 【表演】 and 【时间轴】. The runtime splices those bodies
+// deterministically, so every other v10 section remains byte-for-byte inherited.
+const seedance25V10 = registry.get(SEEDANCE25_MULTIMODAL_PROMPT_V10_SKILL_ID);
+const seedance25PerformanceV11 = registry.get(SEEDANCE25_PERFORMANCE_PROMPT_V11_SKILL_ID);
+if (seedance25V10 && seedance25PerformanceV11) {
+  seedance25PerformanceV11.system_instruction = [
+    seedance25V10.system_instruction,
+    '---',
+    seedance25PerformanceV11.system_instruction,
+  ].join('\n\n');
 }
 
 allSkills.sort((a, b) => (a.folder === b.folder ? a.name.localeCompare(b.name) : a.folder.localeCompare(b.folder)));
@@ -258,6 +397,16 @@ export function normalizeFilmStoryboardSkillId(id: string | null | undefined): s
     normalizeSkillIdForPipelineKind('storyboard', DEFAULT_STORYBOARD_SKILL_ID) ??
     listSkillsForPipelineKind('storyboard')[0]?.id;
   return normalizeSkillIdForPipelineKind('storyboard', id) ?? fallback ?? DEFAULT_STORYBOARD_SKILL_ID;
+}
+
+export function normalizeFilmVideoPromptSkillId(id: string | null | undefined): string {
+  const available = listSkillsInFolder('video_prompt');
+  const rawId = typeof id === 'string' ? id.trim() : '';
+  if (rawId && available.some((skill) => skill.id === rawId)) return rawId;
+  if (available.some((skill) => skill.id === DEFAULT_VIDEO_PROMPT_SKILL_ID)) {
+    return DEFAULT_VIDEO_PROMPT_SKILL_ID;
+  }
+  return available[0]?.id ?? DEFAULT_VIDEO_PROMPT_SKILL_ID;
 }
 
 function isPromptStyleSkillRecord(skill: SkillFileRecord | undefined): boolean {

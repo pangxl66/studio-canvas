@@ -32,6 +32,9 @@ const BUILTIN_IMAGE_MODELS = new Set([
 const UPSTREAM_IMAGE_MODEL_ALIASES = new Map<string, string>([
   ['image2', 'gpt-image-2'],
 ]);
+const UPSTREAM_IMAGE_MODEL_FALLBACKS = new Map<string, string[]>([
+  ['gemini-3.1-flash-image', ['gemini-3.1-flash-image-preview']],
+]);
 const QUOTA_COST = 3;
 const TIMEOUT_MS = 420_000;
 const ALLOWED_SIZES = new Set([
@@ -57,6 +60,20 @@ function resolveRequestedImageModel(value: unknown): string {
 
 function resolveUpstreamImageModel(model: string): string {
   return UPSTREAM_IMAGE_MODEL_ALIASES.get(model) ?? model;
+}
+
+function upstreamImageModelCandidates(model: string, size = '1024x1024'): string[] {
+  const primary = resolveUpstreamImageModel(model);
+  const preservesRequestedAspect = /^(\d+)x\1$/u.test(size);
+  const fallbacks = preservesRequestedAspect ? (UPSTREAM_IMAGE_MODEL_FALLBACKS.get(primary) ?? []) : [];
+  return [primary, ...fallbacks]
+    .filter((candidate, index, candidates) => Boolean(candidate) && candidates.indexOf(candidate) === index);
+}
+
+function shouldRetryImageUpstream(status: number, raw: string): boolean {
+  if (status < 500) return false;
+  const text = raw.toLowerCase();
+  return status === 503 || /无可用渠道|no available channel|no channel available|temporarily unavailable/.test(text);
 }
 
 function measureImageBuffer(buffer: Buffer): {
@@ -99,6 +116,25 @@ function measureImageBuffer(buffer: Buffer): {
     offset += segmentLength + 2;
   }
   return null;
+}
+
+function imageAspectMatchesSize(
+  measuredImage: { width: number; height: number } | null,
+  requestedSize: string,
+  tolerance = 0.03,
+): boolean {
+  if (!measuredImage) return true;
+  const match = requestedSize.match(/^(\d+)x(\d+)$/u);
+  if (!match) return true;
+  const expected = Number(match[1]) / Number(match[2]);
+  const actual = measuredImage.width / measuredImage.height;
+  return Number.isFinite(expected) && Number.isFinite(actual)
+    ? Math.abs(actual / expected - 1) <= tolerance
+    : true;
+}
+
+function correctedImageAspectPrompt(prompt: string, size: string): string {
+  return `${prompt}\n\n【画布比例纠正｜最高优先级】上一轮输出未遵守专属画布。最终图片像素画布必须严格使用 ${size} 的宽高比；不得沿用任何参考图的原始尺寸，不得返回 16:9 默认画布。所有面板必须完整位于该画布内。`;
 }
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
@@ -248,7 +284,7 @@ function imageRequestBody(body: ImageRequestBody, model: string, prompt: string,
   form.set('quality', quality);
   form.set('output_format', 'jpeg');
   form.set('output_compression', '88');
-  blobs.forEach((blob, index) => form.append('image[]', blob, `reference-${index + 1}.jpg`));
+  blobs.forEach((blob, index) => form.append('image', blob, `reference-${index + 1}.jpg`));
   if (blobs.length !== references.length) {
     throw new Error(`有 ${references.length - blobs.length} 张参考图读取失败，已停止生成。`);
   }
@@ -274,6 +310,12 @@ function upstreamMessage(status: number, raw: string): string {
   if (status === 401) return '图片模型鉴权失败，请检查服务器中的现有 API Key。';
   if (status === 403) return '当前 API Key 没有所选图片模型的访问权限。';
   if (status === 429) return '图片模型请求过于频繁或额度不足，请稍后重试。';
+  if (/无可用渠道|no available channel|no channel available/i.test(safe)) {
+    return 'Nano Banana 2 当前没有可用的上游通道，请稍后重试或手动切换到 image2。';
+  }
+  if (status === 524) {
+    return '图片模型处理超时：多张参考图或高质量超宽画幅耗时过长，请重试；系统会对多参考宫格使用标准质量。';
+  }
   if (status >= 500) return '图片模型服务暂时不可用，请稍后重试。';
   return `图片生成失败（HTTP ${status}）${safe ? `：${safe}` : '。'}`;
 }
@@ -336,29 +378,73 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     const apiKey = upstreamKey(model);
     const size = ALLOWED_SIZES.has(body.size ?? '') ? body.size as string : '1536x1536';
     const quality = body.quality === 'low' || body.quality === 'high' ? body.quality : 'medium';
-    const upstreamModel = resolveUpstreamImageModel(model);
-    const request = imageRequestBody(body, upstreamModel, prompt, size, quality);
-    const url = imageUpstreamUrl(request.edit);
-    if (!url || !apiKey) throw new Error('Image upstream env is missing.');
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${apiKey}`, ...request.headers },
-        body: request.body,
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(timer);
+    const upstreamModels = upstreamImageModelCandidates(model, size);
+    const needsAspectValidation = !/^(\d+)x\1$/u.test(size);
+    const attemptPlan = upstreamModels.flatMap((candidate) => [
+      { model: candidate, correctAspect: false },
+      ...(needsAspectValidation ? [{ model: candidate, correctAspect: true }] : []),
+    ]);
+    let upstreamModel = attemptPlan[0].model;
+    let request: ReturnType<typeof imageRequestBody> | undefined;
+    let response: Response | undefined;
+    let raw = '';
+    let aspectMismatch: { width: number; height: number } | null = null;
+    for (let index = 0; index < attemptPlan.length; index += 1) {
+      const attempt = attemptPlan[index];
+      upstreamModel = attempt.model;
+      const attemptPrompt = attempt.correctAspect ? correctedImageAspectPrompt(prompt, size) : prompt;
+      request = imageRequestBody(body, upstreamModel, attemptPrompt, size, quality);
+      const url = imageUpstreamUrl(request.edit);
+      if (!url || !apiKey) throw new Error('Image upstream env is missing.');
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+      try {
+        response = await fetch(url, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${apiKey}`, ...request.headers },
+          body: request.body,
+          signal: controller.signal,
+        });
+        raw = await response.text();
+      } finally {
+        clearTimeout(timer);
+      }
+      if (response.ok) {
+        const candidatePayload = JSON.parse(raw) as { data?: Array<{ b64_json?: string }> };
+        const candidateB64 = candidatePayload.data?.[0]?.b64_json?.trim() ?? '';
+        const candidateMeasured = candidateB64
+          ? measureImageBuffer(Buffer.from(candidateB64, 'base64'))
+          : null;
+        if (imageAspectMatchesSize(candidateMeasured, size)) {
+          aspectMismatch = null;
+          break;
+        }
+        aspectMismatch = candidateMeasured;
+        const hasCorrectionRetry = attemptPlan
+          .slice(index + 1)
+          .some((nextAttempt) => nextAttempt.model === upstreamModel && nextAttempt.correctAspect);
+        if (hasCorrectionRetry) continue;
+        break;
+      }
+      const nextDifferentModelIndex = attemptPlan
+        .slice(index + 1)
+        .findIndex((nextAttempt) => nextAttempt.model !== upstreamModel);
+      if (nextDifferentModelIndex < 0 || !shouldRetryImageUpstream(response.status, raw)) break;
+      index += nextDifferentModelIndex;
     }
-    const raw = await response.text();
+    if (!response || !request) throw new Error('Image upstream request was not created.');
     if (!response.ok) {
       const message = upstreamMessage(response.status, raw);
       await refundQuota(client, userId);
       await writeUsage(client, userId, body, model, prompt.length, 'failed', message);
       sendJson(res, response.status, { error: { message, upstreamStatus: response.status } });
+      return;
+    }
+    if (aspectMismatch) {
+      const message = `图片模型连续两次未按专属尺寸返回图片（实际 ${aspectMismatch.width}×${aspectMismatch.height}），已退款且拒绝保存错误比例结果。`;
+      await refundQuota(client, userId);
+      await writeUsage(client, userId, body, model, prompt.length, 'failed', message);
+      sendJson(res, 422, { error: { message, upstreamStatus: 422 } });
       return;
     }
     const payload = JSON.parse(raw) as { data?: Array<{ b64_json?: string }> };

@@ -29,6 +29,10 @@ import {
   TEXT_NODE_OUTPUT_HANDLE_ID,
 } from '@/utils/textNodeHandles';
 import { recoverInterruptedTextPolish } from '@/services/textPolishLifecycle';
+import {
+  STORYBOARD_TEXT_NORMALIZER_SKILL_NAME,
+  STORYBOARD_TEXT_NORMALIZER_SKILL_VERSION,
+} from '@/services/storyboardTextNormalizer';
 
 type TextRF = Node<StudioNodeData, 'textNode'>;
 
@@ -116,9 +120,13 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
     [edges, id, nodes],
   );
   const plainMode = data.text_view_mode === 'plain';
-  const polishMode = data.text_polish_mode === 'simple' ? 'simple' : 'deep';
+  const polishMode =
+    data.text_polish_mode === 'simple' || data.text_polish_mode === 'storyboard'
+      ? data.text_polish_mode
+      : 'deep';
   const imageTaskMode: TextImageTaskMode =
     data.text_image_task_mode === 'skill_analysis' ||
+    data.text_image_task_mode === 'normalize_storyboard' ||
     data.text_image_task_mode === 'continue_shot'
       ? data.text_image_task_mode
       : 'extract_shot';
@@ -253,7 +261,7 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
   }, []);
 
   const onPolishModeChange = useCallback(
-    (mode: 'simple' | 'deep') => {
+    (mode: 'simple' | 'deep' | 'storyboard') => {
       patchNodeData(id, { text_polish_mode: mode }, false);
     },
     [id, patchNodeData],
@@ -325,6 +333,29 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
     [busy],
   );
 
+  const onQuickAction = useCallback(
+    (
+      event: MouseEvent<HTMLButtonElement>,
+      action: 'write' | 'storyboard' | 'extract_shot' | 'skill_analysis',
+    ) => {
+      event.stopPropagation();
+      if (busy) return;
+      if (action === 'write') {
+        setIsEditing(true);
+        window.setTimeout(() => areaRef.current?.focus(), 0);
+        return;
+      }
+      if (action === 'storyboard') {
+        onPolishModeChange('storyboard');
+        setIsEditing(true);
+        window.setTimeout(() => areaRef.current?.focus(), 0);
+        return;
+      }
+      onImageTaskModeChange(action);
+    },
+    [busy, onImageTaskModeChange, onPolishModeChange],
+  );
+
   const onGenerate = useCallback(
     (event?: MouseEvent<HTMLButtonElement>) => {
       event?.stopPropagation();
@@ -370,7 +401,9 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
         id={TEXT_NODE_INPUT_HANDLE_ID}
         className="text-node__handle text-node__handle--in"
         title="Input：接入上游文本或部门资产；拖向空白可创建节点并连线"
-      />
+      >
+        <span aria-hidden>+</span>
+      </Handle>
       <header className="text-node__head">
         <span
           className="text-node__title nodrag nopan"
@@ -400,6 +433,12 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
               串联 {upstreamTextCount}
             </span>
           ) : null}
+        </span>
+        <span className="text-node__head-meta" aria-label={busy ? '正在生成' : selected ? '正在编辑' : hasText ? '已有文本' : '空白文本'}>
+          <span className={`text-node__status ${busy ? 'text-node__status--busy' : ''}`}>
+            {busy ? '生成中' : selected ? '编辑' : hasText ? '文本' : '空白'}
+          </span>
+          {hasText ? <span className="text-node__count">{displayText.trim().length} 字</span> : null}
         </span>
       </header>
       <section
@@ -433,6 +472,39 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
               <span />
               <span />
             </div>
+            {selected ? (
+              <div className="text-node__quick-start nodrag nopan">
+                <span className="text-node__quick-label">尝试：</span>
+                <button type="button" onClick={(event) => onQuickAction(event, 'write')}>
+                  <span className="text-node__quick-icon text-node__quick-icon--write" aria-hidden />
+                  <span>自己编写内容</span>
+                </button>
+                <button type="button" onClick={(event) => onQuickAction(event, 'storyboard')}>
+                  <span className="text-node__quick-icon text-node__quick-icon--storyboard" aria-hidden />
+                  <span>整理分镜规范</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={!hasImages || hasVideos}
+                  onClick={(event) => onQuickAction(event, 'extract_shot')}
+                  title={hasImages && !hasVideos ? '提取已连接图片中的分镜信息' : '连接图片节点后可用'}
+                >
+                  <span className="text-node__quick-icon text-node__quick-icon--image" aria-hidden />
+                  <span>提取图片分镜</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={!hasImages || hasVideos}
+                  onClick={(event) => onQuickAction(event, 'skill_analysis')}
+                  title={hasImages && !hasVideos ? '按分镜 Skill 分析已连接图片' : '连接图片节点后可用'}
+                >
+                  <span className="text-node__quick-icon text-node__quick-icon--skill" aria-hidden>✦</span>
+                  <span>分镜 Skill 分析</span>
+                </button>
+              </div>
+            ) : (
+              <span className="text-node__empty-hint">双击输入内容</span>
+            )}
           </div>
         )}
         {!plainMode ? (
@@ -455,6 +527,13 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
       ) : null}
       {selected ? (
         <div className="text-node__workspace nodrag nopan nowheel">
+          <div className="text-node__workspace-head">
+            <div>
+              <span>文本工作台</span>
+              <strong>{hasImages && !hasVideos ? '识别图片并整理文本' : '编写、整理与生成'}</strong>
+            </div>
+            <small>双击上方正文可直接修改</small>
+          </div>
           <div className="text-node__role-row">
             <span>文本用途</span>
             <select
@@ -534,6 +613,15 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
                 </button>
                 <button
                   type="button"
+                  className={imageTaskMode === 'normalize_storyboard' ? 'is-active' : ''}
+                  disabled={busy}
+                  onClick={() => onImageTaskModeChange('normalize_storyboard')}
+                  title="识别图片中的分镜表字段和画面事实，与当前文字交叉核对后按基础分镜规范整理；不续写剧情"
+                >
+                  识别并整理
+                </button>
+                <button
+                  type="button"
                   className={imageTaskMode === 'continue_shot' ? 'is-active' : ''}
                   disabled={busy}
                   onClick={() => onImageTaskModeChange('continue_shot')}
@@ -564,6 +652,11 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
                     ))}
                   </select>
                 </label>
+              ) : imageTaskMode === 'normalize_storyboard' ? (
+                <div className="text-node__image-skill" aria-label="当前整理 Skill">
+                  <span>整理 Skill</span>
+                  <strong>{STORYBOARD_TEXT_NORMALIZER_SKILL_NAME} v{STORYBOARD_TEXT_NORMALIZER_SKILL_VERSION}</strong>
+                </div>
               ) : null}
             </div>
           ) : null}
@@ -577,6 +670,8 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
               hasImages && !hasVideos
                 ? imageTaskMode === 'continue_shot'
                   ? '补充下一镜要发生的动作、情绪或镜头意图（可选）'
+                  : imageTaskMode === 'normalize_storyboard'
+                    ? '补充场次、命名规则或需要保留的字段（可选）'
                   : imageTaskMode === 'skill_analysis'
                     ? '补充分镜导演要求或需要重点分析的内容（可选）'
                     : '补充场景名称、人物身份或需要核对的信息（可选）'
@@ -590,6 +685,8 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
               <span className="text-node__image-task-summary">
                 {imageTaskMode === 'continue_shot'
                   ? '将推算下一镜'
+                  : imageTaskMode === 'normalize_storyboard'
+                    ? '识别图片 · 整理规范 · 不改剧情'
                   : imageTaskMode === 'skill_analysis'
                     ? '只分析当前画面 · 使用 Skill'
                     : '默认安全模式 · 不推算下一镜'}
@@ -614,6 +711,15 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
                 >
                   深度
                 </button>
+                <button
+                  type="button"
+                  className={`text-node__polish-mode-btn ${polishMode === 'storyboard' ? 'text-node__polish-mode-btn--active' : ''}`}
+                  disabled={busy}
+                  onClick={() => onPolishModeChange('storyboard')}
+                  title="分镜规范：不改剧情，统一术语、空间、动作、落点及镜头格式"
+                >
+                  分镜规范
+                </button>
               </div>
             )}
             <div className="text-node__workspace-actions">
@@ -636,7 +742,10 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
         position={Position.Right}
         className="text-node__handle text-node__handle--out"
         id={TEXT_NODE_OUTPUT_HANDLE_ID}
-      />
+        title="Output：拖向节点或空白处继续创建下游"
+      >
+        <span aria-hidden>+</span>
+      </Handle>
     </div>
   );
 }

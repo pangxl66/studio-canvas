@@ -69,6 +69,8 @@ export type PromptPipelineDeps = {
     sourceStoryboard: StoryboardOutput | null,
   ) => void;
   sanitizeEllipsis: (output: PromptOutput) => PromptOutput;
+  /** Disable every model regeneration pass for strict single-call skills. */
+  enableRepairPasses?: boolean;
 };
 
 type PromptPipelineInput = {
@@ -169,6 +171,7 @@ export async function repairPromptCompressionIfNeeded(
   draftOutput: PromptOutput,
   deps: PromptPipelineDeps,
 ): Promise<PromptOutput> {
+  if (deps.enableRepairPasses === false) return draftOutput;
   if (!deps.outputNeedsCompressionRepair(draftOutput)) return draftOutput;
 
   return deps.invokeWithStructureRepair({
@@ -212,6 +215,7 @@ export async function validateAndRepairPromptCoverage(
     deps.validateCoverage(output, input.sourceStoryboard);
     return output;
   } catch (error) {
+    if (deps.enableRepairPasses === false) throw error;
     if (!input.sourceStoryboard?.shots?.length) throw error;
 
     const failureReason = error instanceof Error ? error.message : String(error);

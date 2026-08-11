@@ -101,6 +101,7 @@ export function buildStoryboardSkillImageAnalysisUserPrompt(
 
 export function imageTaskLabel(mode: TextImageTaskMode): string {
   if (mode === 'skill_analysis') return '分镜 Skill 分析';
+  if (mode === 'normalize_storyboard') return '识别并整理分镜';
   if (mode === 'continue_shot') return '下一镜推算';
   return '提取当前分镜';
 }

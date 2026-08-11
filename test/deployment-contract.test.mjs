@@ -66,8 +66,10 @@ test('storyboard grid image generation is available in browser and both server t
   assert.match(filmStoryboardNode, /resolveStoryboardReferenceContext/);
   assert.match(filmStoryboardNode, /prepareStoryboardReferenceImages/);
   assert.match(client, /\/images\/edits/);
-  assert.match(read('api/images/generate.ts'), /image\[\]/);
-  assert.match(read('server/index.cjs'), /image\[\]/);
+  assert.match(read('api/images/generate.ts'), /form\.append\('image',/);
+  assert.match(read('server/index.cjs'), /form\.append\('image',/);
+  assert.doesNotMatch(read('api/images/generate.ts'), /image\[\]/);
+  assert.doesNotMatch(read('server/index.cjs'), /image\[\]/);
 });
 
 test('known vulnerable xlsx package is not part of the application', () => {
@@ -132,6 +134,15 @@ test('Vite development serves the same local API routes as the Node deployment',
   assert.doesNotMatch(viteConfig, /return 'vendor-pdf'/);
   assert.match(nodeServer, /if \(require\.main === module\)/);
   assert.match(nodeServer, /module\.exports = \{[\s\S]*?\broute\b[\s\S]*?\}/);
+});
+
+test('local proxy can reuse provider-specific browser credentials without falling back to a stale generic key', () => {
+  const nodeServer = read('server/index.cjs');
+  const envExample = read('.env.example');
+
+  assert.match(nodeServer, /env\(`VITE_\$\{prefix\}_\$\{name\}`\)/);
+  assert.match(nodeServer, /name === 'LLM_PROXY_URL' \? '' : env\(`VITE_\$\{name\}`\)/);
+  assert.match(envExample, /VITE_LLM_PROXY_URL=\/api\/llm\/chat/);
 });
 
 test('health endpoints verify Supabase reachability instead of env presence only', () => {

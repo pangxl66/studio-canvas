@@ -1,4 +1,9 @@
-import { getAuthSnapshot, isSaasAuthEnabled, isSaasMockEnabled } from '@/services/authClient';
+import {
+  getAuthSnapshot,
+  isLanDirectAccessEnabled,
+  isSaasAuthEnabled,
+  isSaasMockEnabled,
+} from '@/services/authClient';
 
 export const STUDIO_CREDIT_REFRESH_EVENT = 'studio-credit-refresh';
 
@@ -74,7 +79,7 @@ export async function fetchCreditStatus(): Promise<CreditStatus | null> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${session.access_token}`,
   };
-  if (mockEnabled && session.user?.email) {
+  if ((mockEnabled || isLanDirectAccessEnabled()) && session.user?.email) {
     headers['X-Studio-Mock-Email'] = session.user.email;
   }
 

@@ -119,6 +119,7 @@ function downstreamConnectionPicksForNode(node: StudioRFNode): ConnectionMenuPic
   if (node.type === 'imageNode') {
     return [
       'text_node',
+      'image_node',
       'storyboard',
       'prompt',
       'film_character_node',
@@ -168,6 +169,18 @@ export function connectionMenuPicksForPicker(
   nodes: StudioRFNode[],
 ): ConnectionMenuPick[] {
   if (!picker) return [];
+  const groupedIds = picker.fromNodeIds?.filter(Boolean) ?? [];
+  if (groupedIds.length > 1) {
+    const groupedNodes = groupedIds.flatMap((id) => {
+      const node = nodes.find((item) => item.id === id);
+      return node ? [node] : [];
+    });
+    if (groupedNodes.length !== groupedIds.length) return [];
+    const [first, ...rest] = groupedNodes.map((node) => downstreamConnectionPicksForNode(node));
+    return uniqueConnectionMenuPicks(
+      first.filter((pick) => rest.every((picks) => picks.includes(pick))),
+    );
+  }
   const node = nodes.find((item) => item.id === picker.fromNodeId);
   if (!node) return [];
 
@@ -294,7 +307,22 @@ export function isStudioConnectionAllowed(
   }
 
   if (a.type === 'imageNode' && b.type === 'imageNode') {
-    return false;
+    if (edge.sourceHandle != null && edge.sourceHandle !== IMAGE_NODE_OUTPUT_HANDLE_ID) return false;
+    if (edge.targetHandle != null && edge.targetHandle !== IMAGE_NODE_INPUT_HANDLE_ID) return false;
+    const pending = [b.id];
+    const visited = new Set<string>();
+    while (pending.length > 0) {
+      const current = pending.pop();
+      if (!current || visited.has(current)) continue;
+      if (current === a.id) return false;
+      visited.add(current);
+      pending.push(
+        ...edges
+          .filter((candidate) => candidate.source === current)
+          .map((candidate) => candidate.target),
+      );
+    }
+    return true;
   }
 
   if (a.type === 'imageNode' && b.type === 'department' && b.data.type === 'storyboard') {
@@ -427,7 +455,7 @@ export function isStudioConnectionAllowed(
   return false;
 }
 
-function preferredSourceHandleForNode(node: StudioRFNode): string | null {
+export function preferredSourceHandleForNode(node: StudioRFNode): string | null {
   if (node.type === 'textNode') return TEXT_NODE_OUTPUT_HANDLE_ID;
   if (node.type === 'department') return DEPT_OUTPUT_HANDLE_ID;
   if (node.type === 'promptReview') return DEPT_OUTPUT_HANDLE_ID;

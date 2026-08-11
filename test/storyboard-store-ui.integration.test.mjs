@@ -23,6 +23,7 @@ let normalizeRestoredStudioNode;
 let ShotListEmbeddedEditor;
 let buildMagnetConnection;
 let isStudioConnectionAllowed;
+let connectionMenuPicksForPicker;
 let makeShotListItemOutputHandleId;
 
 function sampleOutput(prefix = '初始', count = 2) {
@@ -103,7 +104,7 @@ before(async () => {
   ({ ShotListEmbeddedEditor } = await vite.ssrLoadModule(
     '/src/components/ShotListEmbeddedEditor.tsx',
   ));
-  ({ buildMagnetConnection, isStudioConnectionAllowed } = await vite.ssrLoadModule(
+  ({ buildMagnetConnection, connectionMenuPicksForPicker, isStudioConnectionAllowed } = await vite.ssrLoadModule(
     '/src/utils/studioConnectionRules.ts',
   ));
   ({ makeShotListItemOutputHandleId } = await vite.ssrLoadModule(
@@ -137,6 +138,112 @@ test('real store reuses one storyboard table instead of creating duplicate child
   );
   assert.equal(childNodes.length, 1);
   assert.equal(relationEdges.length, 1);
+});
+
+test('real store restores the structural storyboard-to-table edge after it is removed', () => {
+  const { storyboardId, shotListId } = createStoryboardWithTable();
+  const initialEdge = useStudioStore
+    .getState()
+    .edges.find((edge) => edge.source === storyboardId && edge.target === shotListId);
+  assert.ok(initialEdge);
+  assert.equal(initialEdge.sourceHandle, 'shot-list-link');
+  assert.equal(initialEdge.targetHandle, 'shot-list-parent');
+  assert.equal(initialEdge.deletable, false);
+  assert.equal(initialEdge.selectable, false);
+  assert.equal(initialEdge.style?.strokeDasharray, '6 4');
+
+  useStudioStore.getState().onEdgesChange([{ type: 'remove', id: initialEdge.id }]);
+
+  const restoredState = useStudioStore.getState();
+  const restoredEdge = restoredState.edges.find(
+    (edge) => edge.source === storyboardId && edge.target === shotListId,
+  );
+  assert.ok(restoredEdge);
+  assert.equal(restoredEdge.sourceHandle, 'shot-list-link');
+  assert.equal(restoredEdge.targetHandle, 'shot-list-parent');
+  assert.equal(restoredEdge.deletable, false);
+  assert.equal(restoredEdge.selectable, false);
+  assert.equal(restoredEdge.style?.strokeDasharray, '6 4');
+  assert.equal(
+    restoredState.nodes.find((node) => node.id === shotListId)?.data.sourceStoryboardNodeId,
+    storyboardId,
+  );
+});
+
+test('real store upgrades a legacy direct storyboard-table edge to the dashed structural edge', () => {
+  const { storyboardId, shotListId } = createStoryboardWithTable();
+  useStudioStore.setState((state) => ({
+    edges: state.edges.map((edge) =>
+      edge.source === storyboardId && edge.target === shotListId
+        ? {
+            ...edge,
+            sourceHandle: null,
+            targetHandle: null,
+            animated: false,
+            deletable: true,
+            selectable: true,
+            style: undefined,
+          }
+        : edge,
+    ),
+  }));
+
+  useStudioStore.getState().reconcileShotListGraphBindings();
+
+  const relationEdges = useStudioStore
+    .getState()
+    .edges.filter((edge) => edge.source === storyboardId && edge.target === shotListId);
+  assert.equal(relationEdges.length, 1);
+  assert.equal(relationEdges[0].sourceHandle, 'shot-list-link');
+  assert.equal(relationEdges[0].targetHandle, 'shot-list-parent');
+  assert.equal(relationEdges[0].animated, true);
+  assert.equal(relationEdges[0].deletable, false);
+  assert.equal(relationEdges[0].selectable, false);
+  assert.equal(relationEdges[0].style?.strokeDasharray, '6 4');
+});
+
+test('real store reclaims the matching detached table from projects saved after the old bug', () => {
+  const { storyboardId, shotListId } = createStoryboardWithTable();
+  useStudioStore.setState((state) => ({
+    nodes: state.nodes.map((node) =>
+      node.id === shotListId
+        ? {
+            ...node,
+            data: {
+              ...node.data,
+              sourceStoryboardNodeId: undefined,
+              sourceStoryboardFileNodeId: undefined,
+            },
+          }
+        : node,
+    ),
+    edges: state.edges.filter(
+      (edge) => !(edge.source === storyboardId && edge.target === shotListId),
+    ),
+  }));
+
+  const recoveredId = useStudioStore
+    .getState()
+    .ensureShotListForStoryboard(storyboardId);
+  assert.equal(recoveredId, shotListId);
+
+  const state = useStudioStore.getState();
+  assert.equal(
+    state.nodes.filter((node) => node.type === 'shotList').length,
+    1,
+  );
+  assert.equal(
+    state.nodes.find((node) => node.id === shotListId)?.data.sourceStoryboardNodeId,
+    storyboardId,
+  );
+  const relation = state.edges.find(
+    (edge) => edge.source === storyboardId && edge.target === shotListId,
+  );
+  assert.ok(relation);
+  assert.equal(relation.sourceHandle, 'shot-list-link');
+  assert.equal(relation.targetHandle, 'shot-list-parent');
+  assert.equal(relation.deletable, false);
+  assert.equal(relation.selectable, false);
 });
 
 test('real store keeps the storyboard table authoritative until an explicit regeneration sync', () => {
@@ -194,6 +301,34 @@ test('real persistence recovery removes interrupted storyboard runtime state', (
   assert.equal(recovered.data.generation_phase, undefined);
   assert.ok(!recovered.data.streaming_preview);
   assert.equal(recovered.data.ai_review_feedback, null);
+});
+
+test('real persistence recovery clears orphaned film storyboard drawing state', () => {
+  const recovered = normalizeRestoredStudioNode({
+    id: 'film_storyboard_restore',
+    type: 'aiFilmStoryboard',
+    position: { x: 0, y: 0 },
+    data: {
+      id: 'film_storyboard_restore',
+      type: 'film_storyboard_node',
+      department: 'AI_FILMMAKING',
+      status: 'APPROVED',
+      input: '',
+      output: { storyboardImages: [] },
+      imageGenerationStatus: 'generating',
+      imageGenerationPhase: 'requesting_model',
+      imageGenerationCompletedPages: 0,
+      imageGenerationTotalPages: 1,
+      version: 1,
+      label: '影视分镜图',
+    },
+  });
+  assert.equal(recovered.data.imageGenerationStatus, 'idle');
+  assert.equal(recovered.data.imageGenerationPhase, undefined);
+  assert.equal(recovered.data.imageGenerationCompletedPages, undefined);
+  assert.equal(recovered.data.imageGenerationTotalPages, undefined);
+  assert.equal(recovered.data.status, 'APPROVED');
+  assert.match(recovered.data.generation_error, /被中断/);
 });
 
 test('real UI rendering windows a large storyboard table instead of mounting every row', () => {
@@ -266,6 +401,73 @@ test('real connection rules resolve a shot-list fallback drag to the Prompt inpu
     targetHandle: 'in',
   });
   assert.equal(isStudioConnectionAllowed(connection, nodes, []), true);
+});
+
+test('multi-selection output exposes only common downstream choices', () => {
+  const nodes = [
+    {
+      id: 'image-a',
+      type: 'imageNode',
+      position: { x: 0, y: 0 },
+      data: { type: 'image_node', status: 'APPROVED' },
+    },
+    {
+      id: 'image-b',
+      type: 'imageNode',
+      position: { x: 0, y: 300 },
+      data: { type: 'image_node', status: 'APPROVED' },
+    },
+  ];
+  const picks = connectionMenuPicksForPicker(
+    {
+      fromNodeId: 'image-a',
+      fromNodeIds: ['image-a', 'image-b'],
+      fromHandleId: 'out',
+      fromHandleType: 'source',
+      screenX: 0,
+      screenY: 0,
+      flowX: 0,
+      flowY: 0,
+    },
+    nodes,
+  );
+
+  assert.ok(picks.includes('text_node'));
+  assert.ok(picks.includes('image_node'));
+  assert.ok(picks.includes('film_video_prompt_node'));
+  assert.equal(picks.includes('video_node'), false);
+});
+
+test('image nodes can feed an image edit node without allowing a cycle', () => {
+  const nodes = [
+    {
+      id: 'image-a',
+      type: 'imageNode',
+      position: { x: 0, y: 0 },
+      data: { type: 'image_node', status: 'APPROVED' },
+    },
+    {
+      id: 'image-b',
+      type: 'imageNode',
+      position: { x: 500, y: 0 },
+      data: { type: 'image_node', status: 'NOT_STARTED' },
+    },
+  ];
+  const forward = {
+    source: 'image-a',
+    target: 'image-b',
+    sourceHandle: 'out',
+    targetHandle: 'in',
+  };
+  assert.equal(isStudioConnectionAllowed(forward, nodes, []), true);
+  assert.equal(
+    isStudioConnectionAllowed(
+      { ...forward, source: 'image-b', target: 'image-a' },
+      nodes,
+      [{ id: 'edge-a-b', ...forward }],
+    ),
+    false,
+  );
 });
 
 test('real regenerate action backs up manual edits and starts without a native confirm', async () => {

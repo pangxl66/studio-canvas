@@ -45,7 +45,11 @@ const BUILTIN_IMAGE_MODELS = new Set([
 const UPSTREAM_IMAGE_MODEL_ALIASES = new Map([
   ['image2', 'gpt-image-2'],
 ]);
+const UPSTREAM_IMAGE_MODEL_FALLBACKS = new Map([
+  ['gemini-3.1-flash-image', ['gemini-3.1-flash-image-preview']],
+]);
 const TEST_INVITE_TOKEN_PREFIX = 'test-invite';
+const LAN_DIRECT_ACCESS_TOKEN = 'lan-direct-access-token';
 const testInviteActivationPath = path.join(rootDir, '.data', 'test-invite-activations.json');
 const testInviteCodesPath = path.join(rootDir, '.data', 'test-invite-codes.json');
 const testInviteUsagePath = path.join(rootDir, '.data', 'test-invite-usage-events.json');
@@ -530,14 +534,18 @@ function envForProvider(provider, name) {
   if (prefix) {
     const providerValue = env(`${prefix}_${name}`);
     if (providerValue) return providerValue;
+    const browserProviderValue = name === 'LLM_PROXY_URL' ? '' : env(`VITE_${prefix}_${name}`);
+    if (browserProviderValue) return browserProviderValue;
   }
-  return env(name);
+  return env(name) || (name === 'LLM_PROXY_URL' ? '' : env(`VITE_${name}`));
 }
 
 function explicitEnvForProvider(provider, name) {
   const prefix = providerEnvPrefix(provider);
-  if (prefix) return env(`${prefix}_${name}`);
-  return env(name);
+  if (prefix) {
+    return env(`${prefix}_${name}`) || (name === 'LLM_PROXY_URL' ? '' : env(`VITE_${prefix}_${name}`));
+  }
+  return env(name) || (name === 'LLM_PROXY_URL' ? '' : env(`VITE_${name}`));
 }
 
 function defaultModelForProvider(provider) {
@@ -614,8 +622,16 @@ function modelAttemptPlan(provider, primaryModel) {
   return isPrimaryModelCoolingDown(provider, primaryModel) ? fallbacks : [primaryModel, ...fallbacks];
 }
 
-function shouldRetrySameProviderFallback(status) {
-  return status === 429 || status >= 500;
+function isModelAccessUnavailable(status, raw = '') {
+  if (status !== 400 && status !== 403 && status !== 404) return false;
+  const text = extractUpstreamErrorText(raw).toLowerCase();
+  return /no active subscription found for this group|no available channel|no channel available|model.*(?:not found|does not exist|unavailable|not available|unsupported|permission|access)|(?:permission|access).*(?:model|subscription)|group.*(?:subscription|model)|(?:current|this).*(?:key|group).*(?:model|subscription)|(?:模型|渠道).*(?:无权|权限|未开通|不可用|不存在)/i.test(
+    text,
+  );
+}
+
+function shouldRetrySameProviderFallback(status, raw = '') {
+  return status === 429 || status >= 500 || isModelAccessUnavailable(status, raw);
 }
 
 function hasProviderLlmApiKey(provider) {
@@ -815,6 +831,12 @@ function classifyUpstreamError(status, raw) {
   }
   if (/model.*not found|unknown model|model.*does not exist|invalid model|模型.*不存在|模型.*无效/.test(lower)) {
     return '模型名称不可用：当前配置的模型不存在或账号未开通，请检查 LLM_MODEL。';
+  }
+  if (/无可用渠道|no available channel|no channel available/.test(lower)) {
+    return 'Nano Banana 2 当前没有可用的上游通道，请稍后重试或手动切换到 image2。';
+  }
+  if (status === 524) {
+    return '图片模型处理超时：多张参考图或高质量超宽画幅耗时过长，请重试；系统会对多参考宫格使用标准质量。';
   }
   if (
     /context.?length|maximum context|max tokens|too many tokens|token.*exceed|context_length_exceeded|上下文|输入过长/.test(
@@ -1038,6 +1060,34 @@ function isTruthyEnv(value) {
   return /^(1|true|yes|on)$/i.test(String(value || '').trim());
 }
 
+function isPrivateNetworkAddress(value) {
+  const normalized = String(value || '').trim().replace(/^\[|\]$/g, '').toLowerCase();
+  const address = normalized.startsWith('::ffff:') ? normalized.slice(7) : normalized;
+  const ipv4 = address.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const octets = ipv4.slice(1).map(Number);
+    if (octets.some((octet) => octet < 0 || octet > 255)) return false;
+    return octets[0] === 10
+      || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31)
+      || (octets[0] === 192 && octets[1] === 168)
+      || (octets[0] === 169 && octets[1] === 254);
+  }
+  return /^(?:fc|fd)[0-9a-f]{2}:/i.test(address) || /^fe[89ab][0-9a-f]:/i.test(address);
+}
+
+function requestHostname(req) {
+  const rawHost = Array.isArray(req.headers?.host) ? req.headers.host[0] : req.headers?.host;
+  const host = String(rawHost || '').trim();
+  if (host.startsWith('[')) return host.slice(1, host.indexOf(']'));
+  return host.split(':', 1)[0];
+}
+
+function isLanDirectRequest(req) {
+  const enabled = isTruthyEnv(env('LAN_DIRECT_ACCESS')) || isTruthyEnv(env('VITE_LAN_DIRECT_ACCESS'));
+  if (!enabled) return false;
+  return isPrivateNetworkAddress(req.socket?.remoteAddress) && isPrivateNetworkAddress(requestHostname(req));
+}
+
 function isLocalMockAuthEnabled() {
   return isTruthyEnv(env('SAAS_MOCK')) || isTruthyEnv(env('VITE_SAAS_MOCK'));
 }
@@ -1090,6 +1140,35 @@ async function getAuthedContext(req) {
         user_metadata: { testInvite: true },
       },
       userId: testInvite.id,
+    };
+  }
+  if (token === LAN_DIRECT_ACCESS_TOKEN && isLanDirectRequest(req)) {
+    const headerEmail = Array.isArray(req.headers['x-studio-mock-email'])
+      ? req.headers['x-studio-mock-email'][0]
+      : req.headers['x-studio-mock-email'];
+    const requestedEmail = normalizeEmail(headerEmail);
+    const remoteAddress = String(req.socket?.remoteAddress || 'lan-client');
+    const fallbackId = crypto.createHash('sha256').update(remoteAddress).digest('hex').slice(0, 16);
+    const email = /^lan-[a-z0-9-]{8,64}@studio-canvas\.local$/i.test(requestedEmail)
+      ? requestedEmail
+      : `lan-${fallbackId}@studio-canvas.local`;
+    const now = new Date().toISOString();
+    const userId = `lan:${crypto.createHash('sha256').update(email).digest('hex').slice(0, 16)}`;
+    return {
+      isLanDirect: true,
+      isTestInvite: true,
+      serviceClient: null,
+      user: {
+        app_metadata: { provider: 'lan-direct' },
+        aud: 'authenticated',
+        created_at: now,
+        email,
+        id: userId,
+        role: 'authenticated',
+        updated_at: now,
+        user_metadata: { lanDirect: true },
+      },
+      userId,
     };
   }
   if (isLocalMockAuthEnabled() && token === 'mock-access-token') {
@@ -1624,6 +1703,7 @@ async function callUpstream(body, provider = '', modelOverride = '') {
 async function callUpstreamWithModelFallback(body, provider, primaryModel) {
   const attempts = modelAttemptPlan(provider, primaryModel);
   let lastError = null;
+  let retriedPrimaryModelAccess = false;
   for (let index = 0; index < attempts.length; index += 1) {
     const attemptModel = attempts[index];
     try {
@@ -1633,11 +1713,31 @@ async function callUpstreamWithModelFallback(body, provider, primaryModel) {
         return { response, model: attemptModel, failedText: '' };
       }
       const hasNext = index < attempts.length - 1;
-      if (!hasNext || !shouldRetrySameProviderFallback(response.status)) {
+      const failedText = await response.clone().text();
+      const modelAccessUnavailable = isModelAccessUnavailable(response.status, failedText);
+      if (attemptModel === primaryModel && modelAccessUnavailable && !retriedPrimaryModelAccess) {
+        retriedPrimaryModelAccess = true;
+        console.warn(
+          'LLM primary model access unavailable, retrying primary model once',
+          JSON.stringify({
+            status: response.status,
+            model: attemptModel,
+            provider: provider || null,
+            feature: String(body.feature || '').trim() || 'llm-chat',
+            body: sanitizeError(failedText),
+          }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 450));
+        index -= 1;
+        continue;
+      }
+      if (!hasNext) {
         return { response, model: attemptModel, failedText: '' };
       }
-      const failedText = await response.text();
-      if (attemptModel === primaryModel) recordPrimaryModelFailure(provider, primaryModel);
+      if (!shouldRetrySameProviderFallback(response.status, failedText)) {
+        return { response, model: attemptModel, failedText: '' };
+      }
+      if (attemptModel === primaryModel && !modelAccessUnavailable) recordPrimaryModelFailure(provider, primaryModel);
       console.warn(
         'LLM primary model failed, retrying same-provider fallback',
         JSON.stringify({
@@ -1669,10 +1769,10 @@ async function callUpstreamWithModelFallback(body, provider, primaryModel) {
   throw lastError || new Error('LLM fallback failed.');
 }
 
-function shouldRetryTextRequestWithDeepseek(status, body, provider = '') {
+function shouldRetryTextRequestWithDeepseek(status, body, provider = '', raw = '') {
   if (provider !== 'gpt') return false;
   if (requestNeedsVision(body)) return false;
-  if (status !== 429 && status < 500) return false;
+  if (!shouldRetrySameProviderFallback(status, raw)) return false;
   return hasExplicitProviderLlmUpstream('deepseek') && hasExplicitProviderLlmApiKey('deepseek');
 }
 
@@ -1852,6 +1952,7 @@ async function handleHealth(req, res) {
       },
       auth: {
         mode: supabaseConfigured ? 'supabase' : testInviteEnabled ? 'test-invite' : 'unconfigured',
+        lanDirectAccess: isTruthyEnv(env('LAN_DIRECT_ACCESS')) || isTruthyEnv(env('VITE_LAN_DIRECT_ACCESS')),
         supabase: {
           ...supabase,
           ...supabaseHealth,
@@ -3061,8 +3162,14 @@ async function handleLlmChat(req, res) {
     let responseProvider = provider;
     let responseModel = firstAttempt.model;
     let failedText = firstAttempt.failedText;
-    if (!upstreamResponse.ok && shouldRetryTextRequestWithDeepseek(upstreamResponse.status, body, provider)) {
-      failedText = await upstreamResponse.text();
+    const firstFailureText = !upstreamResponse.ok
+      ? failedText || (await upstreamResponse.clone().text())
+      : '';
+    if (
+      !upstreamResponse.ok
+      && shouldRetryTextRequestWithDeepseek(upstreamResponse.status, body, provider, firstFailureText)
+    ) {
+      failedText = firstFailureText;
       const fallbackBody = buildDeepseekFallbackBody(body);
       const fallbackModel = normalizeModel(undefined, feature, 'deepseek');
       console.warn(
@@ -3270,7 +3377,7 @@ function createImageUpstreamRequest(body, model, prompt, size, quality) {
   form.set('output_format', 'jpeg');
   form.set('output_compression', '88');
   parsed.forEach((reference, index) => {
-    form.append('image[]', new Blob([reference.buffer], { type: reference.mimeType }), `reference-${index + 1}.jpg`);
+    form.append('image', new Blob([reference.buffer], { type: reference.mimeType }), `reference-${index + 1}.jpg`);
   });
   if (parsed.length !== references.length) {
     throw new Error(`有 ${references.length - parsed.length} 张参考图读取失败，已停止生成。`);
@@ -3293,6 +3400,20 @@ function resolveRequestedImageModel(value) {
 
 function resolveUpstreamImageModel(model) {
   return UPSTREAM_IMAGE_MODEL_ALIASES.get(String(model || '').trim()) || model;
+}
+
+function upstreamImageModelCandidates(model, size = '1024x1024') {
+  const primary = resolveUpstreamImageModel(model);
+  const preservesRequestedAspect = /^(\d+)x\1$/u.test(String(size || ''));
+  const fallbacks = preservesRequestedAspect ? (UPSTREAM_IMAGE_MODEL_FALLBACKS.get(primary) || []) : [];
+  return [primary, ...fallbacks]
+    .filter((candidate, index, candidates) => candidate && candidates.indexOf(candidate) === index);
+}
+
+function shouldRetryImageUpstream(status, raw) {
+  if (status < 500) return false;
+  const text = extractUpstreamErrorText(raw).toLowerCase();
+  return status === 503 || /无可用渠道|no available channel|no channel available|temporarily unavailable/.test(text);
 }
 
 function measureImageBuffer(buffer) {
@@ -3332,6 +3453,21 @@ function measureImageBuffer(buffer) {
     offset += segmentLength + 2;
   }
   return null;
+}
+
+function imageAspectMatchesSize(measuredImage, requestedSize, tolerance = 0.03) {
+  if (!measuredImage) return true;
+  const match = String(requestedSize || '').match(/^(\d+)x(\d+)$/u);
+  if (!match) return true;
+  const expected = Number(match[1]) / Number(match[2]);
+  const actual = measuredImage.width / measuredImage.height;
+  return Number.isFinite(expected) && Number.isFinite(actual)
+    ? Math.abs(actual / expected - 1) <= tolerance
+    : true;
+}
+
+function correctedImageAspectPrompt(prompt, size) {
+  return `${prompt}\n\n【画布比例纠正｜最高优先级】上一轮输出未遵守专属画布。最终图片像素画布必须严格使用 ${size} 的宽高比；不得沿用任何参考图的原始尺寸，不得返回 16:9 默认画布。所有面板必须完整位于该画布内。`;
 }
 
 async function handleImageGenerate(req, res) {
@@ -3426,25 +3562,61 @@ async function handleImageGenerate(req, res) {
     ]);
     const size = allowedSizes.has(String(body.size || '')) ? String(body.size) : '1536x1536';
     const quality = body.quality === 'low' || body.quality === 'high' ? body.quality : 'medium';
-    const upstreamModel = resolveUpstreamImageModel(model);
-    const request = createImageUpstreamRequest(body, upstreamModel, prompt, size, quality);
-    const upstreamUrl = getImageUpstreamUrl(request.edit);
-    if (!upstreamUrl || !apiKey) throw new Error('Image upstream env is missing.');
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+    const upstreamModels = upstreamImageModelCandidates(model, size);
+    const needsAspectValidation = !/^(\d+)x\1$/u.test(size);
+    const attemptPlan = upstreamModels.flatMap((candidate) => [
+      { model: candidate, correctAspect: false },
+      ...(needsAspectValidation ? [{ model: candidate, correctAspect: true }] : []),
+    ]);
+    let upstreamModel = attemptPlan[0].model;
+    let request;
     let upstreamResponse;
-    try {
-      upstreamResponse = await fetch(upstreamUrl, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${apiKey}`, ...request.headers },
-        body: request.body,
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(timer);
+    let raw = '';
+    let aspectMismatch = null;
+    for (let index = 0; index < attemptPlan.length; index += 1) {
+      const attempt = attemptPlan[index];
+      upstreamModel = attempt.model;
+      const attemptPrompt = attempt.correctAspect ? correctedImageAspectPrompt(prompt, size) : prompt;
+      request = createImageUpstreamRequest(body, upstreamModel, attemptPrompt, size, quality);
+      const upstreamUrl = getImageUpstreamUrl(request.edit);
+      if (!upstreamUrl || !apiKey) throw new Error('Image upstream env is missing.');
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+      try {
+        upstreamResponse = await fetch(upstreamUrl, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${apiKey}`, ...request.headers },
+          body: request.body,
+          signal: controller.signal,
+        });
+        raw = await upstreamResponse.text();
+      } finally {
+        clearTimeout(timer);
+      }
+      if (upstreamResponse.ok) {
+        const candidatePayload = JSON.parse(raw);
+        const candidateB64 = String(candidatePayload?.data?.[0]?.b64_json || '').trim();
+        const candidateMeasured = candidateB64
+          ? measureImageBuffer(Buffer.from(candidateB64, 'base64'))
+          : null;
+        if (imageAspectMatchesSize(candidateMeasured, size)) {
+          aspectMismatch = null;
+          break;
+        }
+        aspectMismatch = candidateMeasured;
+        const hasCorrectionRetry = attemptPlan
+          .slice(index + 1)
+          .some((nextAttempt) => nextAttempt.model === upstreamModel && nextAttempt.correctAspect);
+        if (hasCorrectionRetry) continue;
+        break;
+      }
+      const nextDifferentModelIndex = attemptPlan
+        .slice(index + 1)
+        .findIndex((nextAttempt) => nextAttempt.model !== upstreamModel);
+      if (nextDifferentModelIndex < 0 || !shouldRetryImageUpstream(upstreamResponse.status, raw)) break;
+      index += nextDifferentModelIndex;
     }
-
-    const raw = await upstreamResponse.text();
+    if (!upstreamResponse || !request) throw new Error('Image upstream request was not created.');
     if (!upstreamResponse.ok) {
       const message = classifyUpstreamError(upstreamResponse.status, raw);
       await refundReservedQuota();
@@ -3463,6 +3635,25 @@ async function handleImageGenerate(req, res) {
       sendJson(res, upstreamResponse.status, {
         error: { message, upstreamStatus: upstreamResponse.status },
       });
+      return;
+    }
+
+    if (aspectMismatch) {
+      const message = `图片模型连续两次未按专属尺寸返回图片（实际 ${aspectMismatch.width}×${aspectMismatch.height}），已退款且拒绝保存错误比例结果。`;
+      await refundReservedQuota();
+      await recordUsage({
+        user_id: auth.userId,
+        project_id: body.projectId || null,
+        feature: 'storyboard-grid-image',
+        model,
+        input_chars: inChars,
+        output_chars: 0,
+        estimated_tokens: estimateTokens(inChars, 0),
+        quota_cost: 0,
+        status: 'failed',
+        error_message: message,
+      });
+      sendJson(res, 422, { error: { message, upstreamStatus: 422 } });
       return;
     }
 
@@ -3957,8 +4148,15 @@ module.exports = {
   route,
   __test: {
     describeSupabaseFailure,
+    isLanDirectRequest,
+    isPrivateNetworkAddress,
+    imageAspectMatchesSize,
+    isModelAccessUnavailable,
     measureImageBuffer,
     probeSupabaseHealth,
     resolveUpstreamImageModel,
+    upstreamImageModelCandidates,
+    shouldRetryImageUpstream,
+    shouldRetrySameProviderFallback,
   },
 };

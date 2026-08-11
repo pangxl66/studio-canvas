@@ -1,5 +1,10 @@
 import { safeJsonParse } from '@/services/safeJsonParse';
-import { getAuthSnapshot, isSaasAuthEnabled, isSaasMockEnabled } from '@/services/authClient';
+import {
+  getAuthSnapshot,
+  isLanDirectAccessEnabled,
+  isSaasAuthEnabled,
+  isSaasMockEnabled,
+} from '@/services/authClient';
 import { requestCreditRefresh, spendMockCredit } from '@/services/creditService';
 
 export type ModelGatewayConfig = {
@@ -24,7 +29,10 @@ export type RequestLLMParams = {
 };
 
 export type RequestLLMWithImageParams = RequestLLMParams & {
-  imageDataUrl: string;
+  /** 单图兼容入口。传入 imageDataUrls 时可省略。 */
+  imageDataUrl?: string;
+  /** 多张视觉参考，按数组顺序发送给模型。 */
+  imageDataUrls?: string[];
   imageDetail?: 'auto' | 'low' | 'high';
 };
 
@@ -151,7 +159,7 @@ async function getGatewayRequestHeadersForFetch(config: ModelGatewayConfig): Pro
     if (session?.access_token) {
       headers.Authorization = `Bearer ${session.access_token}`;
     }
-    if (isSaasMockEnabled() && session?.user?.email) {
+    if ((isSaasMockEnabled() || isLanDirectAccessEnabled()) && session?.user?.email) {
       headers['X-Studio-Mock-Email'] = session.user.email;
     }
   }
@@ -297,7 +305,7 @@ function shouldRetryGatewayError(error: RequestLLMError): boolean {
   if (error.code === 'NETWORK' || error.code === 'TIMEOUT') return true;
   if (error.code === 'STREAM_ERROR') return isRetryableMessage(error.message);
   if (error.code === 'EMPTY_STREAM' || error.code === 'NO_BODY') return true;
-  if (/^HTTP_5\d{2}$/.test(error.code) || error.code === 'HTTP_429') return true;
+  if (/^HTTP_5\d{2}$/.test(error.code) || error.code === 'HTTP_429' || error.code === 'HTTP_403') return true;
   return false;
 }
 
@@ -762,6 +770,21 @@ async function requestLLMWithImageOnce(
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const url = getGatewayRequestUrl(config);
   const imageProvider = config.provider === 'deepseek' ? 'gpt' : config.provider;
+  const imageDataUrls = [
+    ...(params.imageDataUrls ?? []),
+    ...(params.imageDataUrl ? [params.imageDataUrl] : []),
+  ].filter((url, index, list) => Boolean(url) && list.indexOf(url) === index);
+
+  if (!imageDataUrls.length) {
+    return {
+      ok: false,
+      error: {
+        code: 'MISSING_IMAGE',
+        message: '视觉模型请求缺少可读取的图片。',
+        retried: false,
+      },
+    };
+  }
 
   const body: Record<string, unknown> = {
     model,
@@ -772,13 +795,13 @@ async function requestLLMWithImageOnce(
         role: 'user',
         content: [
           { type: 'text', text: params.userPrompt },
-          {
+          ...imageDataUrls.map((url) => ({
             type: 'image_url',
             image_url: {
-              url: params.imageDataUrl,
+              url,
               ...(params.imageDetail ? { detail: params.imageDetail } : {}),
             },
-          },
+          })),
         ],
       },
     ],

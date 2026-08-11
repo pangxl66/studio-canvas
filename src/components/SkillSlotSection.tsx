@@ -1,7 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  DEFAULT_PROMPT_STYLE_SKILL_ID,
   getFixedSkillIdsForPipelineKind,
   getSkillById,
   isPromptStyleSkillId,
@@ -9,6 +8,7 @@ import {
   normalizeMountedSkillIdsForKind,
   skillToDownloadPayload,
 } from '@/services/skillLoader';
+import { useStudioStore } from '@/store/useStudioStore';
 import type { SkillFileRecord } from '@/types/skill';
 import type { StudioNodeData } from '@/types/studio';
 
@@ -45,7 +45,16 @@ export function SkillSlotSection(props: {
 }) {
   const { nodeId, kind, mounted, patchNodeData, compact = false } = props;
   const [open, setOpen] = useState(false);
+  const projectSettings = useStudioStore((state) => state.projectSettings);
+  const nodeSkillSource = useStudioStore(
+    (state) => state.nodes.find((node) => node.id === nodeId)?.data.skill_source,
+  );
   const isPromptKind = kind === 'prompt';
+  const projectDefaultSkillId = isPromptKind
+    ? projectSettings.defaultSkills.promptSkillId
+    : kind === 'storyboard'
+      ? projectSettings.defaultSkills.storyboardSkillId
+      : undefined;
   const catalog = useMemo(() => listSkillsForPipelineKind(kind), [kind]);
   const fixedIds = useMemo(() => getFixedSkillIdsForPipelineKind(kind), [kind]);
   const fixedSet = useMemo(() => new Set(fixedIds), [fixedIds]);
@@ -57,6 +66,11 @@ export function SkillSlotSection(props: {
     () => (isPromptKind ? normalizedMounted.find(isPromptStyleSkillId) : undefined),
     [isPromptKind, normalizedMounted],
   );
+  const activePrimarySkillId = isPromptKind
+    ? activePromptStyleId
+    : kind === 'storyboard'
+      ? normalizedMounted[0]
+      : undefined;
   const enhancementIds = useMemo(
     () => (isPromptKind ? normalizedMounted.filter((id) => !isPromptStyleSkillId(id)) : normalizedMounted),
     [isPromptKind, normalizedMounted],
@@ -64,10 +78,43 @@ export function SkillSlotSection(props: {
 
   const setMounted = useCallback(
     (next: string[]) => {
-      patchNodeData(nodeId, { mounted_skills: normalizeMountedSkillIdsForKind(kind, next) }, false);
+      const normalized = normalizeMountedSkillIdsForKind(kind, next);
+      const primary = isPromptKind
+        ? normalized.find(isPromptStyleSkillId)
+        : kind === 'storyboard'
+          ? normalized[0]
+          : undefined;
+      patchNodeData(
+        nodeId,
+        {
+          mounted_skills: normalized,
+          ...(kind === 'storyboard' || kind === 'prompt'
+            ? { skill_source: primary === projectDefaultSkillId ? 'project' : 'node' }
+            : {}),
+        },
+        false,
+      );
     },
-    [kind, nodeId, patchNodeData],
+    [isPromptKind, kind, nodeId, patchNodeData, projectDefaultSkillId],
   );
+
+  const restoreProjectDefault = useCallback(() => {
+    if (!projectDefaultSkillId) return;
+    const enhancements = isPromptKind
+      ? normalizedMounted.filter((id) => !isPromptStyleSkillId(id))
+      : [];
+    patchNodeData(
+      nodeId,
+      {
+        mounted_skills: normalizeMountedSkillIdsForKind(kind, [
+          projectDefaultSkillId,
+          ...enhancements,
+        ]),
+        skill_source: 'project',
+      },
+      false,
+    );
+  }, [isPromptKind, kind, nodeId, normalizedMounted, patchNodeData, projectDefaultSkillId]);
 
   const mount = useCallback(
     (id: string) => {
@@ -100,14 +147,15 @@ export function SkillSlotSection(props: {
 
   const renderChip = (id: string, options?: { styleSlot?: boolean }) => {
     const fixed = fixedSet.has(id);
-    const isDefaultPromptStyle = isPromptKind && id === DEFAULT_PROMPT_STYLE_SKILL_ID;
-    const disabled = fixed || isDefaultPromptStyle;
+    const isProjectDefault =
+      (isPromptKind || kind === 'storyboard') && id === projectDefaultSkillId;
+    const disabled = fixed || isProjectDefault;
     const chipClass = options?.styleSlot ? 'skill-slot__chip skill-slot__chip--style' : 'skill-slot__chip';
-    const actionLabel = fixed ? '固定' : isDefaultPromptStyle ? '默认' : options?.styleSlot ? '恢复默认' : '卸下';
+    const actionLabel = fixed ? '固定' : isProjectDefault ? '默认' : options?.styleSlot ? '恢复默认' : '卸下';
     const title = fixed
       ? '这是固定技能，不能卸下'
-      : isDefaultPromptStyle
-        ? '这是 Prompt 节点默认规范槽'
+      : isProjectDefault
+        ? '这是当前项目的默认 Skill'
         : options?.styleSlot
           ? '移除此规范后会恢复默认规范'
           : '卸下技能';
@@ -124,7 +172,7 @@ export function SkillSlotSection(props: {
           className="skill-slot__chip-remove"
           disabled={disabled}
           title={title}
-          onClick={() => unmount(id)}
+          onClick={() => (options?.styleSlot ? restoreProjectDefault() : unmount(id))}
         >
           {actionLabel}
         </button>
@@ -176,6 +224,29 @@ export function SkillSlotSection(props: {
           {normalizedMounted.map((id) => renderChip(id))}
         </ul>
       )}
+
+      {(kind === 'storyboard' || kind === 'prompt') && activePrimarySkillId ? (
+        <p className="detail-panel__tip skill-slot__execution-source">
+          生成采用当前节点 Skill：{skillDisplayLabel(activePrimarySkillId, true)}
+          {nodeSkillSource === 'project' ? '（项目默认）' : '（节点自定义）'}
+        </p>
+      ) : null}
+
+      {(kind === 'storyboard' || kind === 'prompt') && projectDefaultSkillId ? (
+        <button
+          type="button"
+          className="detail-panel__secondary skill-slot__follow-project"
+          disabled={
+            nodeSkillSource === 'project'
+            && (isPromptKind
+              ? activePromptStyleId === projectDefaultSkillId
+              : normalizedMounted[0] === projectDefaultSkillId)
+          }
+          onClick={restoreProjectDefault}
+        >
+          跟随项目默认
+        </button>
+      ) : null}
 
       <button type="button" className="detail-panel__secondary skill-slot__open" onClick={() => setOpen(true)}>
         {isPromptKind ? '选择规范 / 挂载增强…' : '选择 / 下载技能…'}

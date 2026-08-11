@@ -42,7 +42,7 @@ test('structured writing payload is counted even when reference context follows 
   );
 });
 
-test('storyboard output cannot claim more than one sceneRef', () => {
+test('scene-scope diagnostics can detect multiple sceneRef values', () => {
   const baseShot = {
     id: 1,
     type: '中景',
@@ -72,12 +72,29 @@ test('storyboard output cannot claim more than one sceneRef', () => {
   );
 });
 
-test('storyboard employee phase rejects multiple input scenes before model execution', () => {
-  const source = readFileSync(
+test('storyboard generation accepts multiple scenes and preserves scene boundaries', () => {
+  const executionSource = readFileSync(
     new URL('../src/services/agents/executeTask.ts', import.meta.url),
     'utf8',
   );
-  assert.match(source, /storyboardSourceSceneCount > 1/);
-  assert.match(source, /本次未调用分镜模型，也未消耗分镜生成额度/);
-  assert.match(source, /hasMultipleStoryboardOutputScenes/);
+  const promptSource = readFileSync(
+    new URL('../src/agents/storyboardAgents.ts', import.meta.url),
+    'utf8',
+  );
+  const systemSource = readFileSync(
+    new URL('../src/agents/storyboardDeptSpec.ts', import.meta.url),
+    'utf8',
+  );
+  const detailPanelSource = readFileSync(
+    new URL('../src/components/DetailPanel.tsx', import.meta.url),
+    'utf8',
+  );
+
+  assert.doesNotMatch(executionSource, /storyboardSourceSceneCount > 1/);
+  assert.doesNotMatch(executionSource, /hasMultipleStoryboardOutputScenes/);
+  assert.match(promptSource, /必须覆盖输入中的全部场次/);
+  assert.match(promptSource, /场次切换时 sceneRef 同步切换/);
+  assert.match(systemSource, /严格保持原始顺序和场次边界/);
+  assert.match(detailPanelSource, /将按原始顺序连续生成/);
+  assert.doesNotMatch(detailPanelSource, /storyboardInputSceneCount > 1 \|\|/);
 });

@@ -1,3 +1,5 @@
+import type { ProjectAspectRatio } from '@/types/studio';
+
 export const STORYBOARD_GRID_MAX_PANELS = 9;
 
 const GRID_NAMES = [
@@ -18,7 +20,7 @@ export function storyboardGridName(panelCount: number): string {
   return GRID_NAMES[normalized] ?? `${normalized} 格`;
 }
 
-export function storyboardGridLayout(panelCount: number, aspectRatio?: '16:9' | '9:16'): string {
+export function storyboardGridLayout(panelCount: number, aspectRatio?: ProjectAspectRatio): string {
   if (panelCount === 1) return '单幅画面铺满主体区域，不绘制宫格分隔线';
   if (panelCount === 2) return '一行两列，两个面板等大';
   if (panelCount === 3) return '一行三列，三个面板等大';
@@ -38,9 +40,10 @@ export function storyboardGridLayout(panelCount: number, aspectRatio?: '16:9' | 
  */
 export function storyboardGridCanvasSize(
   panelCount: number,
-  aspectRatio: '16:9' | '9:16',
+  aspectRatio: ProjectAspectRatio,
 ): '1536x864' | '864x1536' | '1536x576' | '576x1536' {
   if (panelCount === 6) return aspectRatio === '9:16' ? '576x1536' : '1536x576';
+  if (aspectRatio === '21:9') return panelCount <= 6 ? '1536x576' : '1536x864';
   return aspectRatio === '9:16' ? '864x1536' : '1536x864';
 }
 
@@ -49,7 +52,7 @@ export function storyboardGridCanvasSize(
  * ratio. Empty film-board margins are intentional; no post-generation crop is
  * required.
  */
-export function storyboardGridGeometryInstruction(panelCount: number, aspectRatio: '16:9' | '9:16'): string {
+export function storyboardGridGeometryInstruction(panelCount: number, aspectRatio: ProjectAspectRatio): string {
   if (panelCount <= 1) return `单个面板铺满整张 ${aspectRatio} 画布。`;
   if (panelCount === 2) {
     return `几何硬约束：两个 ${aspectRatio} 面板各占画布宽度 1/2、高度 1/2；面板排成一行并垂直居中，画布上方和下方各保留 1/4 深色空白。`;
@@ -66,7 +69,9 @@ export function storyboardGridGeometryInstruction(panelCount: number, aspectRati
   if (panelCount === 6) {
     return aspectRatio === '9:16'
       ? '六宫格专属几何硬约束：整张画布为 3:8，使用 2×3 三行两列并完整铺满画布；每个 9:16 面板严格占画布宽度 1/2、高度 1/3，不留外边距，不裁切，不生成正方形单格。'
-      : '六宫格专属几何硬约束：整张画布为 8:3，使用 3×2 两行三列并完整铺满画布；每个 16:9 面板严格占画布宽度 1/3、高度 1/2，不留外边距，不裁切，不生成正方形单格。';
+      : aspectRatio === '21:9'
+        ? '六宫格超宽几何硬约束：使用 3×2 两行三列；每个面板严格保持 21:9，宫格整体垂直居中，允许上下保留整齐深色安全边，不裁切主体。'
+        : '六宫格专属几何硬约束：整张画布为 8:3，使用 3×2 两行三列并完整铺满画布；每个 16:9 面板严格占画布宽度 1/3、高度 1/2，不留外边距，不裁切，不生成正方形单格。';
   }
   const lastRow = panelCount === 7
     ? '最后一行一个面板水平居中'

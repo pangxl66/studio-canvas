@@ -30,10 +30,13 @@ import {
 import { mergeDownstreamSkillsFromChain } from '@/services/skillChain';
 import {
   DEFAULT_STORYBOARD_SKILL_ID,
+  DEFAULT_VIDEO_PROMPT_SKILL_ID,
   getSkillById,
+  isPromptStyleSkillId,
   normalizeFilmStoryboardSkillId,
   normalizeMountedSkillIdsForKind,
 } from '@/services/skillLoader';
+import { createDefaultProjectSettings } from '@/services/projectSettings';
 import {
   buildWorkflowAgentStageHint,
   buildWorkflowAgentStartMessage,
@@ -73,6 +76,7 @@ import {
   type NodeKind,
   type NodeStatus,
   type PromptOutput,
+  type ProjectSettings,
   type StoryboardOutput,
   type StudioNodeData,
   type WritingOutput,
@@ -145,7 +149,7 @@ function deptLabel(d: Department): string {
   if (d === 'VIDEO') return '视频节点';
   if (d === 'FILM_CHARACTER') return '角色设定';
   if (d === 'FILM_STORYBOARD') return '影视分镜图';
-  if (d === 'FILM_VIDEO_PROMPT') return '影视分镜提示词';
+  if (d === 'FILM_VIDEO_PROMPT') return '视频提示词';
   if (d === 'SCRIPT_INPUT') return '剧本输入';
   if (d === 'SCRIPT_SCENE') return '场景拆解';
   if (d === 'SCRIPT_CHARACTER') return '角色分析';
@@ -348,6 +352,7 @@ async function prepareStoryboardImageReferencesForExecution(args: {
   patchNodeData: (id: string, patch: Partial<StudioNodeData>, bumpVersion?: boolean) => void;
   pushMessage: (m: Omit<ChatMessage, 'id' | 'ts'> & { id?: string }) => string;
 }): Promise<number> {
+  const sceneAnalysisVersion = 2;
   const imageNodes = connectedImageNodesForDepartment(args.deptId, args.nodes, args.edges);
   let analyzedCount = 0;
   let analyzeImageReferenceFn:
@@ -357,7 +362,7 @@ async function prepareStoryboardImageReferencesForExecution(args: {
   for (let index = 0; index < imageNodes.length; index += 1) {
     const imageNode = imageNodes[index];
     const summary = imageNode.data.imageAnalysisSummary?.trim();
-    if (summary) continue;
+    if (summary && (imageNode.data.imageAnalysisVersion ?? 0) >= sceneAnalysisVersion) continue;
     const imageDataUrl = imageNode.data.imageDataUrl;
     const label = imageNode.data.imageFileName?.trim() || imageNode.data.label?.trim() || `场景参考图 ${index + 1}`;
     if (!imageDataUrl) {
@@ -372,7 +377,7 @@ async function prepareStoryboardImageReferencesForExecution(args: {
     args.patchNodeData(
       args.deptId,
       {
-        streaming_preview: `正在读取场景参考图“${label}”，分析场景、空间、光影与美术基调...`,
+        streaming_preview: `正在读取场景参考图“${label}”，分析空间、环境动态、物理特效与灯光触发条件...`,
         generation_phase: 'preparing',
       },
       false,
@@ -385,6 +390,7 @@ async function prepareStoryboardImageReferencesForExecution(args: {
         imageNode.id,
         {
           imageAnalysisSummary: analyzed,
+          imageAnalysisVersion: sceneAnalysisVersion,
           output: { summary: analyzed },
           generation_error: undefined,
         },
@@ -392,7 +398,7 @@ async function prepareStoryboardImageReferencesForExecution(args: {
       );
       args.pushMessage({
         role: 'system',
-        text: `已完成场景参考图分析：${label}。分镜生成会把该图作为场景硬约束。`,
+        text: `已完成场景参考图分析：${label}。分镜会继承场景结构，并按情节调度有依据的环境动态与灯光变化。`,
         nodeId: args.deptId,
       });
       analyzedCount += 1;
@@ -519,6 +525,7 @@ function makeNodeData(
   kind: PipelineKind,
   input = '',
   positionLabel?: string,
+  projectSettings: ProjectSettings = createDefaultProjectSettings(),
 ): StudioNodeData {
   const department = kindToDepartment(kind);
   return {
@@ -533,8 +540,13 @@ function makeNodeData(
     label: positionLabel ?? `${deptLabel(department)} · ${id.slice(-4)}`,
     mounted_skills: normalizeMountedSkillIdsForKind(
       kind,
-      kind === 'storyboard' ? [DEFAULT_STORYBOARD_SKILL_ID] : [],
+      kind === 'storyboard'
+        ? [projectSettings.defaultSkills.storyboardSkillId]
+        : kind === 'prompt'
+          ? [projectSettings.defaultSkills.promptSkillId]
+          : [],
     ),
+    ...(kind === 'storyboard' || kind === 'prompt' ? { skill_source: 'project' as const } : {}),
     assistant_preferences: '',
     assistant_task_instruction: '',
   };
@@ -648,10 +660,14 @@ function aiFilmDepartmentForKind(kind: AiFilmNodeKind): Department {
 function aiFilmLabelForKind(kind: AiFilmNodeKind): string {
   if (kind === 'film_character_node') return '角色设定';
   if (kind === 'film_storyboard_node') return '影视分镜图';
-  return '影视分镜提示词';
+  return '视频提示词';
 }
 
-function makeAiFilmNodeData(id: string, kind: AiFilmNodeKind): StudioNodeData {
+function makeAiFilmNodeData(
+  id: string,
+  kind: AiFilmNodeKind,
+  projectSettings: ProjectSettings = createDefaultProjectSettings(),
+): StudioNodeData {
   return {
     id,
     type: kind,
@@ -667,11 +683,17 @@ function makeAiFilmNodeData(id: string, kind: AiFilmNodeKind): StudioNodeData {
     assistant_task_instruction: '',
     ...(kind === 'film_storyboard_node'
       ? {
-          film_storyboard_skill_id: DEFAULT_STORYBOARD_SKILL_ID,
-          film_storyboard_aspect_ratio: '16:9',
+          film_storyboard_skill_id: projectSettings.defaultSkills.storyboardSkillId,
+          film_storyboard_skill_source: 'project' as const,
+          film_storyboard_aspect_ratio: projectSettings.aspectRatio,
+          film_storyboard_aspect_ratio_source: 'project' as const,
           imageGenerationSelectedModel: 'gemini-3.1-flash-image',
         }
-      : {}),
+      : kind === 'film_video_prompt_node'
+        ? {
+            film_video_prompt_skill_id: DEFAULT_VIDEO_PROMPT_SKILL_ID,
+          }
+        : {}),
   };
 }
 
@@ -811,6 +833,7 @@ export type StudioState = {
   messages: ChatMessage[];
   currentProjectId: string | null;
   currentProjectName: string;
+  projectSettings: ProjectSettings;
   activeNodeId: string | null;
   selectedNodeId: string | null;
   detailOpen: boolean;
@@ -849,6 +872,7 @@ export type StudioState = {
   syncShotListNodesFromStoryboardFile: (storyboardFileNodeId: string) => void;
   setStatus: (id: string, next: NodeStatus) => boolean;
   setCurrentProjectMeta: (projectId: string | null, projectName?: string) => void;
+  updateProjectSettings: (settings: ProjectSettings) => void;
   createNewProject: (projectName?: string) => string;
   addDepartmentNode: (kind: PipelineKind, position?: { x: number; y: number }) => string;
   addTextNode: (text?: string, position?: { x: number; y: number }) => string;
@@ -969,7 +993,7 @@ export type StudioState = {
     nodeId: string,
     opts?: {
       instruction?: string;
-      mode?: 'simple' | 'deep';
+      mode?: 'simple' | 'deep' | 'storyboard';
       imageMode?: import('@/types/studio').TextImageTaskMode;
       storyboardSkillId?: string;
     },
@@ -991,7 +1015,12 @@ export type StudioState = {
   hydrateProject: (
     nodes: StudioRFNode[],
     edges: Edge[],
-    opts?: { broadcastText?: string; projectId?: string | null; projectName?: string },
+    opts?: {
+      broadcastText?: string;
+      projectId?: string | null;
+      projectName?: string;
+      projectSettings?: ProjectSettings;
+    },
   ) => void;
   /** 妞ょ敻娼伴崝鐘烘祰閹存牗瀵旀稊鍛闁插秷娴囬崥搴窗娑撻缚濡悙?data 闁插秵鏌婇幐鍌濇祰 onExecute / onDelete閿涘湞SON 閺冪姵纭舵穱婵嗙摠閸戣姤鏆熼敍?*/
   ensureRuntimeBindingsOnNodes: () => void;
@@ -1044,6 +1073,116 @@ function buildStoryboardParentByShotListId(
   return map;
 }
 
+function isShotListParentNode(node: StudioRFNode | undefined): boolean {
+  return Boolean(
+    node &&
+      ((node.type === 'department' && node.data.type === 'storyboard') ||
+        node.type === 'storyboardFile'),
+  );
+}
+
+function shotListParentIdFromMetadata(
+  node: StudioRFNode,
+  nodesById: ReadonlyMap<string, StudioRFNode>,
+): string | undefined {
+  if (node.type !== 'shotList' || node.data.type !== 'shot_list_node') return undefined;
+  const candidates = [
+    node.data.sourceStoryboardNodeId,
+    node.data.sourceStoryboardFileNodeId,
+  ];
+  return candidates.find((candidate): candidate is string => {
+    if (!candidate) return false;
+    return isShotListParentNode(nodesById.get(candidate));
+  });
+}
+
+function isShotListStructuralEdge(
+  edge: Edge,
+  nodesById: ReadonlyMap<string, StudioRFNode>,
+): boolean {
+  const target = nodesById.get(edge.target);
+  if (target?.type !== 'shotList' || target.data.type !== 'shot_list_node') return false;
+  if (!isShotListParentNode(nodesById.get(edge.source))) return false;
+  return (
+    edge.sourceHandle === SHOT_LIST_LINK_HANDLE_ID ||
+    edge.targetHandle === SHOT_LIST_PARENT_HANDLE_ID
+  );
+}
+
+/**
+ * The storyboard-to-shot-list line is structural graph state, not an ordinary
+ * user connection. Recover it from persisted child metadata (or a legacy
+ * direct edge), keep exactly one canonical edge, and make it non-deletable so
+ * selection/delete gestures cannot silently detach the table.
+ */
+function repairShotListParentEdges(nodes: StudioRFNode[], edges: Edge[]): Edge[] {
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  let nextEdges = edges;
+
+  for (const shotList of nodes) {
+    if (shotList.type !== 'shotList' || shotList.data.type !== 'shot_list_node') continue;
+
+    const metadataParentId = shotListParentIdFromMetadata(shotList, nodesById);
+    const relationCandidates = nextEdges.filter(
+      (edge) =>
+        edge.target === shotList.id &&
+        isShotListParentNode(nodesById.get(edge.source)),
+    );
+    const existingRelation =
+      relationCandidates.find((edge) => edge.source === metadataParentId) ??
+      relationCandidates.find((edge) => isShotListStructuralEdge(edge, nodesById)) ??
+      relationCandidates[0];
+    const parentId = metadataParentId ?? existingRelation?.source;
+    if (!parentId) continue;
+
+    const canonicalEdge = nextEdges.find(
+      (edge) =>
+        edge.source === parentId &&
+        edge.target === shotList.id &&
+        edge.sourceHandle === SHOT_LIST_LINK_HANDLE_ID &&
+        (edge.targetHandle == null || edge.targetHandle === SHOT_LIST_PARENT_HANDLE_ID),
+    );
+    const relatedEdges = nextEdges.filter(
+      (edge) =>
+        (edge.target === shotList.id && isShotListStructuralEdge(edge, nodesById)) ||
+        (edge.source === parentId && edge.sourceHandle === SHOT_LIST_LINK_HANDLE_ID) ||
+        edge.id === existingRelation?.id,
+    );
+    const needsCanonicalRepair =
+      !canonicalEdge ||
+      canonicalEdge.targetHandle !== SHOT_LIST_PARENT_HANDLE_ID ||
+      canonicalEdge.animated !== true ||
+      canonicalEdge.deletable !== false ||
+      canonicalEdge.selectable !== false ||
+      canonicalEdge.style?.strokeDasharray !== '6 4' ||
+      relatedEdges.length !== 1;
+    if (!needsCanonicalRepair) continue;
+
+    const relatedIds = new Set(relatedEdges.map((edge) => edge.id));
+    const normalizedEdge: Edge = {
+      ...(canonicalEdge ?? existingRelation ?? {}),
+      id: canonicalEdge?.id ?? existingRelation?.id ?? uid('shotlist-edge'),
+      source: parentId,
+      target: shotList.id,
+      sourceHandle: SHOT_LIST_LINK_HANDLE_ID,
+      targetHandle: SHOT_LIST_PARENT_HANDLE_ID,
+      animated: true,
+      deletable: false,
+      selectable: false,
+      style: {
+        ...(canonicalEdge?.style ?? existingRelation?.style ?? {}),
+        strokeDasharray: '6 4',
+      },
+    };
+    nextEdges = [
+      ...nextEdges.filter((edge) => !relatedIds.has(edge.id)),
+      normalizedEdge,
+    ];
+  }
+
+  return nextEdges;
+}
+
 function flushIncomingShotListEditsForDepartment(get: () => StudioState, deptId: string): void {
   const { nodes, edges } = get();
   const shotListIds = new Set(
@@ -1070,6 +1209,47 @@ function storyboardOutputFingerprint(parsed: ReturnType<typeof tryParseStoryboar
   } catch {
     return `err:${String(parsed.shots?.length ?? 0)}`;
   }
+}
+
+function findDetachedMatchingShotListId(
+  storyboard: StudioRFNode,
+  output: ReturnType<typeof tryParseStoryboardOutput>,
+  nodes: StudioRFNode[],
+  edges: Edge[],
+): string | undefined {
+  const outputKey = storyboardOutputFingerprint(output);
+  if (!outputKey) return undefined;
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const expected = {
+    x: storyboard.position.x,
+    y: storyboard.position.y + getNodeSize(storyboard).height + 80,
+  };
+  return nodes
+    .filter((node) => {
+      if (node.type !== 'shotList' || node.data.type !== 'shot_list_node') return false;
+      if (node.data.sourceStoryboardNodeId || node.data.sourceStoryboardFileNodeId) return false;
+      if (
+        edges.some(
+          (edge) =>
+            edge.target === node.id && isShotListParentNode(nodesById.get(edge.source)),
+        )
+      ) {
+        return false;
+      }
+      const parsed = node.data.output ? tryParseStoryboardOutput(node.data.output) : null;
+      return storyboardOutputFingerprint(parsed) === outputKey;
+    })
+    .sort((left, right) => {
+      const leftDistance = Math.hypot(
+        left.position.x - expected.x,
+        left.position.y - expected.y,
+      );
+      const rightDistance = Math.hypot(
+        right.position.x - expected.x,
+        right.position.y - expected.y,
+      );
+      return leftDistance - rightDistance;
+    })[0]?.id;
 }
 
 function patchChangesNodeData(
@@ -1414,6 +1594,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   messages: [],
   currentProjectId: null,
   currentProjectName: '未命名项目',
+  projectSettings: createDefaultProjectSettings(),
   activeNodeId: null,
   selectedNodeId: null,
   detailOpen: false,
@@ -2191,9 +2372,29 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         targetPre.data.type === 'storyboard' ||
         targetPre.data.type === 'prompt')
     ) {
+      const normalizedMounted = normalizeMountedSkillIdsForKind(
+        targetPre.data.type,
+        patchEff.mounted_skills,
+      );
+      const nodeKind = targetPre.data.type;
+      const projectDefaultSkillId =
+        nodeKind === 'storyboard'
+          ? get().projectSettings.defaultSkills.storyboardSkillId
+          : nodeKind === 'prompt'
+            ? get().projectSettings.defaultSkills.promptSkillId
+            : undefined;
+      const primarySkillId =
+        nodeKind === 'prompt'
+          ? normalizedMounted.find(isPromptStyleSkillId)
+          : nodeKind === 'storyboard'
+            ? normalizedMounted[0]
+            : undefined;
       patchEff = {
         ...patchEff,
-        mounted_skills: normalizeMountedSkillIdsForKind(targetPre.data.type, patchEff.mounted_skills),
+        mounted_skills: normalizedMounted,
+        ...((nodeKind === 'storyboard' || nodeKind === 'prompt') && patchEff.skill_source == null
+          ? { skill_source: primarySkillId === projectDefaultSkillId ? 'project' : 'node' }
+          : {}),
       };
     }
     if (targetPre?.data.type === 'film_storyboard_node' && patchEff.film_storyboard_skill_id !== undefined) {
@@ -2318,12 +2519,19 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     if (!parsed?.shots?.length) return;
 
     const stateBeforeCreate = get();
-    const existingId = findRecoverableStoryboardShotListId(
-      storyboardNodeId,
-      stateBeforeCreate.nodes,
-      stateBeforeCreate.edges,
-      SHOT_LIST_LINK_HANDLE_ID,
-    );
+    const existingId =
+      findRecoverableStoryboardShotListId(
+        storyboardNodeId,
+        stateBeforeCreate.nodes,
+        stateBeforeCreate.edges,
+        SHOT_LIST_LINK_HANDLE_ID,
+      ) ??
+      findDetachedMatchingShotListId(
+        sb,
+        parsed,
+        stateBeforeCreate.nodes,
+        stateBeforeCreate.edges,
+      );
     if (existingId) {
       const existingNode = stateBeforeCreate.nodes.find(
         (node) =>
@@ -2393,6 +2601,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
                   sourceHandle: SHOT_LIST_LINK_HANDLE_ID,
                   targetHandle: SHOT_LIST_PARENT_HANDLE_ID,
                   animated: true,
+                  deletable: false,
+                  selectable: false,
                   style: { strokeDasharray: '6 4' },
                 },
                 state.edges.filter(
@@ -2446,6 +2656,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           sourceHandle: SHOT_LIST_LINK_HANDLE_ID,
           targetHandle: SHOT_LIST_PARENT_HANDLE_ID,
           animated: true,
+          deletable: false,
+          selectable: false,
           style: { strokeDasharray: '6 4' },
         },
         s.edges.filter(
@@ -2542,6 +2754,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           sourceHandle: SHOT_LIST_LINK_HANDLE_ID,
           targetHandle: SHOT_LIST_PARENT_HANDLE_ID,
           animated: true,
+          deletable: false,
+          selectable: false,
           style: { strokeDasharray: '6 4' },
         },
         s.edges,
@@ -2695,7 +2909,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     pushUndoSnapshot(set);
     const id = uid('node');
     const pos = position ?? { x: 280, y: 220 };
-    const data = makeNodeData(id, kind);
+    const data = makeNodeData(id, kind, '', undefined, get().projectSettings);
     set((s) => ({
       nodes: [
         ...s.nodes,
@@ -3289,12 +3503,12 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         if (isAiFilmPick(p.pick)) {
           return pushErr(
             from.type === 'imageNode'
-              ? '图片节点可连接到角色设定或影视分镜提示词节点。'
+              ? '图片节点可连接到角色设定或视频提示词节点。'
               : '视频节点请先连接到文本卡片，再由文本卡片连接新模式提示词节点。',
           );
         }
         if (p.pick !== 'text_node') {
-          return pushErr('图片节点 Output 可连接到文本卡片、分镜节点、Prompt 节点、角色设定或影视分镜提示词；视频节点 Output 目前只支持连接到文本卡片。');
+          return pushErr('图片节点 Output 可连接到文本卡片、分镜节点、Prompt 节点、角色设定或视频提示词；视频节点 Output 目前只支持连接到文本卡片。');
         }
         const id = uid('text');
         const data = makeTextNodeData(id, '');
@@ -3646,9 +3860,10 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         syncDeptIn(id);
         const upstreamMounted = Array.isArray(from.data.mounted_skills) ? from.data.mounted_skills : [];
         const chained = mergeDownstreamSkillsFromChain(upstreamMounted, fk, tk);
+        const projectStoryboardSkillId = get().projectSettings.defaultSkills.storyboardSkillId;
         const chainedWithDefault =
           tk === 'storyboard' && chained.length > 0 && !chained.some((sid) => getSkillById(sid)?.folder === 'storyboard')
-            ? [DEFAULT_STORYBOARD_SKILL_ID, ...chained]
+            ? [projectStoryboardSkillId, ...chained]
             : chained;
         if (chainedWithDefault.length > 0) {
           get().patchNodeData(id, { mounted_skills: chainedWithDefault }, false);
@@ -3727,7 +3942,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           return id;
         }
         if (p.pick === 'film_character_node') {
-          return pushErr('提示词审核节点 Output 建议连接到影视分镜提示词节点。');
+          return pushErr('提示词审核节点 Output 建议连接到视频提示词节点。');
         }
         if (p.pick === 'text_node') {
           const id = uid('text');
@@ -3817,7 +4032,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           return id;
         }
         if (isAiFilmPick(p.pick)) {
-          return pushErr('新模式节点 Output 目前只支持接文本卡片，或由角色设定/影视分镜图接入影视分镜提示词。');
+          return pushErr('新模式节点 Output 目前只支持接文本卡片，或由角色设定/影视分镜图接入视频提示词。');
         }
         return pushErr('新模式节点 Output 暂不直接连接旧部门节点。');
       }
@@ -4029,6 +4244,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
             ? src.data.sourceSceneCount
             : undefined,
         mountedSkills: Array.isArray(src?.data.mounted_skills) ? src.data.mounted_skills : [],
+        projectSettings: get().projectSettings,
         taskInstruction:
           typeof src?.data.assistant_task_instruction === 'string'
             ? src.data.assistant_task_instruction
@@ -4621,7 +4837,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     pushUndoSnapshot(set);
     const id = uid('filmstory');
     const pos = position ?? { x: 520, y: 300 };
-    const data = makeAiFilmNodeData(id, 'film_storyboard_node');
+    const data = makeAiFilmNodeData(id, 'film_storyboard_node', get().projectSettings);
     set((s) => ({
       nodes: [
         ...s.nodes,
@@ -4661,7 +4877,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     }));
     get().pushMessage({
       role: 'system',
-      text: '已创建影视分镜提示词节点。连接文本、角色设定、分镜或图片后会自动识别 A/B/C 模式。',
+      text: '已创建视频提示词节点。连接影视分镜图或其右侧九宫格图片后，将先分析画面与表演，再生成视频提示词。',
       nodeId: id,
     });
     return id;
@@ -5206,6 +5422,14 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   },
 
   reconcileShotListGraphBindings: () => {
+    const beforeRepair = get();
+    const repairedEdges = repairShotListParentEdges(
+      beforeRepair.nodes,
+      beforeRepair.edges,
+    );
+    if (repairedEdges !== beforeRepair.edges) {
+      set({ edges: repairedEdges });
+    }
     const { nodes, edges } = get();
     const parentByShotList = buildStoryboardParentByShotListId(nodes, edges);
 

@@ -131,8 +131,16 @@ function modelAttemptPlan(primaryModel: string): string[] {
   return isPrimaryModelCoolingDown(primaryModel) ? fallbacks : [primaryModel, ...fallbacks];
 }
 
-function shouldRetrySameProviderFallback(status: number): boolean {
-  return status === 429 || status >= 500;
+function isModelAccessUnavailable(status: number, raw = ''): boolean {
+  if (status !== 400 && status !== 403 && status !== 404) return false;
+  const text = extractUpstreamErrorText(raw).toLowerCase();
+  return /no active subscription found for this group|no available channel|no channel available|model.*(?:not found|does not exist|unavailable|not available|unsupported|permission|access)|(?:permission|access).*(?:model|subscription)|group.*(?:subscription|model)|(?:current|this).*(?:key|group).*(?:model|subscription)|(?:模型|渠道).*(?:无权|权限|未开通|不可用|不存在)/i.test(
+    text,
+  );
+}
+
+function shouldRetrySameProviderFallback(status: number, raw = ''): boolean {
+  return status === 429 || status >= 500 || isModelAccessUnavailable(status, raw);
 }
 
 function json(res: ServerResponse, status: number, payload: unknown): void {
@@ -558,6 +566,7 @@ async function callUpstreamWithModelFallback(
 ): Promise<{ response: Response; model: string }> {
   const attempts = modelAttemptPlan(primaryModel);
   let lastError: unknown = null;
+  let retriedPrimaryModelAccess = false;
   for (let index = 0; index < attempts.length; index += 1) {
     const attemptModel = attempts[index];
     try {
@@ -567,11 +576,30 @@ async function callUpstreamWithModelFallback(
         return { response, model: attemptModel };
       }
       const hasNext = index < attempts.length - 1;
-      if (!hasNext || !shouldRetrySameProviderFallback(response.status)) {
+      const failedText = await response.clone().text();
+      const modelAccessUnavailable = isModelAccessUnavailable(response.status, failedText);
+      if (attemptModel === primaryModel && modelAccessUnavailable && !retriedPrimaryModelAccess) {
+        retriedPrimaryModelAccess = true;
+        console.warn(
+          'LLM primary model access unavailable, retrying primary model once',
+          JSON.stringify({
+            status: response.status,
+            model: attemptModel,
+            feature: body.feature?.trim() || 'llm-chat',
+            body: sanitizeError(failedText),
+          }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 450));
+        index -= 1;
+        continue;
+      }
+      if (!hasNext) {
         return { response, model: attemptModel };
       }
-      const failedText = await response.text();
-      if (attemptModel === primaryModel) recordPrimaryModelFailure(primaryModel);
+      if (!shouldRetrySameProviderFallback(response.status, failedText)) {
+        return { response, model: attemptModel };
+      }
+      if (attemptModel === primaryModel && !modelAccessUnavailable) recordPrimaryModelFailure(primaryModel);
       console.warn(
         'LLM primary model failed, retrying fallback model',
         JSON.stringify({

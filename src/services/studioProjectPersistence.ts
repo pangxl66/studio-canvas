@@ -1,5 +1,7 @@
 import type { Edge } from '@xyflow/react';
 import type { StudioRFNode } from '@/types/reactFlow';
+import type { ProjectSettings } from '@/types/studio';
+import { normalizeProjectSettings } from '@/services/projectSettings';
 import {
   normalizeRestoredStudioNode,
   toPersistableNodesAndEdges,
@@ -13,7 +15,7 @@ import {
   saveStudioProjectSnapshotToDisk,
 } from './localProjectDiskService';
 
-export const STUDIO_PROJECT_JSON_VERSION = 1;
+export const STUDIO_PROJECT_JSON_VERSION = 2;
 
 export const STUDIO_IDB_NAME = 'studio-ai-drama-idb';
 export const STUDIO_IDB_STORE = 'project_snapshots';
@@ -39,6 +41,7 @@ export type StudioProjectFilePayload = {
   edges: Edge[];
   projectId?: string;
   projectName?: string;
+  projectSettings: ProjectSettings;
 };
 
 export type StudioProjectRecord = StudioProjectFilePayload & {
@@ -126,7 +129,7 @@ export function stringifyStudioProjectPayload(nodes: StudioRFNode[], edges: Edge
 export function stringifyStudioProjectPayloadWithMeta(
   nodes: StudioRFNode[],
   edges: Edge[],
-  meta?: { projectId?: string; projectName?: string },
+  meta?: { projectId?: string; projectName?: string; projectSettings?: ProjectSettings },
 ): string {
   return JSON.stringify(createStudioProjectPayload(nodes, edges, meta), null, 2);
 }
@@ -192,22 +195,54 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
+type EmbeddedImageFieldSpec = {
+  dataUrlKey: string;
+  assetIdKey: string;
+  assetMimeTypeKey: string;
+};
+
+const EMBEDDED_IMAGE_FIELD_SPECS: EmbeddedImageFieldSpec[] = [
+  {
+    dataUrlKey: 'imageDataUrl',
+    assetIdKey: 'imageAssetId',
+    assetMimeTypeKey: 'imageAssetMimeType',
+  },
+  {
+    dataUrlKey: 'imageEditBaseDataUrl',
+    assetIdKey: 'imageEditBaseAssetId',
+    assetMimeTypeKey: 'imageEditBaseAssetMimeType',
+  },
+  {
+    dataUrlKey: 'imagePaletteSourceDataUrl',
+    assetIdKey: 'imagePaletteSourceAssetId',
+    assetMimeTypeKey: 'imagePaletteSourceAssetMimeType',
+  },
+];
+
+const EMBEDDED_IMAGE_FIELD_BY_DATA_URL = new Map(
+  EMBEDDED_IMAGE_FIELD_SPECS.map((spec) => [spec.dataUrlKey, spec]),
+);
+
 function collectEmbeddedImageDataUrls(value: unknown, output: Set<string>): void {
   if (Array.isArray(value)) {
     value.forEach((item) => collectEmbeddedImageDataUrls(item, output));
     return;
   }
   if (!isRecord(value)) return;
-  const hasPersistedAsset =
-    typeof value.imageAssetId === 'string'
-    && IMAGE_ASSET_ID_PATTERN.test(value.imageAssetId);
   for (const [key, child] of Object.entries(value)) {
+    const spec = EMBEDDED_IMAGE_FIELD_BY_DATA_URL.get(key);
     if (
-      key === 'imageDataUrl'
+      spec
       && typeof child === 'string'
       && /^data:image\/[^;,]+(?:;[^,]*)?;base64,/u.test(child)
     ) {
-      if (!hasPersistedAsset) output.add(child);
+      const persistedAssetId = value[spec.assetIdKey];
+      if (
+        typeof persistedAssetId !== 'string'
+        || !IMAGE_ASSET_ID_PATTERN.test(persistedAssetId)
+      ) {
+        output.add(child);
+      }
       continue;
     }
     collectEmbeddedImageDataUrls(child, output);
@@ -240,18 +275,20 @@ function replaceEmbeddedImagesWithAssets(
   }
   if (!isRecord(value)) return value;
   const output: Record<string, unknown> = {};
-  const persistedAssetId =
-    typeof value.imageAssetId === 'string'
-    && IMAGE_ASSET_ID_PATTERN.test(value.imageAssetId)
-      ? value.imageAssetId
-      : '';
   for (const [key, child] of Object.entries(value)) {
-    if (key === 'imageDataUrl' && typeof child === 'string') {
-      if (persistedAssetId) continue;
+    const spec = EMBEDDED_IMAGE_FIELD_BY_DATA_URL.get(key);
+    if (spec && typeof child === 'string') {
+      const persistedAssetId = value[spec.assetIdKey];
+      if (
+        typeof persistedAssetId === 'string'
+        && IMAGE_ASSET_ID_PATTERN.test(persistedAssetId)
+      ) {
+        continue;
+      }
       const asset = assetsByDataUrl.get(child);
       if (asset) {
-        output.imageAssetId = asset.id;
-        output.imageAssetMimeType = asset.mimeType;
+        output[spec.assetIdKey] = asset.id;
+        output[spec.assetMimeTypeKey] = asset.mimeType;
         continue;
       }
     }
@@ -266,12 +303,15 @@ function collectImageAssetIds(value: unknown, output: Set<string>): void {
     return;
   }
   if (!isRecord(value)) return;
-  if (
-    typeof value.imageAssetId === 'string'
-    && IMAGE_ASSET_ID_PATTERN.test(value.imageAssetId)
-    && typeof value.imageDataUrl !== 'string'
-  ) {
-    output.add(value.imageAssetId);
+  for (const spec of EMBEDDED_IMAGE_FIELD_SPECS) {
+    const assetId = value[spec.assetIdKey];
+    if (
+      typeof assetId === 'string'
+      && IMAGE_ASSET_ID_PATTERN.test(assetId)
+      && typeof value[spec.dataUrlKey] !== 'string'
+    ) {
+      output.add(assetId);
+    }
   }
   Object.values(value).forEach((child) => collectImageAssetIds(child, output));
 }
@@ -288,12 +328,12 @@ function restoreEmbeddedImagesFromAssets(
   for (const [key, child] of Object.entries(value)) {
     output[key] = restoreEmbeddedImagesFromAssets(child, assetsById);
   }
-  if (
-    typeof value.imageAssetId === 'string'
-    && typeof value.imageDataUrl !== 'string'
-  ) {
-    const asset = assetsById.get(value.imageAssetId);
-    if (asset?.dataUrl) output.imageDataUrl = asset.dataUrl;
+  for (const spec of EMBEDDED_IMAGE_FIELD_SPECS) {
+    const assetId = value[spec.assetIdKey];
+    if (typeof assetId === 'string' && typeof value[spec.dataUrlKey] !== 'string') {
+      const asset = assetsById.get(assetId);
+      if (asset?.dataUrl) output[spec.dataUrlKey] = asset.dataUrl;
+    }
   }
   return output;
 }
@@ -301,7 +341,7 @@ function restoreEmbeddedImagesFromAssets(
 export function createStudioProjectPayload(
   nodes: StudioRFNode[],
   edges: Edge[],
-  meta?: { projectId?: string; projectName?: string },
+  meta?: { projectId?: string; projectName?: string; projectSettings?: ProjectSettings },
 ): StudioProjectFilePayload {
   const cleaned = removeDeprecatedScriptNodes(nodes, edges);
   const { nodes: persistableNodes, edges: persistableEdges } = toPersistableNodesAndEdges(
@@ -315,6 +355,7 @@ export function createStudioProjectPayload(
     edges: persistableEdges,
     projectId: meta?.projectId,
     projectName: meta?.projectName,
+    projectSettings: normalizeProjectSettings(meta?.projectSettings),
   };
   return payload;
 }
@@ -351,6 +392,7 @@ export function parseStudioProjectPayload(raw: unknown): StudioProjectFilePayloa
     edges: cleaned.edges,
     projectId: typeof raw.projectId === 'string' ? raw.projectId : undefined,
     projectName: typeof raw.projectName === 'string' ? raw.projectName : undefined,
+    projectSettings: normalizeProjectSettings(raw.projectSettings),
   };
 }
 
@@ -826,6 +868,7 @@ export async function putStudioProjectRecord(
   projectName: string,
   nodes: StudioRFNode[],
   edges: Edge[],
+  projectSettings?: ProjectSettings,
 ): Promise<StudioProjectRecord> {
   const { nodes: persistableNodes, edges: persistableEdges } = toPersistableNodesAndEdges(nodes, edges);
   const record: StudioProjectRecord = {
@@ -836,6 +879,7 @@ export async function putStudioProjectRecord(
     edges: persistableEdges,
     projectId,
     projectName,
+    projectSettings: normalizeProjectSettings(projectSettings),
   };
   const compactRecord = await externalizeStudioProjectImages(record) as StudioProjectRecord;
   const db = await openStudioIdb();

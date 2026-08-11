@@ -6,8 +6,10 @@ import { fileURLToPath } from 'node:url';
 
 import {
   applyProjectConstraintsToStoryboardOutput,
+  buildProjectConstraintExecutionChecklist,
   collectTextNodeContextForDepartment,
   collectTextNodeContextForNode,
+  dedupeProjectConstraints,
   extractProjectConstraintsFromTaggedText,
   inferTextNodeSemanticRole,
   serializeTextNodeContext,
@@ -162,6 +164,62 @@ test('keeps full project constraints at the storyboard root and marks every shot
   assert.match(output.shots[1].note, /保持屏幕方向。[\s\S]*2\.39:1 宽银幕/);
 });
 
+test('prefers the authoritative input block over model-split duplicate constraints', () => {
+  const fullInput =
+    '文本卡片 · 8c65：人物越认真，事情越荒唐。\n\n表演保持真人电影动作逻辑，突出停顿和错愕。';
+  const output = applyProjectConstraintsToStoryboardOutput(
+    {
+      shots: [
+        {
+          id: '1',
+          description: '机器人严肃面对荒唐结果。',
+          note: '喜剧来自真实反应。\n项目约束（跨镜）：旧的重复约束。',
+        },
+      ],
+      narrativeBeats: [],
+      projectConstraints: [
+        '人物越认真，事情越荒唐。',
+        '表演保持真人电影动作逻辑，突出停顿和错愕。',
+      ],
+    },
+    [fullInput],
+  );
+
+  assert.deepEqual(output.projectConstraints, [fullInput]);
+  assert.equal((output.shots[0].note.match(/项目约束（跨镜）/g) ?? []).length, 1);
+  assert.doesNotMatch(output.shots[0].note, /旧的重复约束/);
+});
+
+test('preserves an independent model constraint and builds an atomic execution checklist', () => {
+  assert.deepEqual(
+    dedupeProjectConstraints(
+      ['画幅比例：21:9；按超宽银幕构图。'],
+      ['喜剧规范：人物越认真，事情越荒唐。'],
+    ),
+    [
+      '喜剧规范：人物越认真，事情越荒唐。',
+      '画幅比例：21:9；按超宽银幕构图。',
+    ],
+  );
+
+  const checklist = buildProjectConstraintExecutionChecklist([
+    '喜剧规范：人物越认真，事情越荒唐；表演保持真人电影逻辑。',
+  ]);
+  assert.match(checklist, /C1\. 喜剧规范：人物越认真，事情越荒唐/);
+  assert.match(checklist, /C2\. 表演保持真人电影逻辑/);
+});
+
+test('collapses legacy model-split constraints when the complete source block was saved last', () => {
+  const constraints = dedupeProjectConstraints([
+    '人物越认真，事情越荒唐。',
+    '表演保持真人电影逻辑，突出停顿和错愕。',
+    '文本卡片 · 8c65：人物越认真，事情越荒唐。\n\n表演保持真人电影逻辑，突出停顿和错愕。',
+  ]);
+  assert.deepEqual(constraints, [
+    '文本卡片 · 8c65：人物越认真，事情越荒唐。\n\n表演保持真人电影逻辑，突出停顿和错愕。',
+  ]);
+});
+
 test('store and prompt transport preserve semantic chaining instead of replacing text nodes', () => {
   const store = read('src/store/useStudioStore.ts');
   const graphInput = read('src/services/graphInput.ts');
@@ -176,6 +234,8 @@ test('store and prompt transport preserve semantic chaining instead of replacing
   assert.match(graphInput, /collectTextNodeContextForDepartment/);
   assert.match(graphInput, /projectConstraints:\s*canonical\.projectConstraints/);
   assert.match(storyboardAgent, /extractProjectConstraintsFromTaggedText/);
+  assert.match(storyboardAgent, /项目约束逐项执行清单/);
+  assert.match(storyboardAgent, /约束落实：C编号/);
   assert.match(promptAgent, /【上游项目约束｜必须继承】/);
   assert.match(connectionRules, /wouldCreateTextChainCycle/);
   assert.match(connectionRules, /return \['text_node', 'storyboard', 'prompt'\]/);

@@ -68,6 +68,7 @@ export function useStudioProjectPersistence({
       edges: liveEdges,
       currentProjectId: liveProjectId,
       currentProjectName: liveProjectName,
+      projectSettings: liveProjectSettings,
     } = useStudioStore.getState();
     if (liveNodes.length === 0 && liveEdges.length === 0 && !liveProjectId) {
       clearStudioRecoveryDraft();
@@ -77,6 +78,7 @@ export function useStudioProjectPersistence({
       createStudioProjectPayload(liveNodes, liveEdges, {
         projectId: liveProjectId ?? undefined,
         projectName: liveProjectName,
+        projectSettings: liveProjectSettings,
       }),
     );
   }, []);
@@ -87,6 +89,7 @@ export function useStudioProjectPersistence({
       edges: liveEdges,
       currentProjectId: liveProjectId,
       currentProjectName: liveProjectName,
+      projectSettings: liveProjectSettings,
     } = useStudioStore.getState();
     if (liveNodes.length === 0 && liveEdges.length === 0 && !liveProjectId) {
       return;
@@ -98,6 +101,7 @@ export function useStudioProjectPersistence({
       const payload = createStudioProjectPayload(liveNodes, liveEdges, {
         projectId: liveProjectId ?? undefined,
         projectName: liveProjectName,
+        projectSettings: liveProjectSettings,
       });
       await queueStudioProjectSnapshot(payload);
       setLastSavedAt(payload.savedAt);
@@ -119,10 +123,16 @@ export function useStudioProjectPersistence({
   useEffect(() => {
     let previousNodes = useStudioStore.getState().nodes;
     let previousEdges = useStudioStore.getState().edges;
+    let previousProjectSettings = useStudioStore.getState().projectSettings;
     return useStudioStore.subscribe((state) => {
-      if (state.nodes === previousNodes && state.edges === previousEdges) return;
+      if (
+        state.nodes === previousNodes
+        && state.edges === previousEdges
+        && state.projectSettings === previousProjectSettings
+      ) return;
       previousNodes = state.nodes;
       previousEdges = state.edges;
+      previousProjectSettings = state.projectSettings;
       if (!persistenceReadyRef.current) return;
       dirtyRevisionRef.current += 1;
       if (
@@ -186,6 +196,7 @@ export function useStudioProjectPersistence({
         hydrateProject(restore.payload.nodes, restore.payload.edges, {
           projectId: restore.payload.projectId ?? null,
           projectName: restore.projectName,
+          projectSettings: restore.payload.projectSettings,
           broadcastText: restore.broadcastText,
         });
 

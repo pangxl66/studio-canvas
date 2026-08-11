@@ -25,6 +25,7 @@ interface ImportMetaEnv {
   readonly VITE_SUPABASE_ANON_KEY?: string;
   readonly VITE_SAAS_MOCK?: string;
   readonly VITE_TEST_INVITE_AUTH?: string;
+  readonly VITE_LAN_DIRECT_ACCESS?: string;
   readonly VITE_ADMIN_TOOLS?: string;
 }
 

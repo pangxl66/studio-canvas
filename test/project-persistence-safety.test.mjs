@@ -84,6 +84,25 @@ test('image assets restore once and use bounded parallel IO', () => {
   assert.doesNotMatch(persistence, /for \(const record of records\) \{\s*await saveLocalProjectImageAsset/);
 });
 
+test('editing baselines and palette source images are externalized with the main image', () => {
+  const persistence = read('src/services/studioProjectPersistence.ts');
+  const studioTypes = read('src/types/studio.ts');
+  const repository = read('server/local-project-repository.cjs');
+
+  for (const field of [
+    'imageDataUrl',
+    'imageEditBaseDataUrl',
+    'imagePaletteSourceDataUrl',
+  ]) {
+    assert.match(persistence, new RegExp(`dataUrlKey: '${field}'`));
+    assert.match(repository, new RegExp(`'${field}'`));
+  }
+  assert.match(studioTypes, /imageEditBaseAssetId\?: string/);
+  assert.match(studioTypes, /imagePaletteSourceAssetId\?: string/);
+  assert.match(persistence, /EMBEDDED_IMAGE_FIELD_SPECS/);
+  assert.match(persistence, /output\[spec\.dataUrlKey\] = asset\.dataUrl/);
+});
+
 test('an unavailable optional disk mirror does not invalidate a completed IndexedDB save', () => {
   const persistence = read('src/services/studioProjectPersistence.ts');
   const diskService = read('src/services/localProjectDiskService.ts');

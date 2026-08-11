@@ -24,7 +24,8 @@ import type { LlmJsonStreamPhase } from '@/services/llmJsonClient';
 import type { StudioRFNode } from '@/types/reactFlow';
 import type { ApprovedAsset, PromptOutput, StoryboardOutput, WritingOutput } from '@/types/studio';
 import { countStoryboardSourceScenes } from '@/agents/storyboardAgents';
-import { hasMultipleStoryboardOutputScenes } from '@/utils/storyboardSceneScope';
+import { appendProjectSettingsConstraint } from '@/services/projectSettings';
+import type { ProjectSettings } from '@/types/studio';
 
 export type DepartmentPipelineKind = 'writing' | 'storyboard' | 'prompt';
 
@@ -38,6 +39,7 @@ export type ExecuteTaskParams = {
   inputText?: string;
   sourceSceneCount?: number;
   mountedSkills?: string[];
+  projectSettings?: ProjectSettings;
   taskInstruction?: string;
   reviewIterationFeedback?: string;
   reviewOptimization?: {
@@ -63,7 +65,6 @@ export type ExecuteTaskFailure = {
   reason:
     | 'empty_input'
     | 'storyboard_no_beats'
-    | 'storyboard_multiple_scenes'
     | 'exception';
   message?: string;
 };
@@ -185,7 +186,11 @@ function requireDeepModeForWriting(): ExecuteTaskFailure {
 }
 
 export async function executeEmployeePhase(params: ExecuteTaskParams): Promise<EmployeePhaseResult> {
-  const inputUsed = resolveInputUsed(params);
+  const rawInputUsed = resolveInputUsed(params);
+  const inputUsed =
+    params.kind === 'storyboard' || params.kind === 'prompt'
+      ? appendProjectSettingsConstraint(rawInputUsed, params.projectSettings)
+      : rawInputUsed;
   if (!inputUsed) {
     return {
       ok: false,
@@ -246,14 +251,6 @@ export async function executeEmployeePhase(params: ExecuteTaskParams): Promise<E
             message: '当前结构化输入没有可用场次。请先补充一个完整场次；本次未调用分镜模型，也未消耗分镜生成额度。',
           };
         }
-        if (storyboardSourceSceneCount > 1) {
-          return {
-            ok: false,
-            reason: 'storyboard_multiple_scenes',
-            message: `分镜节点定位为单场次工作台，当前输入识别到 ${storyboardSourceSceneCount} 个场次。请只保留一个场次后再生成；本次未调用分镜模型，也未消耗分镜生成额度。`,
-          };
-        }
-
         if (executionMode === 'rule') {
           skillWarnings.push('当前使用本地规则兜底：分镜节点没有调用 API。');
           const output = runRuleStoryboardFromText(inputUsed);
@@ -290,14 +287,6 @@ export async function executeEmployeePhase(params: ExecuteTaskParams): Promise<E
             message: '分镜输出为空：没有解析到有效 shots，请检查输入文本或模型返回结果。',
           };
         }
-        if (hasMultipleStoryboardOutputScenes(output)) {
-          return {
-            ok: false,
-            reason: 'storyboard_multiple_scenes',
-            message: '模型返回了多个 sceneRef，与单场次分镜约束冲突。请重试，或在任务补充要求中明确当前场次名称。',
-          };
-        }
-
         return {
           ok: true,
           inputUsed,

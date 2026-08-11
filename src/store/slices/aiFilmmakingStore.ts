@@ -3,7 +3,6 @@ import { tryParseStoryboardOutput } from '@/agents/storyboardAgents';
 import {
   buildAiFilmmakingSystemPrompt,
   buildCharacterSheetUserPrompt,
-  buildSeedanceVideoUserPrompt,
   buildStoryboardGridUserPrompt,
   normalizeStoryboardAspectRatio,
   stripAiFilmmakingPromptWrapper,
@@ -13,9 +12,30 @@ import {
   type AiFilmmakingStoryboardAspectRatio,
   type AiFilmmakingVideoMode,
 } from '@/services/aiFilmmakingPrompts';
-import { DEFAULT_STORYBOARD_SKILL_ID, getSkillById, normalizeFilmStoryboardSkillId } from '@/services/skillLoader';
+import {
+  DEFAULT_STORYBOARD_SKILL_ID,
+  DEFAULT_VIDEO_PROMPT_SKILL_ID,
+  getSkillById,
+  normalizeFilmStoryboardSkillId,
+  normalizeFilmVideoPromptSkillId,
+} from '@/services/skillLoader';
+import {
+  VIDEO_PROMPT_PREVIEW_MAX_CHARS,
+  buildVideoPromptAnalysisSystemPrompt,
+  buildVideoPromptAnalysisUserPrompt,
+  buildVideoPromptCompositionUserPrompt,
+  hashVideoPromptSource,
+  parseVideoPromptImageAnalysis,
+  resolveVideoPromptDurationSec,
+  validateVideoPromptText,
+} from '@/services/videoPromptSpec';
 import type { StudioRFNode } from '@/types/reactFlow';
-import type { StoryboardOutput, StoryboardShot, StudioNodeData } from '@/types/studio';
+import type {
+  StoryboardGridPanelMapping,
+  StoryboardOutput,
+  StoryboardShot,
+  StudioNodeData,
+} from '@/types/studio';
 import { parseShotListItemOutputHandleId } from '@/utils/shotListWire';
 import type { StudioState } from '../useStudioStore';
 
@@ -40,13 +60,18 @@ type ImageReference = {
   label: string;
   dataUrl?: string;
   role: 'character' | 'storyboard' | 'unknown';
+  signature: string;
+  panelCount?: number;
+  panels?: StoryboardGridPanelMapping[];
 };
 
-type FilmPromptSource = {
+export type FilmPromptSource = {
   summary: AiFilmmakingSourceSummary;
   images: ImageReference[];
   primaryImage?: ImageReference;
   videoMode?: AiFilmmakingVideoMode;
+  sourceSignature: string;
+  panelMappingText: string;
 };
 
 type IncomingSource = {
@@ -61,6 +86,14 @@ type ResolvedFilmStoryboardSkill = AiFilmStoryboardSkillPrompt & {
 type StoryboardGridTableBlock = {
   text: string;
   shotCount: number;
+  durationSec: number;
+};
+
+type ResolvedFilmVideoPromptSkill = {
+  id: string;
+  name: string;
+  version: string;
+  instruction: string;
 };
 
 function featureSafeId(id: string): string {
@@ -107,14 +140,45 @@ function imageRoleFromLabel(label: string): ImageReference['role'] {
   return 'unknown';
 }
 
-function imageRefFromNode(node: StudioRFNode): ImageReference | null {
+function compactImageDataFingerprint(dataUrl?: string): string {
+  if (!dataUrl) return '';
+  return hashVideoPromptSource([
+    String(dataUrl.length),
+    dataUrl.slice(0, 96),
+    dataUrl.slice(-96),
+  ]);
+}
+
+function imageRefFromNode(node: StudioRFNode, nodes: StudioRFNode[]): ImageReference | null {
   if (node.type !== 'imageNode') return null;
   const label = node.data.imageFileName?.trim() || node.data.label?.trim() || '图片参考';
+  const storyboardParentId = node.data.generatedFromStoryboardNodeId;
+  const storyboardParent = storyboardParentId
+    ? nodes.find((candidate) => candidate.id === storyboardParentId && candidate.type === 'aiFilmStoryboard')
+    : undefined;
+  const storyboardPage = storyboardParent?.data.storyboardGridImages?.find(
+    (page) => page.pageIndex === node.data.generatedStoryboardPageIndex,
+  );
+  const role =
+    node.data.imageDisplayMode === 'storyboard-output' || storyboardParentId
+      ? 'storyboard'
+      : imageRoleFromLabel(label);
   return {
     nodeId: node.id,
     label,
     dataUrl: node.data.imageDataUrl,
-    role: imageRoleFromLabel(label),
+    role,
+    signature: hashVideoPromptSource([
+      node.id,
+      node.data.imageAssetId ?? '',
+      node.data.imageFileName ?? '',
+      String(node.data.imageGenerationCompletedAt ?? node.data.imageEditCompletedAt ?? ''),
+      compactImageDataFingerprint(node.data.imageDataUrl),
+    ]),
+    panelCount:
+      storyboardPage?.panelCount ??
+      (node.data.imageGenerationSourceShotIds?.length || undefined),
+    panels: storyboardPage?.panels,
   };
 }
 
@@ -217,10 +281,14 @@ function formatStoryboardTableForGrid(
   ]
     .filter(Boolean)
     .join('\n\n');
-  return { text, shotCount: picked.shots.length };
+  const durationSec = picked.shots.reduce(
+    (sum, shot) => sum + (typeof shot.durationSec === 'number' && Number.isFinite(shot.durationSec) ? Math.max(0, shot.durationSec) : 0),
+    0,
+  );
+  return { text, shotCount: picked.shots.length, durationSec };
 }
 
-function collectFilmPromptSource(
+export function collectFilmPromptSource(
   nodeId: string,
   kind: AiFilmmakingPromptNodeKind,
   nodes: StudioRFNode[],
@@ -232,7 +300,50 @@ function collectFilmPromptSource(
   const storyboardPrompts: string[] = [];
   const storyboardTables: string[] = [];
   let storyboardPanelCount = 0;
+  let storyboardDurationSec = 0;
   const images: ImageReference[] = [];
+  const imageIds = new Set<string>();
+  const tableKeys = new Set<string>();
+
+  const addStoryboardTable = (
+    sourceNode: StudioRFNode,
+    sourceHandle?: string | null,
+  ): boolean => {
+    const output = storyboardOutputFromNode(sourceNode);
+    if (!output) return false;
+    const key = `${sourceNode.id}:${sourceHandle ?? 'out'}`;
+    if (tableKeys.has(key)) return true;
+    const tableBlock = formatStoryboardTableForGrid(sourceNode, output, sourceHandle);
+    if (!tableBlock) return false;
+    tableKeys.add(key);
+    storyboardTables.push(tableBlock.text);
+    storyboardPanelCount += tableBlock.shotCount;
+    storyboardDurationSec += tableBlock.durationSec;
+    return true;
+  };
+
+  const addImageReference = (sourceNode: StudioRFNode): ImageReference | null => {
+    const image = imageRefFromNode(sourceNode, nodes);
+    if (!image || imageIds.has(image.nodeId)) return image;
+    imageIds.add(image.nodeId);
+    images.push(image);
+    if (image.role === 'storyboard' && image.panelCount) {
+      storyboardPanelCount = image.panelCount;
+    }
+    return image;
+  };
+
+  const addStoryboardParentContext = (storyboardNode: StudioRFNode) => {
+    const prompt = textFromGeneratedPrompt(storyboardNode.data);
+    if (prompt && !storyboardPrompts.includes(prompt)) storyboardPrompts.push(prompt);
+    for (const outputImageNodeId of storyboardNode.data.storyboardOutputImageNodeIds ?? []) {
+      const outputImageNode = nodes.find((candidate) => candidate.id === outputImageNodeId);
+      if (outputImageNode) addImageReference(outputImageNode);
+    }
+    for (const upstream of collectIncomingSources(storyboardNode.id, nodes, edges)) {
+      addStoryboardTable(upstream.node, upstream.sourceHandle);
+    }
+  };
 
   for (const source of sources) {
     const shotListFullOutput =
@@ -244,18 +355,23 @@ function collectFilmPromptSource(
     const storyboardOutput = storyboardOutputFromNode(source.node);
     if (storyboardOutput) {
       const scopedStoryboardHandle = parseShotListItemOutputHandleId(source.sourceHandle) != null;
-      const tableBlock = formatStoryboardTableForGrid(source.node, storyboardOutput, source.sourceHandle);
-      if (tableBlock) {
-        storyboardTables.push(tableBlock.text);
-        storyboardPanelCount += tableBlock.shotCount;
-        continue;
-      }
+      if (addStoryboardTable(source.node, source.sourceHandle)) continue;
       if (scopedStoryboardHandle) continue;
     }
 
-    const image = imageRefFromNode(source.node);
+    const image = addImageReference(source.node);
     if (image) {
-      images.push(image);
+      if (image.role === 'storyboard' && source.node.data.generatedFromStoryboardNodeId) {
+        const parent = nodes.find(
+          (candidate) => candidate.id === source.node.data.generatedFromStoryboardNodeId,
+        );
+        if (parent?.type === 'aiFilmStoryboard') addStoryboardParentContext(parent);
+      }
+      continue;
+    }
+
+    if (source.node.type === 'aiFilmStoryboard' || source.node.data.type === 'film_storyboard_node') {
+      addStoryboardParentContext(source.node);
       continue;
     }
 
@@ -264,16 +380,15 @@ function collectFilmPromptSource(
 
     if (source.node.type === 'aiFilmCharacter' || source.node.data.type === 'film_character_node') {
       characterPrompts.push(text);
-    } else if (source.node.type === 'aiFilmStoryboard' || source.node.data.type === 'film_storyboard_node') {
-      storyboardPrompts.push(text);
     } else {
       textBlocks.push(text);
     }
   }
 
-  const storyboardImages = images.filter((image) => image.role === 'storyboard');
   const characterImages = images.filter((image) => image.role === 'character');
+  const storyboardImages = images.filter((image) => image.role === 'storyboard');
   const unknownImages = images.filter((image) => image.role === 'unknown');
+  const orderedImages = [...characterImages, ...storyboardImages, ...unknownImages];
   const sourceText = [...textBlocks, ...characterPrompts, ...storyboardPrompts, ...storyboardTables].join('\n');
 
   const hasStoryboardSource =
@@ -297,10 +412,25 @@ function collectFilmPromptSource(
 
   const primaryImage =
     kind === 'film_character_node'
-      ? images.find((image) => image.dataUrl)
+      ? orderedImages.find((image) => image.dataUrl)
       : videoMode === 'B' || videoMode === 'C'
         ? [...storyboardImages, ...unknownImages, ...characterImages].find((image) => image.dataUrl)
         : [...characterImages, ...unknownImages].find((image) => image.dataUrl);
+
+  if (primaryImage?.panelCount) storyboardPanelCount = primaryImage.panelCount;
+  const panelMappingText = primaryImage?.panels?.length
+    ? [...primaryImage.panels]
+        .sort((a, b) => a.panelIndex - b.panelIndex)
+        .map((panel) =>
+          `Panel ${panel.panelIndex} -> shot ${panel.shotNo?.trim() || panel.shotId} (${panel.sourceLabel})`,
+        )
+        .join('\n')
+    : '';
+  const sourceSignature = hashVideoPromptSource([
+    ...orderedImages.map((image) => `${image.nodeId}:${image.signature}:${image.role}`),
+    sourceText,
+    panelMappingText,
+  ]);
 
   const summary: AiFilmmakingSourceSummary = {
     textBlocks,
@@ -308,12 +438,20 @@ function collectFilmPromptSource(
     storyboardPrompts,
     storyboardTables,
     storyboardPanelCount: storyboardPanelCount > 0 ? storyboardPanelCount : undefined,
-    imageLabels: images.map((image) => image.label),
+    storyboardDurationSec: storyboardDurationSec > 0 ? storyboardDurationSec : undefined,
+    imageLabels: orderedImages.map((image) => image.label),
     storyboardImageLabels: storyboardImages.map((image) => image.label),
     characterImageLabels: characterImages.map((image) => image.label),
   };
 
-  return { summary, images, primaryImage, videoMode };
+  return {
+    summary,
+    images: orderedImages,
+    primaryImage,
+    videoMode,
+    sourceSignature,
+    panelMappingText,
+  };
 }
 
 function resolveFilmStoryboardSkill(data: StudioNodeData): ResolvedFilmStoryboardSkill | undefined {
@@ -323,6 +461,20 @@ function resolveFilmStoryboardSkill(data: StudioNodeData): ResolvedFilmStoryboar
   return {
     id: skill.id,
     name: skill.name,
+    instruction: skill.system_instruction,
+  };
+}
+
+function resolveFilmVideoPromptSkill(data: StudioNodeData): ResolvedFilmVideoPromptSkill {
+  const rawId = normalizeFilmVideoPromptSkillId(data.film_video_prompt_skill_id);
+  const skill = getSkillById(rawId) ?? getSkillById(DEFAULT_VIDEO_PROMPT_SKILL_ID);
+  if (!skill || skill.folder !== 'video_prompt') {
+    throw new Error('未找到可用的独立视频提示词 Skill。');
+  }
+  return {
+    id: skill.id,
+    name: skill.name,
+    version: skill.version,
     instruction: skill.system_instruction,
   };
 }
@@ -356,7 +508,7 @@ function buildUserPrompt(
   if (kind === 'film_storyboard_node') {
     return buildStoryboardGridUserPrompt(source.summary, storyboardSkill);
   }
-  return buildSeedanceVideoUserPrompt(source.summary, source.videoMode ?? 'A');
+  throw new Error('视频提示词节点必须通过九宫格图片分析流程执行。');
 }
 
 function hasUsableSource(kind: AiFilmmakingPromptNodeKind, source: FilmPromptSource): boolean {
@@ -367,6 +519,9 @@ function hasUsableSource(kind: AiFilmmakingPromptNodeKind, source: FilmPromptSou
       source.summary.storyboardPrompts.some(Boolean) ||
       source.summary.storyboardTables.some(Boolean)
     );
+  }
+  if (kind === 'film_video_prompt_node') {
+    return Boolean(source.primaryImage?.dataUrl && source.primaryImage.role === 'storyboard');
   }
   return (
     source.summary.textBlocks.some(Boolean) ||
@@ -384,7 +539,7 @@ function sourceMissingMessage(kind: AiFilmmakingPromptNodeKind): string {
   if (kind === 'film_storyboard_node') {
     return '请先连接文本节点或分镜表镜头输出，再生成分镜宫格提示词。';
   }
-  return '请先连接文本、角色设定、影视分镜或图片参考，再生成视频提示词。';
+  return '请先生成九宫格图片，再把影视分镜图节点或其右侧九宫格图片节点连接到视频提示词。';
 }
 
 function maxOutputTokensFor(kind: AiFilmmakingPromptNodeKind): number {
@@ -426,6 +581,15 @@ export function createAiFilmmakingStoreSlice(
         get().pushMessage({ role: 'system', text: message, nodeId });
         return;
       }
+      const connectedStoryboardImages = source.images.filter(
+        (image) => image.role === 'storyboard' && image.dataUrl,
+      );
+      if (kind === 'film_video_prompt_node' && connectedStoryboardImages.length > 1) {
+        const message = '当前连接包含多张分镜宫格。请从需要处理的单张九宫格图片节点创建视频提示词，一页对应一条视频提示词。';
+        get().patchNodeData(nodeId, { generation_error: message }, true);
+        get().pushMessage({ role: 'system', text: message, nodeId });
+        return;
+      }
 
       const config = getResolvedLlmGatewayConfig();
       if (!config) {
@@ -460,12 +624,219 @@ export function createAiFilmmakingStoreSlice(
             ? '角色设定节点正在调用 LLM 生成角色参考表提示词。'
             : kind === 'film_storyboard_node'
               ? `影视分镜节点正在调用 LLM，使用 Skill：${storyboardSkill?.name ?? '默认分镜'}。`
-              : `影视分镜提示词节点正在调用 LLM，自动识别为 ${source.videoMode ?? 'A'} 模式。`,
+              : `视频提示词节点正在读取最终九宫格图片，并按 ${source.videoMode ?? 'B'} 模式分析表演与动作接力。`,
         nodeId,
       });
 
       try {
-        const { requestLLM, requestLLMWithImage } = await import('@/services/ModelGateway');
+        const { requestLLM, requestLLMStream, requestLLMWithImage } = await import('@/services/ModelGateway');
+        if (kind === 'film_video_prompt_node') {
+          const primaryImage = source.primaryImage;
+          if (!primaryImage?.dataUrl) {
+            throw new Error(sourceMissingMessage(kind));
+          }
+          const videoPromptSkill = resolveFilmVideoPromptSkill(node.data);
+          const expectedPanelCount = Math.max(
+            1,
+            Math.min(
+              9,
+              Math.round(primaryImage.panelCount ?? source.summary.storyboardPanelCount ?? 9),
+            ),
+          );
+          const storyboardFacts = [
+            ...source.summary.storyboardTables,
+            ...source.summary.storyboardPrompts,
+            ...source.summary.textBlocks,
+          ]
+            .filter(Boolean)
+            .join('\n\n---\n\n');
+          const visionConfig = getResolvedVisionLlmGatewayConfig() ?? config;
+          get().patchNodeData(
+            nodeId,
+            {
+              streaming_preview: `阶段 1/3 · 正在读取九宫格图片并分析 ${expectedPanelCount} 个面板的构图、表演与动作接力…`,
+            },
+            true,
+          );
+          const analysisResult = await requestLLMWithImage(visionConfig, {
+            imageDataUrl: primaryImage.dataUrl,
+            imageDetail: 'high',
+            systemPrompt: buildVideoPromptAnalysisSystemPrompt(expectedPanelCount),
+            userPrompt: buildVideoPromptAnalysisUserPrompt({
+              imageLabel: primaryImage.label,
+              expectedPanelCount,
+              panelMappingText: source.panelMappingText,
+              storyboardFacts,
+            }),
+            temperature: 0.12,
+            jsonMode: true,
+            feature: `ai-filmmaking-video-analysis-${featureSafeId(videoPromptSkill.id)}`,
+            maxOutputTokens: 6200,
+            signal: controller.signal,
+          });
+          if (!analysisResult.ok) {
+            if (analysisResult.error.code === 'USER_ABORT') {
+              get().patchNodeData(
+                nodeId,
+                { status: 'APPROVED', streaming_preview: undefined, generation_error: undefined },
+                true,
+              );
+              return;
+            }
+            throw new Error(analysisResult.error.message);
+          }
+          const analysis = parseVideoPromptImageAnalysis(analysisResult.content, {
+            expectedPanelCount,
+            sourceImageNodeId: primaryImage.nodeId,
+            sourceImageSignature: primaryImage.signature,
+          });
+          const durationIsExplicit = Boolean(
+            node.data.film_video_prompt_duration_source === 'node' ||
+              (node.data.film_video_prompt_duration_source == null &&
+                Number.isFinite(Number(node.data.film_video_prompt_duration_sec)) &&
+                Number(node.data.film_video_prompt_duration_sec) > 0 &&
+                Number(node.data.film_video_prompt_duration_sec) !== 15),
+          );
+          const durationSec = resolveVideoPromptDurationSec(
+            durationIsExplicit ? node.data.film_video_prompt_duration_sec : undefined,
+            source.summary.storyboardDurationSec,
+          );
+          const referenceImages = [
+            ...source.images.filter((image) => image.role === 'character' && image.dataUrl),
+            primaryImage,
+          ].filter(
+            (image, index, all) => all.findIndex((candidate) => candidate.nodeId === image.nodeId) === index,
+          );
+          const mode: 'B' | 'C' = referenceImages.some((image) => image.role === 'character') ? 'C' : 'B';
+          const imageReferenceLines = referenceImages.map(
+            (image, index) =>
+              `@image${index + 1}: ${image.label} — ${image.role === 'storyboard' ? '按连续分镜面板读取' : '角色身份参考'}`,
+          );
+          get().patchNodeData(
+            nodeId,
+            {
+              film_video_prompt_analysis: analysis,
+              film_video_prompt_source_signature: source.sourceSignature,
+              film_video_prompt_source_image_node_ids: referenceImages.map((image) => image.nodeId),
+              film_video_prompt_duration_sec: durationIsExplicit
+                ? node.data.film_video_prompt_duration_sec
+                : undefined,
+              film_video_prompt_duration_source: durationIsExplicit ? 'node' : 'auto',
+              streaming_preview: `阶段 2/3 · 已识别 ${analysis.panels.length} 个面板。正在按「${videoPromptSkill.name}」生成逐段表演、运镜、声音与结束状态…`,
+            },
+            true,
+          );
+
+          let lastPreviewAt = 0;
+          const compositionResult = await requestLLMStream(config, {
+            systemPrompt: videoPromptSkill.instruction,
+            userPrompt: buildVideoPromptCompositionUserPrompt({
+              analysis,
+              mode,
+              durationSec,
+              imageReferenceLines,
+              storyboardFacts,
+              sourceDurationSec: source.summary.storyboardDurationSec,
+            }),
+            temperature: 0.22,
+            jsonMode: false,
+            feature: `ai-filmmaking-video-compose-${featureSafeId(videoPromptSkill.id)}`,
+            maxOutputTokens: maxOutputTokensFor(kind),
+            signal: controller.signal,
+            onDelta: (_delta, accumulated) => {
+              const now = Date.now();
+              if (now - lastPreviewAt < 160 && accumulated.length > 0) return;
+              lastPreviewAt = now;
+              const preview = accumulated.slice(-VIDEO_PROMPT_PREVIEW_MAX_CHARS);
+              get().patchNodeData(
+                nodeId,
+                { streaming_preview: `阶段 2/3 · 流式生成视频提示词…\n\n${preview}` },
+                false,
+              );
+            },
+          });
+          if (!compositionResult.ok) {
+            if (compositionResult.error.code === 'USER_ABORT') {
+              get().patchNodeData(
+                nodeId,
+                { status: 'APPROVED', streaming_preview: undefined, generation_error: undefined },
+                true,
+              );
+              return;
+            }
+            throw new Error(compositionResult.error.message);
+          }
+
+          let prompt = stripAiFilmmakingPromptWrapper(compositionResult.content);
+          let validationIssues = validateVideoPromptText(prompt, expectedPanelCount);
+          if (validationIssues.length > 0) {
+            get().patchNodeData(
+              nodeId,
+              {
+                streaming_preview: `阶段 3/3 · 正在修复视频提示词：${validationIssues.join(' ')}`,
+              },
+              true,
+            );
+            const repairResult = await requestLLM(config, {
+              systemPrompt: `${videoPromptSkill.instruction}\n\nThe previous draft failed validation. Repair it without changing source facts. Return only the complete corrected prompt.`,
+              userPrompt: [
+                `Validation issues:\n${validationIssues.map((issue) => `- ${issue}`).join('\n')}`,
+                '',
+                'Previous draft:',
+                prompt,
+              ].join('\n'),
+              temperature: 0.08,
+              jsonMode: false,
+              feature: `ai-filmmaking-video-repair-${featureSafeId(videoPromptSkill.id)}`,
+              maxOutputTokens: maxOutputTokensFor(kind),
+              signal: controller.signal,
+            });
+            if (!repairResult.ok) {
+              if (repairResult.error.code === 'USER_ABORT') return;
+              throw new Error(repairResult.error.message);
+            }
+            prompt = stripAiFilmmakingPromptWrapper(repairResult.content);
+            validationIssues = validateVideoPromptText(prompt, expectedPanelCount);
+            if (validationIssues.length > 0) {
+              throw new Error(`视频提示词校验失败：${validationIssues.join(' ')}`);
+            }
+          }
+
+          get().patchNodeData(
+            nodeId,
+            {
+              status: 'APPROVED',
+              input: prompt,
+              raw_text: prompt,
+              output: {
+                text: prompt,
+                aiFilmmakingKind: kind,
+                videoMode: mode,
+                videoPromptSkillId: videoPromptSkill.id,
+                videoPromptSkillVersion: videoPromptSkill.version,
+                durationSec,
+                storyboardPanelCount: expectedPanelCount,
+                sourceImageCount: referenceImages.length,
+                sourceImageNodeIds: referenceImages.map((image) => image.nodeId),
+                sourceSignature: source.sourceSignature,
+                imageAnalysis: analysis,
+              },
+              film_video_prompt_analysis: analysis,
+              film_video_prompt_skill_id: videoPromptSkill.id,
+              film_video_prompt_source_signature: source.sourceSignature,
+              film_video_prompt_source_image_node_ids: referenceImages.map((image) => image.nodeId),
+              streaming_preview: undefined,
+              generation_error: undefined,
+            },
+            true,
+          );
+          get().pushMessage({
+            role: 'broadcast',
+            text: `视频提示词已生成：${expectedPanelCount} 个面板，${durationSec} 秒，包含逐段表演与动作接力。`,
+            nodeId,
+          });
+          return;
+        }
         const hasImage = Boolean(source.primaryImage?.dataUrl);
         const requestConfig = hasImage ? getResolvedVisionLlmGatewayConfig() ?? config : config;
         const systemPrompt = buildAiFilmmakingSystemPrompt(
@@ -541,7 +912,6 @@ export function createAiFilmmakingStoreSlice(
             output: {
               text: prompt,
               aiFilmmakingKind: kind,
-              videoMode: kind === 'film_video_prompt_node' ? source.videoMode : undefined,
               storyboardSkillId: kind === 'film_storyboard_node' ? storyboardSkill?.id : undefined,
               storyboardPanelCount:
                 kind === 'film_storyboard_node' ? source.summary.storyboardPanelCount : undefined,
@@ -555,12 +925,25 @@ export function createAiFilmmakingStoreSlice(
         );
         get().pushMessage({
           role: 'broadcast',
-          text:
-            kind === 'film_video_prompt_node'
-              ? `影视分镜提示词已生成，模式：${source.videoMode ?? 'A'}。`
-              : 'AI Filmmaking 提示词已生成并写回节点。',
+          text: 'AI Filmmaking 提示词已生成并写回节点。',
           nodeId,
         });
+      } catch (error) {
+        if (controller.signal.aborted) {
+          get().patchNodeData(
+            nodeId,
+            { status: 'APPROVED', streaming_preview: undefined, generation_error: undefined },
+            true,
+          );
+          return;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        get().patchNodeData(
+          nodeId,
+          { status: 'APPROVED', streaming_preview: undefined, generation_error: message },
+          true,
+        );
+        get().pushMessage({ role: 'system', text: message, nodeId });
       } finally {
         if (deps.activeTaskAbortControllers.get(nodeId) === controller) {
           deps.activeTaskAbortControllers.delete(nodeId);

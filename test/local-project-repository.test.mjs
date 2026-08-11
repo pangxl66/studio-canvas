@@ -114,6 +114,8 @@ test('disk repository externalizes embedded images and indexes compact versions'
       id: 'image-node',
       data: {
         imageDataUrl,
+        imageEditBaseDataUrl: imageDataUrl,
+        imagePaletteSourceDataUrl: imageDataUrl,
       },
     }],
   }));
@@ -121,6 +123,10 @@ test('disk repository externalizes embedded images and indexes compact versions'
   const restored = repository.readSnapshot('project_disk_test');
   assert.equal(restored.nodes[0].data.imageDataUrl, undefined);
   assert.match(restored.nodes[0].data.imageAssetId, /^sha256_[a-f0-9]{64}$/);
+  assert.equal(restored.nodes[0].data.imageEditBaseDataUrl, undefined);
+  assert.match(restored.nodes[0].data.imageEditBaseAssetId, /^sha256_[a-f0-9]{64}$/);
+  assert.equal(restored.nodes[0].data.imagePaletteSourceDataUrl, undefined);
+  assert.match(restored.nodes[0].data.imagePaletteSourceAssetId, /^sha256_[a-f0-9]{64}$/);
   const asset = repository.readAsset(restored.nodes[0].data.imageAssetId);
   assert.deepEqual(asset.buffer, bytes);
   assert.equal(repository.listVersions('project_disk_test').length, 1);

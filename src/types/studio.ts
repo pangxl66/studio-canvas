@@ -192,6 +192,7 @@ export type TextNodeSemanticRole =
 export type TextImageTaskMode =
   | 'extract_shot'
   | 'skill_analysis'
+  | 'normalize_storyboard'
   | 'continue_shot';
 
 /** 单镜头视频提示词的十维结构化（与主 prompt 字符串互补） */
@@ -294,6 +295,35 @@ export interface StoryboardGridImagePage {
   panels: StoryboardGridPanelMapping[];
 }
 
+export interface VideoPromptPanelAnalysis {
+  panelIndex: number;
+  sourceShotId?: string;
+  visualSummary: string;
+  camera: string;
+  performance: string;
+  gaze: string;
+  bodyLanguage: string;
+  handAction: string;
+  startState: string;
+  endState: string;
+  continuity: string;
+  uncertainty?: string;
+}
+
+/** Internal, editable analysis of the rendered storyboard image before the video prompt is composed. */
+export interface VideoPromptImageAnalysis {
+  readingOrder: string;
+  sceneSummary: string;
+  globalVisualLock: string;
+  performanceBaseline: string;
+  spatialContinuity: string;
+  panels: VideoPromptPanelAnalysis[];
+  uncertainties: string[];
+  sourceImageNodeId: string;
+  sourceImageSignature: string;
+  analyzedAt: number;
+}
+
 export type StoryboardReferenceKind = 'character' | 'scene' | 'prop';
 
 /**
@@ -306,6 +336,23 @@ export interface StoryboardReferenceBinding {
   entityId?: string;
   entityName?: string;
 }
+
+export type ProjectAspectRatio = '16:9' | '9:16' | '21:9';
+
+/** 当前工程唯一的全局生成设置；随工程文件、自动存档和云端快照一起保存。 */
+export type ProjectSettings = {
+  schemaVersion: 1;
+  revision: number;
+  aspectRatio: ProjectAspectRatio;
+  overallStyle: {
+    enabled: boolean;
+    text: string;
+  };
+  defaultSkills: {
+    storyboardSkillId: string;
+    promptSkillId: string;
+  };
+};
 
 /**
  * 节点业务数据（Zustand / React Flow `data`）必填字段：
@@ -326,7 +373,7 @@ export type StudioNodeData = {
   raw_text?: string;
   /** TEXT_NODE：展示模式。plain=常规文本节点；未设置时使用 AI 工作区模式 */
   text_view_mode?: 'plain';
-  text_polish_mode?: 'simple' | 'deep';
+  text_polish_mode?: 'simple' | 'deep' | 'storyboard';
   /** TEXT_NODE：图片任务。默认只提取当前画面的分镜事实，不推算后续镜头。 */
   text_image_task_mode?: TextImageTaskMode;
   /** TEXT_NODE：使用分镜 Skill 分析图片时选用的技能 id。 */
@@ -338,7 +385,19 @@ export type StudioNodeData = {
   /** AI Filmmaking 影视分镜节点：当前选用的分镜 Skill id */
   film_storyboard_skill_id?: string;
   /** AI Filmmaking storyboard grid canvas ratio. */
-  film_storyboard_aspect_ratio?: '16:9' | '9:16';
+  film_storyboard_aspect_ratio?: ProjectAspectRatio;
+  film_storyboard_aspect_ratio_source?: 'project' | 'node';
+  film_storyboard_skill_source?: 'project' | 'node';
+  /** Dedicated image-to-video prompt specification; intentionally isolated from legacy Prompt skills. */
+  film_video_prompt_skill_id?: string;
+  /** User-overridable total duration with no hard upper bound. When absent, connected shot durations are used, then 15s. */
+  film_video_prompt_duration_sec?: number;
+  /** auto follows the connected shot total; node means the user explicitly entered a duration. */
+  film_video_prompt_duration_source?: 'auto' | 'node';
+  /** Vision analysis of the actual rendered storyboard grid used to compose the current video prompt. */
+  film_video_prompt_analysis?: VideoPromptImageAnalysis;
+  film_video_prompt_source_signature?: string;
+  film_video_prompt_source_image_node_ids?: string[];
   /** 分镜节点：生成时依据的剧本场次数，供分镜 Leader 与场次对齐校验 */
   sourceSceneCount?: number;
   /** 分镜：员工 AI 首次写入 `output` 时的深拷贝，供「重置为 AI 原始生成」 */
@@ -349,6 +408,8 @@ export type StudioNodeData = {
   assistant_preferences?: string;
   /** 通过左侧智能助手补充的当前任务要求；下次执行时自动并入任务文本 */
   assistant_task_instruction?: string;
+  /** 分镜部 / Prompt 节点主 Skill 是否跟随项目全局默认。 */
+  skill_source?: 'project' | 'node';
   /**
    * 挂载的技能 id 列表（与 `SkillLoader` 中 id 一致，如 `writing/daily_skit_v1`）。
    * 执行时 LLM system = 部门基础指令 + 各技能 system_instruction + 用户数据侧由 user 承载。
@@ -395,6 +456,8 @@ export type StudioNodeData = {
   imageWidth?: number;
   imageHeight?: number;
   imageAnalysisSummary?: string;
+  /** 场景视觉分析协议版本；用于升级环境动态与物理特效识别。 */
+  imageAnalysisVersion?: number;
   /**
    * 图片节点连入 Prompt 节点时生成的色彩表分析。
    * 与场景参考分析分开缓存，避免同一图片在不同消费者之间混用职责。
@@ -414,6 +477,8 @@ export type StudioNodeData = {
   imageEditAspectRatio?: 'source' | '16:9' | '9:16' | '1:1';
   /** 单节点原地编辑：第一次覆盖前保留的原图基线。 */
   imageEditBaseDataUrl?: string;
+  imageEditBaseAssetId?: string;
+  imageEditBaseAssetMimeType?: string;
   imageEditBaseMimeType?: string;
   imageEditBaseFileName?: string;
   imageEditBaseWidth?: number;
@@ -425,6 +490,8 @@ export type StudioNodeData = {
   imageEditCompletedAt?: number;
   /** 色表输出覆盖当前节点前保留的直接来源图，用于重新生成和恢复。 */
   imagePaletteSourceDataUrl?: string;
+  imagePaletteSourceAssetId?: string;
+  imagePaletteSourceAssetMimeType?: string;
   imagePaletteSourceMimeType?: string;
   imagePaletteSourceFileName?: string;
   imagePaletteSourceWidth?: number;
@@ -447,9 +514,15 @@ export type StudioNodeData = {
   /** Last request's real reference order, e.g. 角色:老和尚 → 场景:禅房. */
   imageGenerationReferenceLabels?: string[];
   /** 影视分镜图片实际生成时选择的目标画幅，用于切换画幅后的过期提示。 */
-  imageGenerationAspectRatio?: '16:9' | '9:16';
+  imageGenerationAspectRatio?: ProjectAspectRatio;
   imageGenerationCompletedAt?: number;
   imageGenerationStatus?: 'idle' | 'generating';
+  /** 当前绘图阶段；只用于运行时进度显示，恢复工程时会被清理。 */
+  imageGenerationPhase?:
+    | 'preparing_references'
+    | 'requesting_model'
+    | 'validating_result'
+    | 'creating_output';
   /** 动态分镜宫格结果；每页最多 9 个镜头，超过 9 个时按连线顺序分页。 */
   storyboardGridImages?: StoryboardGridImagePage[];
   /** 影视分镜节点：连入图片与剧本分解表角色/场景/道具的命名绑定。 */

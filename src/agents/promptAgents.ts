@@ -19,7 +19,10 @@ import {
 } from '@/agents/promptDeptSpec';
 import { tryParseStoryboardOutput } from '@/agents/storyboardAgents';
 import { invokeLlmJsonObjectStream, invokeLlmLeaderReview } from '@/services/llmJsonClient';
-import { resolveAndComposeMountedSkills } from '@/services/skillLoader';
+import {
+  resolveAndComposeMountedSkills,
+  SEEDANCE25_MULTIMODAL_PROMPT_V10_SKILL_ID,
+} from '@/services/skillLoader';
 import { runPromptGenerationPipeline } from '@/agents/promptPipeline';
 import type {
   ApprovedAsset,
@@ -47,6 +50,8 @@ import {
   parseStudioCanvasTimelineIntervals,
   repairStudioCanvasV25Timeline,
 } from '@/utils/studioCanvasTimeline';
+import { getSeedance25ReadableFaceIssues } from '@/utils/seedance25PerformanceValidation';
+import { composeSeedance25PerformanceCard } from '@/utils/seedance25PerformanceComposition';
 export {
   PROMPT_DEPT_AGENT_SYSTEM,
   PROMPT_DEPT_OUTPUT_SHAPE,
@@ -75,7 +80,13 @@ const MAX_SEEDANCE_CARD_CHARS = 3200;
 const MIN_SEEDANCE2_SEGMENTED_CARD_CHARS = 2000;
 const MAX_SEEDANCE2_SEGMENTED_CARD_CHARS = 3500;
 const SEEDANCE2_SEGMENTED_PROMPT_MARKER = 'Seedance2.0 分段式提示词助手';
-const SEEDANCE2_SEGMENTED_FORMAT = 'seedance2_segmented_15s_v1';
+const SEEDANCE2_SEGMENTED_FORMAT = 'seedance2_segmented_timeline_v2';
+const SEEDANCE25_MULTIMODAL_PROMPT_MARKER = 'Seedance 2.5 多模态影视提示词 Skill';
+const SEEDANCE25_MULTIMODAL_FORMAT = 'seedance_2_5_multimodal_film_v10';
+const SEEDANCE25_PERFORMANCE_V11_MARKER = 'Seedance 2.5 + 八维表演';
+const SEEDANCE25_PERFORMANCE_V11_FORMAT = 'seedance_2_5_plus_eight_dimensional_performance';
+const MIN_SEEDANCE25_CARD_CHARS = 200;
+const MAX_SEEDANCE25_CARD_CHARS = 20000;
 const PROMPT_DETAILED_MOUNT_SYSTEM_AMENDMENT = [
   '【运行时挂载兼容修订｜高优先级】',
   '当前源分镜表本身就是本镜的最小 Asset Manifest。',
@@ -106,7 +117,9 @@ type PromptStyleMode =
   | 'studioCanvasV25'
   | 'studioCanvasV26'
   | 'studioCanvasV27'
-  | 'seedance2Segmented';
+  | 'seedance2Segmented'
+  | 'seedance25Multimodal'
+  | 'seedance25PerformanceV11';
 
 const STUDIO_CANVAS_V23_MARKER = 'Studio Canvas 默认提示词规范·生产优化版';
 const STUDIO_CANVAS_V231_SEGMENTS_MARKER = 'Studio Canvas 2.3.1 组合镜头结构化版';
@@ -115,6 +128,12 @@ const STUDIO_CANVAS_V26_MARKER = 'Studio Canvas 默认提示词规范·详细挂
 const STUDIO_CANVAS_V27_MARKER = 'Studio Canvas 默认提示词规范·摄影机参数匹配版';
 
 function inferPromptStyleMode(executionSystemPrompt?: string): PromptStyleMode {
+  if (executionSystemPrompt?.includes(SEEDANCE25_PERFORMANCE_V11_MARKER)) {
+    return 'seedance25PerformanceV11';
+  }
+  if (executionSystemPrompt?.includes(SEEDANCE25_MULTIMODAL_PROMPT_MARKER)) {
+    return 'seedance25Multimodal';
+  }
   if (executionSystemPrompt?.includes(SEEDANCE2_SEGMENTED_PROMPT_MARKER)) {
     return 'seedance2Segmented';
   }
@@ -138,6 +157,14 @@ function inferPromptStyleMode(executionSystemPrompt?: string): PromptStyleMode {
 
 function isSeedance2SegmentedStyle(styleMode: PromptStyleMode): boolean {
   return styleMode === 'seedance2Segmented';
+}
+
+function isSeedance25MultimodalStyle(styleMode: PromptStyleMode): boolean {
+  return styleMode === 'seedance25Multimodal' || styleMode === 'seedance25PerformanceV11';
+}
+
+function isSeedance25PerformanceV11Style(styleMode: PromptStyleMode): boolean {
+  return styleMode === 'seedance25PerformanceV11';
 }
 
 function isStudioCanvasV23Style(styleMode: PromptStyleMode): boolean {
@@ -175,12 +202,14 @@ function isStudioCanvasValidationStyle(styleMode: PromptStyleMode): boolean {
 }
 
 function getMaxSeedanceCardChars(styleMode: PromptStyleMode): number {
+  if (isSeedance25MultimodalStyle(styleMode)) return MAX_SEEDANCE25_CARD_CHARS;
   return isSeedance2SegmentedStyle(styleMode)
     ? MAX_SEEDANCE2_SEGMENTED_CARD_CHARS
     : MAX_SEEDANCE_CARD_CHARS;
 }
 
 function getMinSeedanceCardChars(styleMode: PromptStyleMode): number {
+  if (isSeedance25MultimodalStyle(styleMode)) return MIN_SEEDANCE25_CARD_CHARS;
   return isSeedance2SegmentedStyle(styleMode)
     ? MIN_SEEDANCE2_SEGMENTED_CARD_CHARS
     : MIN_SEEDANCE_CARD_CHARS;
@@ -206,7 +235,7 @@ function withSeedance2StyleSystemOverride(systemPrompt?: string): string | undef
     'For every shotPrompts[i].seedanceCard, use only the Seedance2.0 four Markdown modules:',
     SEEDANCE2_SEGMENTED_HEADINGS.join('\n'),
     'Do not use the default Studio Canvas card fields such as 挂载 / 相机位置 / 提示词 / 钉子4行 in seedanceCard.',
-    `Each seedanceCard must be ${MIN_SEEDANCE2_SEGMENTED_CARD_CHARS}-${MAX_SEEDANCE2_SEGMENTED_CARD_CHARS} Chinese characters and must contain a continuous [00.0s - 15.0s] timeline.`,
+    `Each seedanceCard must be ${MIN_SEEDANCE2_SEGMENTED_CARD_CHARS}-${MAX_SEEDANCE2_SEGMENTED_CARD_CHARS} Chinese characters and must contain a continuous timeline from 00.0s to the node-specified or upstream real duration. There is no 15-second hard limit.`,
   ].join('\n');
 }
 
@@ -757,9 +786,9 @@ function assertStudioCanvasV23Card(shotId: string, seedanceCard: string): string
   const { header, sections } = parseStudioCanvasV23Sections(card);
   const headerMatch = header.match(/^【分镜([^|]+)\s*\|\s*(\d+(?:\.\d+)?)秒】$/);
   const duration = headerMatch ? Number(headerMatch[2]) : Number.NaN;
-  if (!headerMatch || !Number.isFinite(duration) || duration <= 0 || duration > 15) {
+  if (!headerMatch || !Number.isFinite(duration) || duration <= 0) {
     throw new Error(
-      `Prompt 模型返回：镜头 ${shotId} 的 Studio Canvas 2.3 首行必须为“【分镜XX | N秒】”，且时长在 0-15 秒内。`,
+      `Prompt 模型返回：镜头 ${shotId} 的 Studio Canvas 2.3 首行必须为“【分镜XX | N秒】”，且时长必须大于 0 秒。`,
     );
   }
 
@@ -1258,7 +1287,7 @@ function parseSeedance2TimelineIntervals(card: string): Seedance2TimelineInterva
   return intervals;
 }
 
-function assertContinuousFifteenSecondTimeline(shotId: string, card: string): void {
+function assertContinuousSeedance2Timeline(shotId: string, card: string): void {
   const intervals = parseSeedance2TimelineIntervals(card);
   if (!intervals.length) {
     throw new Error(`Seedance2.0 prompt for shot ${shotId} must include timestamp ranges like [00.0s - 02.5s].`);
@@ -1276,8 +1305,8 @@ function assertContinuousFifteenSecondTimeline(shotId: string, card: string): vo
     cursor = interval.end;
   }
 
-  if (Math.abs(cursor - 15) > tolerance) {
-    throw new Error(`Seedance2.0 prompt for shot ${shotId} timeline must end exactly at 15.0s.`);
+  if (!Number.isFinite(cursor) || cursor <= 0) {
+    throw new Error(`Seedance2.0 prompt for shot ${shotId} timeline must end at a valid positive duration.`);
   }
 }
 
@@ -1344,8 +1373,177 @@ function assertSeedance2SegmentedCard(shotId: string, seedanceCard: string): str
     throw new Error(`Seedance2.0 prompt for shot ${shotId} must not include UI render parameters.`);
   }
 
-  assertContinuousFifteenSecondTimeline(shotId, card);
+  assertContinuousSeedance2Timeline(shotId, card);
 
+  return card;
+}
+
+function hasSeedance25MultimodalStructure(seedanceCard: string): boolean {
+  const card = seedanceCard.replace(/\r/g, '').trim();
+  if (!/^【Seedance 2\.5｜/.test(card)) return false;
+  if (!/(^|\n)挂载：/.test(card)) return false;
+  for (const heading of [
+    '【摄影机 / 镜头】',
+    '【机位与构图】',
+    '【起幅】',
+    '【时间轴】',
+    '【声音 / 对白】',
+    '【文字与字幕限制】',
+  ]) {
+    if (!card.includes(heading)) return false;
+  }
+  return card.includes('【最终落幅】') || card.includes('【落幅】');
+}
+
+function assertSeedance25MultimodalCard(
+  shotId: string,
+  seedanceCard: string,
+  versionLabel = 'v10',
+): string {
+  const card = seedanceCard.replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim();
+  if (!hasSeedance25MultimodalStructure(card)) {
+    throw new Error(
+      `Prompt 模型返回：镜头 ${shotId} 未遵守 Seedance 2.5 ${versionLabel} 最终结构，必须从“【Seedance 2.5｜”开始并包含挂载、摄影机/镜头、机位与构图、起幅、时间轴、声音/对白、落幅及文字与字幕限制。`,
+    );
+  }
+  MOUNT_TOKEN_RE.lastIndex = 0;
+  const withoutValidMountTokens = card.replace(MOUNT_TOKEN_RE, '');
+  MOUNT_TOKEN_RE.lastIndex = 0;
+  if (withoutValidMountTokens.includes('|@=')) {
+    throw new Error(
+      `Prompt 模型返回：镜头 ${shotId} 的 Seedance 2.5 挂载必须统一使用“|@=名称|”格式。`,
+    );
+  }
+  const length = Array.from(card).length;
+  if (length < MIN_SEEDANCE25_CARD_CHARS || length > MAX_SEEDANCE25_CARD_CHARS) {
+    throw new Error(
+      `Prompt 模型返回：镜头 ${shotId} 的 Seedance 2.5 最终提示词长度必须在 ${MIN_SEEDANCE25_CARD_CHARS}-${MAX_SEEDANCE25_CARD_CHARS} 字之间。`,
+    );
+  }
+  return card;
+}
+
+function getSeedance25Section(card: string, heading: string): string {
+  const start = card.indexOf(heading);
+  if (start < 0) return '';
+  const contentStart = start + heading.length;
+  const nextHeading = card.indexOf('\n【', contentStart);
+  return card.slice(contentStart, nextHeading < 0 ? card.length : nextHeading).trim();
+}
+
+type Seedance25TimelineInterval = {
+  start: number;
+  end: number;
+  body: string;
+};
+
+const SEEDANCE25_TIME_RANGE_PATTERN =
+  String.raw`(?:\[|\()?\s*(\d+(?:\.\d+)?)\s*(?:s|秒)?\s*(?:-|–|—|~|至|到)\s*(\d+(?:\.\d+)?)\s*(?:s|秒)?\s*(?:\]|\))?`;
+const SEEDANCE25_PERFORMANCE_SIGNAL_RE =
+  /面部|眉|眼睑|眼角|面颊|嘴角|唇|下颌|眨眼|视线|目光|眼神|头部|抬头|低头|转头|偏头|重心|肩|躯干|身体|手部|手指|步幅|姿态|呼吸|吸气|呼气|屏息|声音|语气|音量|语速|停顿|断句|尾音|沉默|机械|伺服|传感器|转向|加速|减速|制动|惯性|距离|灯光反馈/i;
+
+function parseSeedance25TimelineIntervals(timeline: string): Seedance25TimelineInterval[] {
+  const rangeRe = new RegExp(SEEDANCE25_TIME_RANGE_PATTERN, 'gi');
+  const matches = Array.from(timeline.matchAll(rangeRe));
+  return matches.map((match, index) => ({
+    start: Number(match[1]),
+    end: Number(match[2]),
+    body: timeline
+      .slice((match.index ?? 0) + match[0].length, matches[index + 1]?.index ?? timeline.length)
+      .trim(),
+  }));
+}
+
+function extractSeedance25DeclaredDuration(card: string): number | null {
+  const header = card.split('\n', 1)[0] ?? '';
+  const generationSpec = getSeedance25Section(card, '【生成规格】');
+  const durationMatch = `${header}\n${generationSpec}`.match(
+    /(?:总时长|时长)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*秒|[｜|]\s*(\d+(?:\.\d+)?)\s*秒/i,
+  );
+  const duration = Number(durationMatch?.[1] ?? durationMatch?.[2]);
+  return Number.isFinite(duration) && duration > 0 ? duration : null;
+}
+
+function getSeedance25PerformanceV11Issues(seedanceCard: string): string[] {
+  if (!hasSeedance25MultimodalStructure(seedanceCard)) {
+    return ['缺少 Seedance 2.5 v10 基础结构'];
+  }
+  const issues: string[] = [];
+  const performance = getSeedance25Section(seedanceCard, '【表演】');
+  const timeline = getSeedance25Section(seedanceCard, '【时间轴】');
+  if (!performance) issues.push('缺少【表演】规划层');
+  if (!timeline) issues.push('缺少【时间轴】执行层');
+  if (!performance || !timeline) return issues;
+
+  if (/(?:AU\s*\d+|FACS)/i.test(seedanceCard)) {
+    issues.push('最终提示词泄漏 AU/FACS 编号；必须翻译为自然语言表演');
+  }
+
+  const timestampRe = new RegExp(
+    `${SEEDANCE25_TIME_RANGE_PATTERN}|第\\s*\\d+(?:\\.\\d+)?\\s*秒|\\d+(?:\\.\\d+)?\\s*秒(?:时|后|内)`,
+    'i',
+  );
+  if (timestampRe.test(performance)) issues.push('【表演】出现时间戳；时间戳只能存在于【时间轴】');
+
+  const noActionSubject = /无行动主体/.test(performance);
+  if (!noActionSubject) {
+    if (!/表演调性|整体(?:采用|保持)|整体表演/.test(performance)) {
+      issues.push('【表演】缺少精简的整体表演调性');
+    }
+    if (/目标\s*[:：]|潜台词\s*[:：]|触发锚点\s*[:：]|表演弧线\s*[:：]|面部可读性\s*[:：]|镜尾状态\s*[:：]/.test(performance)) {
+      issues.push('【表演】泄漏逐角色导演分析；目标、潜台词、触发、弧线、面部可读性和镜尾状态必须内部规划后编入【时间轴】');
+    }
+    if (performance.length > 800) {
+      issues.push('【表演】过长；这里只保留整体调性、人物主次与关系，单人表演细节进入【时间轴】');
+    }
+  }
+
+  const intervals = parseSeedance25TimelineIntervals(timeline);
+  if (!intervals.length) {
+    issues.push('【时间轴】缺少最终数值秒数范围');
+    return issues;
+  }
+  const epsilon = 0.06;
+  if (Math.abs(intervals[0].start) > epsilon) issues.push('【时间轴】没有从 0.0s 开始');
+  for (let index = 0; index < intervals.length; index += 1) {
+    const interval = intervals[index];
+    if (!(interval.end > interval.start)) issues.push(`【时间轴】第 ${index + 1} 段时长无效`);
+    if (index > 0 && Math.abs(interval.start - intervals[index - 1].end) > epsilon) {
+      issues.push(`【时间轴】第 ${index} 段与第 ${index + 1} 段不连续`);
+    }
+    if (!noActionSubject && !SEEDANCE25_PERFORMANCE_SIGNAL_RE.test(interval.body)) {
+      issues.push(`【时间轴】第 ${index + 1} 段只有事件动作，没有八维表演增量`);
+    }
+  }
+  issues.push(...getSeedance25ReadableFaceIssues(seedanceCard, timeline));
+  const declaredDuration = extractSeedance25DeclaredDuration(seedanceCard);
+  if (declaredDuration !== null && Math.abs(intervals.at(-1)!.end - declaredDuration) > epsilon) {
+    issues.push(`【时间轴】未准确结束于生成规格声明的 ${declaredDuration} 秒`);
+  }
+
+  if (/机器人|非人角色|非人主体|机械主体/.test(seedanceCard)) {
+    if (!/非人|机器人|机械|姿态|距离|节奏|灯光|声音/.test(performance)) {
+      issues.push('【表演】没有说明非人主体的替代表演原则');
+    }
+    if (!/机械|伺服|传感器|转向|加速|减速|制动|惯性|距离|灯光反馈|机械声/.test(timeline)) {
+      issues.push('非人主体没有在【时间轴】使用机械、姿态、距离、节奏、灯光或声音信号');
+    }
+  }
+  return Array.from(new Set(issues));
+}
+
+function hasSeedance25PerformanceV11Structure(seedanceCard: string): boolean {
+  return getSeedance25PerformanceV11Issues(seedanceCard).length === 0;
+}
+
+function assertSeedance25PerformanceV11Card(shotId: string, seedanceCard: string): string {
+  const card = assertSeedance25MultimodalCard(shotId, seedanceCard, '+ 八维表演版');
+  const issues = getSeedance25PerformanceV11Issues(card);
+  if (issues.length) {
+    throw new Error(
+      `Prompt 模型返回：镜头 ${shotId} 未遵守 Seedance 2.5 + 八维表演结构：${issues.join('；')}。`,
+    );
+  }
   return card;
 }
 
@@ -1414,7 +1612,9 @@ function normalizePromptOutput(
     };
     const normalizedSeedanceCard =
       typeof pack.seedanceCard === 'string'
-        ? isSeedance2SegmentedStyle(styleMode)
+        ? isSeedance25MultimodalStyle(styleMode)
+          ? pack.seedanceCard.replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim()
+        : isSeedance2SegmentedStyle(styleMode)
           ? normalizeSeedance2CardText(pack.seedanceCard)
           : isStudioCanvasValidationStyle(styleMode)
             ? repairStudioCanvasV25Timeline(pack.seedanceCard)
@@ -1448,6 +1648,10 @@ function normalizePromptOutput(
       ...output.parameters,
       format: isSeedance2SegmentedStyle(styleMode)
         ? SEEDANCE2_SEGMENTED_FORMAT
+        : isSeedance25PerformanceV11Style(styleMode)
+          ? SEEDANCE25_PERFORMANCE_V11_FORMAT
+        : isSeedance25MultimodalStyle(styleMode)
+          ? SEEDANCE25_MULTIMODAL_FORMAT
         : isStudioCanvasV231SegmentsStyle(styleMode)
         ? 'studio_canvas_v2_3_1_segments'
         : isStudioCanvasV27Style(styleMode)
@@ -1494,6 +1698,12 @@ function outputNeedsCompressionRepair(output: PromptOutput, styleMode: PromptSty
       if (['镜头机位', '视觉画面', '[前景]', '[主体]', '[背景]', '听觉声效'].some((term) => !seedanceCard.includes(term))) return true;
       if (!parseSeedance2TimelineIntervals(seedanceCard).length) return true;
     }
+    if (isSeedance25PerformanceV11Style(styleMode) && !hasSeedance25PerformanceV11Structure(seedanceCard)) {
+      return true;
+    }
+    if (isSeedance25MultimodalStyle(styleMode) && !hasSeedance25MultimodalStructure(seedanceCard)) {
+      return true;
+    }
     return false;
   });
 }
@@ -1530,6 +1740,14 @@ function validatePromptPackContent(pack: PromptShotPack, styleMode: PromptStyleM
   }
   if (isSeedance2SegmentedStyle(styleMode)) {
     assertSeedance2SegmentedCard(pack.shot_id, seedanceCard);
+    return;
+  }
+  if (isSeedance25PerformanceV11Style(styleMode)) {
+    assertSeedance25PerformanceV11Card(pack.shot_id, seedanceCard);
+    return;
+  }
+  if (isSeedance25MultimodalStyle(styleMode)) {
+    assertSeedance25MultimodalCard(pack.shot_id, seedanceCard);
     return;
   }
   if (isStudioCanvasV23Style(styleMode)) {
@@ -1688,7 +1906,7 @@ function buildPromptUserMessage(
     'negative 与每个 shot 的 negative_prompt 必须显式包含：background music / bgm、subtitle / subtitles / text overlay、ui / hud / interface overlay。',
     'prompt body must not end with `...` or a unicode ellipsis; it must close on a complete result beat.',
     'seedanceCard 标题中的秒数必须是按内容推算出的真实总时长，不得固定写 15 秒。',
-    '如果一条镜头组实际 5 秒就能完成，就写 5 秒；不要因为上限是 15 秒就把所有内容拉满到 15 秒。',
+    '如果一条镜头组实际 5 秒就能完成，就写 5 秒；如果输入需要 25 秒就完整保留 25 秒，不得强行压缩到 15 秒。',
     '连续镜头组的秒数占比和时间区间只写在“摄影机动态参数”里，其它模块不要重复写。',
     'prompt 本体必须是“提示词(复制到即梦)”类型的压缩执行文本，不得逐条复述栏目标题。',
     '空镜、环境镜、道具镜、无人物镜头里，不要写眼神、人物微表情、角色朝向等人物描述；“表演建议”字段可改写为光影、气流、道具微动或空间静压。',
@@ -1936,7 +2154,7 @@ function buildPromptUserMessageV3(
     PROMPT_TIMING_SYSTEM_RULE,
     'prompt body must not end with `...` or a unicode ellipsis; it must close on a complete result beat.',
     'seedanceCard 标题中的秒数必须是按内容推算出的真实总时长，不得固定写 15 秒。',
-    '如果一条镜头组实际 5 秒就能完成，就写 5 秒；不要因为上限是 15 秒就把所有内容拉满到 15 秒。',
+    '如果一条镜头组实际 5 秒就能完成，就写 5 秒；如果输入需要 25 秒就完整保留 25 秒，不得强行压缩到 15 秒。',
     '连续镜头组必须显式写出每个子镜头的秒数占比和时间区间，并让时长与动作密度匹配。',
     'prompt 本体必须是压缩后的执行文本，不得逐条复述栏目标题。',
     '空镜、环境镜、道具镜、无人物镜头里，不要硬写人物眼神、嘴角或面部停顿。',
@@ -2106,7 +2324,7 @@ function buildStudioCanvasV23RuntimeRules(sourceStoryboard: StoryboardOutput | n
     '所有字段必须有值；无适用内容时填写“无”。四类钉子必须独立保留，不能合并回“钉子4行”。',
     '“提示词”是可独立发送给视频引擎的 Engine Prompt，不是 Studio Card 其他字段的逐字拼接，常规不超过900字。',
     '“构图锚点”允许传统前景/中景/后景，也允许主体层/关系层/环境层、无独立前景或全幅同焦等自适应表达。',
-    '首行与摄影机动态参数的总时长必须一致，所有分段连续且总和等于首行时长，单卡不得超过15秒。',
+    '首行与摄影机动态参数的总时长必须一致，所有分段连续且总和等于首行时长；单卡不设15秒硬上限，必须保留输入或上游给出的真实时长。',
     PROMPT_CARD_LENGTH_BUDGET_RULE,
     buildPromptModeHints(sourceStoryboard),
   ].filter(Boolean).join('\n');
@@ -2135,7 +2353,7 @@ function buildStructureRepairUserMessageV23(
   assetRefs: unknown,
   sourceStoryboard: StoryboardOutput | null,
   invalidOutput: unknown,
-  failureReason?: string,
+  failureReason: string | undefined,
 ): string {
   return [
     failureReason ? `【上次失败原因】${failureReason}` : '',
@@ -2174,7 +2392,7 @@ function buildCoverageRepairUserMessageV23(
   assetRefs: unknown,
   sourceStoryboard: StoryboardOutput,
   invalidOutput: PromptOutput,
-  failureReason?: string,
+  failureReason: string | undefined,
 ): string {
   return [
     failureReason ? `【上次失败原因】${failureReason}` : '',
@@ -2200,12 +2418,12 @@ function buildStudioCanvasV25RuntimeRules(sourceStoryboard: StoryboardOutput | n
     '源分镜表是当前镜头的最小资产清单：characters、props、sceneRef、sound 以及 description/action 中明确命名且实际出现或触发的关键物体、机械装置、空间结构和声音，均可进入挂载；不得因为独立资产 ID 为空而丢弃。',
     PROMPT_MOUNT_TOKEN_RULE,
     '先建立可见性矩阵：只有进入画幅且达到可辨识尺寸的部位、道具、环境和表演才能进入提示词。肢体特写、背影、俯拍和极远景不得强写不可见的正脸微表情。',
-    '先计算动作与运镜执行预算：一张卡只承担一个明确镜头任务；超过三个主要动作单元、两个独立叙事目标或明显时空变化时应拆镜，不得硬塞进15秒。',
+    '先计算动作与运镜执行预算：一张卡只承担一个明确镜头任务；超过三个主要动作单元、两个独立叙事目标或明显时空变化时仍应按叙事结构拆镜，不能仅靠延长时长掩盖任务过载。',
     '若输入给出 BPM 或重拍，先按 60/BPM 换算单拍秒数，再明确“拍点→秒数→动作”；音乐名称不能替代可执行时间轴。',
     'Studio Card 只写 Project Bible 的本镜差量，不重复整套设备、摄影品牌、固定光源 Rig、调色圣经和全局负向。',
     '“提示词”是可独立发送给视频引擎的 Engine Prompt，按主体初态→动作变化→摄影机→环境光线→材质物理→落幅→专项负向编译，常规不超过900字。',
     'Engine Prompt 超长时按安全顺序压缩：先删重复项目继承、品牌与解释，再压缩次要环境和修辞；必须保留主体身份、动作因果、镜头路径、起落幅结果、关键光向、专项负向和有效钉子。',
-    '首行与摄影机动态参数的总时长必须一致；时间段从0开始、连续无重叠无空洞，最后结束时间等于首行总时长，单卡不得超过15秒。',
+    '首行与摄影机动态参数的总时长必须一致；时间段从0开始、连续无重叠无空洞，最后结束时间等于首行总时长；单卡不设15秒硬上限。',
     PROMPT_COLOR_TABLE_RULE,
     PROMPT_CARD_LENGTH_BUDGET_RULE,
     buildPromptModeHints(sourceStoryboard),
@@ -2302,12 +2520,12 @@ function buildStudioCanvasV26RuntimeRules(sourceStoryboard: StoryboardOutput | n
     '普通镜头建议挂载5至12项，复杂群像、载具或大型场景最多15项；数量是建议，不得为凑数虚构实体。',
     '参考图、布局图、色彩表和灯光示意图本身不得挂载；只有已由输入或 Project Bible 确认并命名的执行实体或执行锚点可以挂载。',
     '先建立可见性矩阵：只有进入画幅且达到可辨识尺寸的部位、道具、环境和表演才能进入提示词。肢体特写、背影、俯拍和极远景不得强写不可见的正脸微表情。',
-    '先计算动作与运镜执行预算：一张卡只承担一个明确镜头任务；超过三个主要动作单元、两个独立叙事目标或明显时空变化时应拆镜，不得硬塞进15秒。',
+    '先计算动作与运镜执行预算：一张卡只承担一个明确镜头任务；超过三个主要动作单元、两个独立叙事目标或明显时空变化时仍应按叙事结构拆镜，不能仅靠延长时长掩盖任务过载。',
     '若输入给出 BPM 或重拍，先按 60/BPM 换算单拍秒数，再明确“拍点→秒数→动作”；音乐名称不能替代可执行时间轴。',
     'Studio Card 只写 Project Bible 的本镜差量，不重复整套设备、摄影品牌、固定光源 Rig、调色圣经和全局负向。',
     '“提示词”是可独立发送给视频引擎的 Engine Prompt，按主体初态→动作变化→摄影机→环境光线→材质物理→落幅→专项负向编译，常规不超过900字。',
     'Engine Prompt 超长时按安全顺序压缩：先删重复项目继承、品牌与解释，再压缩次要环境和修辞；必须保留主体身份、动作因果、镜头路径、起落幅结果、关键光向、专项负向和有效钉子。',
-    '首行与摄影机动态参数的总时长必须一致；时间段从0开始、连续无重叠无空洞，最后结束时间等于首行总时长，单卡不得超过15秒。',
+    '首行与摄影机动态参数的总时长必须一致；时间段从0开始、连续无重叠无空洞，最后结束时间等于首行总时长；单卡不设15秒硬上限。',
     PROMPT_COLOR_TABLE_RULE,
     PROMPT_CARD_LENGTH_BUDGET_RULE,
     buildPromptModeHints(sourceStoryboard),
@@ -2592,7 +2810,22 @@ function buildCoverageRepairUserMessageV231Segments(
   );
 }
 
-function buildSeedance2OutputSkeleton(): string {
+function resolveSeedance2ExampleDuration(sourceStoryboard: StoryboardOutput | null): number {
+  const firstShot = sourceStoryboard?.shots?.[0];
+  const sourceShots = firstShot?.mergedMembers?.length ? firstShot.mergedMembers : firstShot ? [firstShot] : [];
+  const sourceDuration = sourceShots.reduce(
+    (sum, shot) => sum + (Number.isFinite(Number(shot.durationSec)) ? Math.max(0, Number(shot.durationSec)) : 0),
+    0,
+  );
+  return sourceDuration > 0 ? Math.round(sourceDuration * 10) / 10 : 15;
+}
+
+function formatSeedance2Time(value: number): string {
+  return value.toFixed(1).padStart(4, '0');
+}
+
+function buildSeedance2OutputSkeleton(sourceStoryboard: StoryboardOutput | null): string {
+  const exampleDuration = resolveSeedance2ExampleDuration(sourceStoryboard);
   return JSON.stringify(
     {
       system: SEEDANCE2_SEGMENTED_PROMPT_MARKER,
@@ -2606,7 +2839,7 @@ function buildSeedance2OutputSkeleton(): string {
       shotPrompts: [
         {
           shot_id: '1',
-          prompt: '15.0秒 Seedance2.0 分段式视听提示词摘要。',
+          prompt: `${exampleDuration}秒 Seedance2.0 分段式视听提示词摘要。`,
           negative_prompt: DEFAULT_NEG,
           dimensions: {},
           character_asset_ids: [],
@@ -2622,7 +2855,7 @@ function buildSeedance2OutputSkeleton(): string {
             '- **场景设定**：写场景空间结构、材质、天气、道具与环境声源。',
             '',
             '# 【剧本与动作时间线】',
-            '- **[00.0s - 15.0s]**',
+            `- **[00.0s - ${formatSeedance2Time(exampleDuration)}s]**`,
             '  - **镜头机位**：明确景别、机位和运镜。',
             '  - **视觉画面**：',
             '    - **[前景]**：镜头与主体之间的遮挡、失焦物或空气层。',
@@ -2647,8 +2880,8 @@ function buildSeedance2SourceShotHints(sourceStoryboard: StoryboardOutput | null
     `【源镜头总数】${sourceStoryboard.shots.length}`,
     `【源镜头编号】${sourceStoryboard.shots.map((shot) => shot.id).join(', ')}`,
     '若输入是单个分镜，生成 1 条 shotPrompts。',
-    '若输入是多个独立分镜，shotPrompts 数量必须与源镜头数量一致，每条都是独立的 15.0 秒切片。',
-    '若输入是 mergedMembers 组合镜头，只输出 1 条组合 shotPrompt，但 seedanceCard 的时间线必须覆盖全部子镜头并仍然严格收束在 15.0 秒内。',
+    '若输入是多个独立分镜，shotPrompts 数量必须与源镜头数量一致，每条按对应源镜头的真实时长生成。',
+    '若输入是 mergedMembers 组合镜头，只输出 1 条组合 shotPrompt，seedanceCard 时间线必须覆盖全部子镜头，并使用各成员时长之和。',
   ].join('\n');
 }
 
@@ -2669,11 +2902,11 @@ function buildSeedance2PromptRules(sourceStoryboard: StoryboardOutput | null): s
     '禁止混入默认 Studio Canvas 字段：挂载、相机位置、相机朝向、角色朝向、构图锚点、灯光布置与基调、起幅、落幅、连续性约束、提示词、摄影机动态参数、镜头参数、插针 / 甩拍 / 慢镜头、微表情、表演建议、钉子4行。',
     `每个 seedanceCard 字数必须控制在 ${MIN_SEEDANCE2_SEGMENTED_CARD_CHARS}-${MAX_SEEDANCE2_SEGMENTED_CARD_CHARS} 个中文字符之间。`,
     '',
-    '【15 秒时间轴硬规则】',
-    '每个 seedanceCard 都是一个 15.0 秒切片，总时长必须严格等于 15.0 秒。',
-    '【剧本与动作时间线】中的时间戳必须使用 `[00.0s - 02.5s]` 这种格式，连续推进，无空档、无重叠、不能超过 15.0s。',
-    '可以根据分镜动作密度自动切成 3-7 个时间段；短动作不要硬塞成拖沓长动作，而是在 15 秒内用镜头、微表情、空间层次、环境反馈和声效细节完成节奏分配。',
-    '如果源分镜有多个子镜头，必须在 15 秒内合理分配每个子镜头时长，而不是让总时长超过 15 秒。',
+    '【真实时长时间轴硬规则】',
+    '每个 seedanceCard 的总时长由节点指定值或对应源镜头/镜头组真实时长决定，不设 15 秒硬上限；仅在完全没有时长信息时回退为 15 秒。',
+    '【剧本与动作时间线】中的时间戳必须使用 `[00.0s - 02.5s]` 这种格式，从 00.0s 连续推进到实际总时长，无空档、无重叠。',
+    '根据分镜动作密度自动划分时间段；短动作不得无理由拖长，长动作、完整表演与落幅也不得为适配 15 秒而截断。',
+    '如果源分镜有多个子镜头，必须按各子镜头的输入时长合理分配，完整覆盖且总和等于镜头组真实总时长。',
     '',
     '【空间、光学与声音硬规则】',
     '【剧本与动作时间线】每个时间段必须包含：镜头机位、视觉画面、听觉声效。',
@@ -2701,7 +2934,7 @@ function buildPromptUserMessageSeedance2(
     buildSeedance2PromptRules(sourceStoryboard),
     '',
     '【输出 JSON 参考骨架】',
-    buildSeedance2OutputSkeleton(),
+    buildSeedance2OutputSkeleton(sourceStoryboard),
     '',
     '【资产占位 ID】',
     JSON.stringify(assetRefs, null, 2),
@@ -2725,7 +2958,7 @@ function buildStructureRepairUserMessageSeedance2(
     buildSeedance2PromptRules(sourceStoryboard),
     '',
     '【输出 JSON 参考骨架】',
-    buildSeedance2OutputSkeleton(),
+    buildSeedance2OutputSkeleton(sourceStoryboard),
     '',
     '【资产占位 ID】',
     JSON.stringify(assetRefs, null, 2),
@@ -2748,7 +2981,7 @@ function buildCoverageRepairUserMessageSeedance2(
 ): string {
   return [
     failureReason ? `[Previous failure] ${failureReason}` : '',
-    '上一次 PromptOutput 没有完整覆盖源分镜，或 seedanceCard 不符合 Seedance2.0 四模块 15 秒规范。请重写完整 JSON。',
+    '上一次 PromptOutput 没有完整覆盖源分镜，或 seedanceCard 不符合 Seedance2.0 四模块与真实时长规范。请重写完整 JSON。',
     buildSeedance2PromptRules(sourceStoryboard),
     '',
     `【必须覆盖的镜头总数】${sourceStoryboard.shots.length}`,
@@ -2783,7 +3016,7 @@ function buildCompressionRepairUserMessageSeedance2(
     `每个 seedanceCard 必须在 ${MIN_SEEDANCE2_SEGMENTED_CARD_CHARS}-${MAX_SEEDANCE2_SEGMENTED_CARD_CHARS} 个中文字符之间。`,
     '如果低于 2000 字，优先扩写空间景深、材质细节、微观表情、物理声效和常识动作反馈。',
     `如果高于 ${MAX_SEEDANCE2_SEGMENTED_CARD_CHARS} 字，优先删除重复形容、重复动作说明和非关键环境铺陈，不得删除四大模块、时间轴、[前景]/[主体]/[背景]、听觉声效和负面约束。`,
-    '时间线必须重新校验为严格 15.0 秒，不能超过 15 秒，也不能少于 15 秒。',
+    '时间线必须重新校验：从 00.0s 连续覆盖到节点指定值或上游镜头真实总时长，不得套用 15 秒上限。',
     '不得退回默认 Studio Canvas 字段。',
     '',
     '【资产占位 ID】',
@@ -2796,6 +3029,235 @@ function buildCompressionRepairUserMessageSeedance2(
     '【原始 Input】',
     brief.trim() || '（空）',
   ].filter(Boolean).join('\n');
+}
+
+const SEEDANCE25_MULTIMODAL_OUTPUT_SHAPE = `{
+  "system": "Seedance 2.5 多模态影视提示词 Skill v10",
+  "userTemplate": "{{input}}",
+  "negative": "subtitle, ui, hud, watermark, logo, temporal inconsistency",
+  "parameters": { "engine": "seedance-2.5", "aspect": "16:9", "format": "${SEEDANCE25_MULTIMODAL_FORMAT}" },
+  "shotPrompts": [{
+    "shot_id": "1",
+    "prompt": "当前镜头的简短可执行摘要",
+    "negative_prompt": "subtitle, ui, hud, watermark, logo, temporal inconsistency",
+    "dimensions": {},
+    "character_asset_ids": [],
+    "scene_asset_ids": [],
+    "seedanceCard": "【Seedance 2.5｜多模态参考生成】\\n\\n挂载： |@=真实素材名称|\\n\\n【生成规格】...\\n\\n【摄影机 / 镜头】...\\n\\n【机位与构图】...\\n\\n【起幅】...\\n\\n【表演】...\\n\\n【时间轴】...\\n\\n【光学效果】...\\n\\n【声音 / 对白】...\\n\\n【最终落幅】...\\n\\n【高风险限制】...\\n\\n【文字与字幕限制】..."
+  }]
+}`;
+
+function buildSeedance25MultimodalRules(sourceStoryboard: StoryboardOutput | null): string {
+  const sourceMode = !sourceStoryboard?.shots?.length
+    ? '当前没有结构化镜头表；只依据 Input 中可证实的镜头事实生成，不新增剧情。'
+    : sourceStoryboard.shots.some((shot) => shot.mergedMembers?.length)
+      ? 'mergedMembers 镜头组按一条多镜头组合任务输出；时间轴覆盖全部成员，时长使用成员之和。'
+      : `当前有 ${sourceStoryboard.shots.length} 条独立镜头；逐镜输出 ${sourceStoryboard.shots.length} 条 shotPrompts，不得合并、漏写或新增。`;
+  return [
+    `【当前启用主规范】${SEEDANCE25_MULTIMODAL_PROMPT_MARKER} v10。`,
+    '只返回合法 PromptOutput JSON，不要 Markdown 代码围栏、解释或分析过程。PromptOutput 只是应用传输容器。',
+    '每条 seedanceCard 必须直接输出本 Skill 第65或第66节的最终 Seedance 2.5 Prompt；禁止使用 Studio Canvas 的挂载/相机位置/钉子等中间卡片结构。',
+    'seedanceCard 第一个字符必须是“【”，并以“【Seedance 2.5｜”开头。',
+    '参考素材只在一行“挂载：”中输出；所有引用统一为 |@=名称|，同一素材只挂载一次，不使用 @图片1、分类标题或资产编号式引用。',
+    '时长优先使用节点指定值或上游 durationSec；不设固定秒数上限，也不使用固定默认秒数。完全没有时长信息时，按动作、对白、表演停顿、运镜复杂度和完整落幅自主估算。',
+    '多镜头组合不设 15 秒最低门槛；4 秒、8 秒、10 秒、12 秒等较短连续段也可组合。组合或拆组由场景、时间、角色、道具、动作、对白、覆盖剪辑、连续性与单次生成承载能力决定，不得由总时长阈值决定。',
+    '人物、机器人或其他行动主体可见时必须输出【表演】；纯空镜或无行动主体镜头可以省略。',
+    '【表演】写怎么演，【时间轴】写什么时候发生什么；二者互补，不机械重复。',
+    'character_asset_ids 与 scene_asset_ids 只能填写真实资产 ID；没有真实 ID 时使用空数组，挂载名称只写进 seedanceCard。',
+    sourceMode,
+  ].join('\n');
+}
+
+function buildPromptUserMessageSeedance25(
+  brief: string,
+  assetRefs: unknown,
+  sourceStoryboard: StoryboardOutput | null,
+): string {
+  return [
+    buildSeedance25MultimodalRules(sourceStoryboard),
+    '',
+    '【输出 JSON 形状】',
+    SEEDANCE25_MULTIMODAL_OUTPUT_SHAPE,
+    '',
+    '【真实资产 ID】',
+    JSON.stringify(assetRefs, null, 2),
+    '',
+    sourceStoryboard ? ['【源镜头表】', JSON.stringify(sourceStoryboard, null, 2), ''].join('\n') : '',
+    '【原始 Input】',
+    brief.trim() || '（空）',
+  ].filter(Boolean).join('\n');
+}
+
+function buildStructureRepairUserMessageSeedance25(
+  brief: string,
+  assetRefs: unknown,
+  sourceStoryboard: StoryboardOutput | null,
+  invalidOutput: unknown,
+  failureReason?: string,
+): string {
+  return [
+    failureReason ? `【上一次失败原因】${failureReason}` : '',
+    '重写完整 PromptOutput JSON。只修复结构、挂载语法和缺失模块，不改变源镜头事实。',
+    buildPromptUserMessageSeedance25(brief, assetRefs, sourceStoryboard),
+    '',
+    '【上一次不合格输出】',
+    JSON.stringify(invalidOutput, null, 2),
+  ].filter(Boolean).join('\n');
+}
+
+function buildCompressionRepairUserMessageSeedance25(
+  brief: string,
+  assetRefs: unknown,
+  sourceStoryboard: StoryboardOutput | null,
+  draftOutput: PromptOutput,
+): string {
+  return [
+    '当前输出过短、过长或缺少 Seedance 2.5 v10 必需结构。请重写完整 JSON。',
+    `每条 seedanceCard 保持在 ${MIN_SEEDANCE25_CARD_CHARS}-${MAX_SEEDANCE25_CARD_CHARS} 字，优先删除重复解释，不能删除挂载、摄影机/镜头、机位与构图、起幅、时间轴、声音/对白、落幅和文字与字幕限制。`,
+    buildPromptUserMessageSeedance25(brief, assetRefs, sourceStoryboard),
+    '',
+    '【待修订输出】',
+    JSON.stringify(draftOutput, null, 2),
+  ].join('\n');
+}
+
+function buildCoverageRepairUserMessageSeedance25(
+  brief: string,
+  assetRefs: unknown,
+  sourceStoryboard: StoryboardOutput,
+  invalidOutput: PromptOutput,
+  failureReason?: string,
+): string {
+  return [
+    failureReason ? `【覆盖校验失败】${failureReason}` : '',
+    '必须完整覆盖源镜头编号和顺序。独立镜头逐镜输出；只有 mergedMembers 才按一个组合任务输出。',
+    buildPromptUserMessageSeedance25(brief, assetRefs, sourceStoryboard),
+    '',
+    '【上一次覆盖不完整的输出】',
+    JSON.stringify(invalidOutput, null, 2),
+  ].filter(Boolean).join('\n');
+}
+
+type Seedance25PerformanceModuleOverride = {
+  shot_id: string;
+  performance: string;
+  timeline: string;
+};
+
+const SEEDANCE25_PERFORMANCE_MODULE_OUTPUT_SHAPE = `{
+  "shotModules": [{
+    "shot_id": "1",
+    "performance": "只填写【表演】的新正文，不带标题",
+    "timeline": "只填写【时间轴】的新正文，不带标题"
+  }]
+}`;
+
+function assertSeedance25PerformanceModuleOverrides(
+  value: unknown,
+  baseOutput: PromptOutput,
+): Seedance25PerformanceModuleOverride[] {
+  if (!value || typeof value !== 'object') {
+    throw new Error('八维表演模块接管返回了无效 JSON。');
+  }
+  const rows = (value as { shotModules?: unknown }).shotModules;
+  if (!Array.isArray(rows)) {
+    throw new Error('八维表演模块接管缺少 shotModules 数组。');
+  }
+
+  const parsed = rows.map((row, index) => {
+    if (!row || typeof row !== 'object') {
+      throw new Error(`八维表演模块第 ${index + 1} 项无效。`);
+    }
+    const record = row as Record<string, unknown>;
+    const shotId = String(record.shot_id ?? '').trim();
+    const performance = String(record.performance ?? '').trim();
+    const timeline = String(record.timeline ?? '').trim();
+    if (!shotId || !performance || !timeline) {
+      throw new Error(`八维表演模块第 ${index + 1} 项缺少 shot_id、performance 或 timeline。`);
+    }
+    return { shot_id: shotId, performance, timeline };
+  });
+
+  const basePacks = baseOutput.shotPrompts ?? [];
+  if (!basePacks.length) {
+    throw new Error('Seedance 2.5 v10 基础 PromptOutput 没有可接管的镜头。');
+  }
+  const expectedIds = basePacks.map((pack) => String(pack.shot_id));
+  const actualIds = parsed.map((row) => row.shot_id);
+  if (
+    expectedIds.length !== actualIds.length ||
+    expectedIds.some((shotId, index) => shotId !== actualIds[index])
+  ) {
+    throw new Error(
+      `八维表演模块接管必须按 v10 基础卡顺序完整返回镜头：${expectedIds.join('、')}。`,
+    );
+  }
+  return parsed;
+}
+
+function buildSeedance25PerformanceModuleUserMessage(
+  brief: string,
+  baseOutput: PromptOutput,
+): string {
+  return [
+    '【任务】对已冻结的 Seedance 2.5 v10 基础卡执行八维表演模块接管。',
+    '只返回各镜头新的【表演】和【时间轴】正文；不得返回或改写其他模块。',
+    '应用将通过程序化拼接替换这两个正文，v10 的挂载、生成规格、摄影机、机位与构图、起幅、光学效果、声音/对白、最终落幅和限制将按原文冻结保留。',
+    '【表演】不带时间戳；不输出目标、潜台词、触发锚点、表演弧线等内部分析标签。',
+    '【时间轴】保持 v10 已确定的动作顺序、时间边界和段落覆盖，仅把可执行的表演增量融入对应时段；不得改变剧情事件、摄影、声音或镜尾事实。',
+    '只返回合法 JSON，结构严格为：',
+    SEEDANCE25_PERFORMANCE_MODULE_OUTPUT_SHAPE,
+    '',
+    '【原始 Input】',
+    brief.trim() || '（空）',
+    '',
+    '【已冻结的 v10 基础 PromptOutput】',
+    JSON.stringify(baseOutput, null, 2),
+  ].join('\n');
+}
+
+async function applySeedance25PerformanceModules(params: {
+  brief: string;
+  baseOutput: PromptOutput;
+  executionSystemPrompt?: string;
+  onDelta?: (delta: string, accumulated: string) => void;
+  signal?: AbortSignal;
+}): Promise<PromptOutput> {
+  const parsed = await invokeLlmJsonObjectStream({
+    systemPrompt: [
+      params.executionSystemPrompt?.trim() || PROMPT_DEPT_AGENT_SYSTEM,
+      '【运行时模块接管契约｜最高优先级】',
+      '你接收的 v10 基础 PromptOutput 已冻结。只生成【表演】与【时间轴】的替换正文，不输出完整 seedanceCard，不重新设计其他模块。',
+    ].join('\n\n'),
+    userPrompt: buildSeedance25PerformanceModuleUserMessage(params.brief, params.baseOutput),
+    temperature: 0.2,
+    onDelta: params.onDelta,
+    signal: params.signal,
+  });
+  const overrides = assertSeedance25PerformanceModuleOverrides(parsed, params.baseOutput);
+
+  const shotPrompts = (params.baseOutput.shotPrompts ?? []).map((pack, index) => {
+    const override = overrides[index];
+    const seedanceCard = composeSeedance25PerformanceCard(
+      String(pack.seedanceCard ?? ''),
+      override.performance,
+      override.timeline,
+    );
+    return {
+      ...pack,
+      seedanceCard: assertSeedance25PerformanceV11Card(String(pack.shot_id), seedanceCard),
+    };
+  });
+
+  return {
+    ...params.baseOutput,
+    system: SEEDANCE25_PERFORMANCE_V11_MARKER,
+    parameters: {
+      ...(params.baseOutput.parameters ?? {}),
+      format: SEEDANCE25_PERFORMANCE_V11_FORMAT,
+    },
+    shotPrompts,
+  };
 }
 
 async function invokePromptOutputWithStructureRepair(params: {
@@ -2849,6 +3311,62 @@ void buildPromptUserMessageSeedance2;
 void buildStructureRepairUserMessageSeedance2;
 void buildCompressionRepairUserMessageSeedance2;
 void buildCoverageRepairUserMessageSeedance2;
+void buildPromptUserMessageSeedance25;
+void buildStructureRepairUserMessageSeedance25;
+void buildCompressionRepairUserMessageSeedance25;
+void buildCoverageRepairUserMessageSeedance25;
+
+async function runSeedance25PerformanceV11Composition(
+  brief: string,
+  approvedAssets: ApprovedAsset[],
+  executionSystemPrompt?: string,
+  onDelta?: (delta: string, accumulated: string) => void,
+  signal?: AbortSignal,
+): Promise<PromptOutput> {
+  onDelta?.('', '正在按 Seedance 2.5 v10 生成并冻结基础提示词…');
+  const v10ExecutionSystemPrompt = resolveAndComposeMountedSkills(
+    'prompt',
+    PROMPT_DEPT_AGENT_SYSTEM,
+    [SEEDANCE25_MULTIMODAL_PROMPT_V10_SKILL_ID],
+  ).systemPrompt;
+  const baseOutput = await runPromptGenerationPipeline(
+    {
+      brief,
+      approvedAssets,
+      executionSystemPrompt: v10ExecutionSystemPrompt,
+      signal,
+    },
+    {
+      defaultNegative: DEFAULT_NEG,
+      departmentSystemPrompt: PROMPT_DEPT_AGENT_SYSTEM,
+      departmentOutputShape: SEEDANCE25_MULTIMODAL_OUTPUT_SHAPE,
+      timingSystemRule: PROMPT_TIMING_SYSTEM_RULE,
+      resolveAssetRefs: promptAssetRefsFromApproved,
+      parseSourceStoryboard: tryParseStoryboardFromInputText,
+      buildGenerationUserMessage: buildPromptUserMessageSeedance25,
+      buildStructureRepairUserMessage: buildStructureRepairUserMessageSeedance25,
+      buildCompressionRepairUserMessage: buildCompressionRepairUserMessageSeedance25,
+      buildCoverageRepairUserMessage: buildCoverageRepairUserMessageSeedance25,
+      invokeWithStructureRepair: invokePromptOutputWithStructureRepair,
+      outputNeedsCompressionRepair: (output) =>
+        outputNeedsCompressionRepair(output, 'seedance25Multimodal'),
+      normalizeOutput: (output, sourceStoryboard) =>
+        normalizePromptOutput(output, sourceStoryboard, 'seedance25Multimodal'),
+      validateCoverage: (output, sourceStoryboard) =>
+        validatePromptCoverage(output, sourceStoryboard, 'seedance25Multimodal'),
+      sanitizeEllipsis: sanitizePromptOutputEllipsis,
+    },
+  );
+
+  onDelta?.('', '正在仅接管【表演】与【时间轴】，其他 v10 模块保持不变…');
+  return applySeedance25PerformanceModules({
+    brief,
+    baseOutput,
+    executionSystemPrompt,
+    onDelta,
+    signal,
+  });
+}
 
 export async function runPromptEmployee(
   brief: string,
@@ -2863,11 +3381,23 @@ export async function runPromptEmployee(
   const useStudioCanvasV25 = isStudioCanvasV25Style(styleMode);
   const useStudioCanvasV26 = isStudioCanvasV26Style(styleMode);
   const useStudioCanvasV27 = isStudioCanvasV27Style(styleMode);
+  const useSeedance25Multimodal = isSeedance25MultimodalStyle(styleMode);
+  const useSeedance25PerformanceV11 = isSeedance25PerformanceV11Style(styleMode);
   const effectiveExecutionSystemPrompt = useStudioCanvasV25
     ? [executionSystemPrompt?.trim(), PROMPT_DETAILED_MOUNT_SYSTEM_AMENDMENT]
         .filter(Boolean)
         .join('\n\n')
     : executionSystemPrompt;
+
+  if (useSeedance25PerformanceV11) {
+    return runSeedance25PerformanceV11Composition(
+      brief,
+      approvedAssets,
+      executionSystemPrompt,
+      onDelta,
+      signal,
+    );
+  }
 
   return runPromptGenerationPipeline(
     {
@@ -2880,7 +3410,9 @@ export async function runPromptEmployee(
     {
       defaultNegative: DEFAULT_NEG,
       departmentSystemPrompt: PROMPT_DEPT_AGENT_SYSTEM,
-      departmentOutputShape: useStudioCanvasV231Segments
+      departmentOutputShape: useSeedance25Multimodal
+        ? SEEDANCE25_MULTIMODAL_OUTPUT_SHAPE
+        : useStudioCanvasV231Segments
         ? PROMPT_DEPT_OUTPUT_SHAPE_V231_SEGMENTS
         : useStudioCanvasV27
           ? PROMPT_DEPT_OUTPUT_SHAPE_V27
@@ -2894,7 +3426,9 @@ export async function runPromptEmployee(
       timingSystemRule: PROMPT_TIMING_SYSTEM_RULE,
       resolveAssetRefs: promptAssetRefsFromApproved,
       parseSourceStoryboard: tryParseStoryboardFromInputText,
-      buildGenerationUserMessage: useStudioCanvasV231Segments
+      buildGenerationUserMessage: useSeedance25Multimodal
+        ? buildPromptUserMessageSeedance25
+        : useStudioCanvasV231Segments
         ? buildPromptUserMessageV231Segments
         : useStudioCanvasV27
           ? buildPromptUserMessageV27
@@ -2905,7 +3439,9 @@ export async function runPromptEmployee(
         : useStudioCanvasV23
           ? buildPromptUserMessageV23
         : buildPromptUserMessageV3,
-      buildStructureRepairUserMessage: useStudioCanvasV231Segments
+      buildStructureRepairUserMessage: useSeedance25Multimodal
+        ? buildStructureRepairUserMessageSeedance25
+        : useStudioCanvasV231Segments
         ? buildStructureRepairUserMessageV231Segments
         : useStudioCanvasV27
           ? buildStructureRepairUserMessageV27
@@ -2916,7 +3452,9 @@ export async function runPromptEmployee(
         : useStudioCanvasV23
           ? buildStructureRepairUserMessageV23
         : buildStructureRepairUserMessageV3,
-      buildCompressionRepairUserMessage: useStudioCanvasV231Segments
+      buildCompressionRepairUserMessage: useSeedance25Multimodal
+        ? buildCompressionRepairUserMessageSeedance25
+        : useStudioCanvasV231Segments
         ? buildCompressionRepairUserMessageV231Segments
         : useStudioCanvasV27
           ? buildCompressionRepairUserMessageV27
@@ -2927,7 +3465,9 @@ export async function runPromptEmployee(
         : useStudioCanvasV23
           ? buildCompressionRepairUserMessageV23
         : buildCompressionRepairUserMessageV3,
-      buildCoverageRepairUserMessage: useStudioCanvasV231Segments
+      buildCoverageRepairUserMessage: useSeedance25Multimodal
+        ? buildCoverageRepairUserMessageSeedance25
+        : useStudioCanvasV231Segments
         ? buildCoverageRepairUserMessageV231Segments
         : useStudioCanvasV27
           ? buildCoverageRepairUserMessageV27

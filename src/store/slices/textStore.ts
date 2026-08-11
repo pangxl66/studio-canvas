@@ -15,6 +15,13 @@ import {
   buildStoryboardSkillImageAnalysisUserPrompt,
   imageTaskLabel,
 } from '@/services/textImageTaskPrompts';
+import {
+  buildStoryboardTextNormalizerSystemPrompt,
+  buildStoryboardTextNormalizerUserPrompt,
+  buildStoryboardTextNormalizerRepairPrompt,
+  STORYBOARD_TEXT_NORMALIZER_SKILL_NAME,
+  validateStoryboardTextNormalizerOutput,
+} from '@/services/storyboardTextNormalizer';
 import type { StudioRFNode } from '@/types/reactFlow';
 import type { TextImageTaskMode } from '@/types/studio';
 import type { StudioState } from '../useStudioStore';
@@ -29,7 +36,7 @@ type StudioSet = (
 type StudioGet = () => StudioState;
 
 type TextSlice = Pick<StudioState, 'runTextPolish'>;
-type TextPolishMode = 'simple' | 'deep';
+type TextPolishMode = 'simple' | 'deep' | 'storyboard';
 
 type TextSliceDeps = {
   activeTaskAbortControllers: Map<string, AbortController>;
@@ -264,13 +271,22 @@ export function createTextStoreSlice(
       if (!node || node.type !== 'textNode') return;
       const nodeText = (node.data.raw_text ?? node.data.input ?? '').trim();
       const instruction = opts?.instruction?.trim() || '';
-      const mode: TextPolishMode = opts?.mode === 'simple' ? 'simple' : node.data.text_polish_mode === 'simple' ? 'simple' : 'deep';
+      const mode: TextPolishMode =
+        opts?.mode === 'simple' || opts?.mode === 'storyboard'
+          ? opts.mode
+          : node.data.text_polish_mode === 'simple' ||
+              node.data.text_polish_mode === 'storyboard'
+            ? node.data.text_polish_mode
+            : 'deep';
       const imageTaskMode: TextImageTaskMode =
-        opts?.imageMode === 'skill_analysis' || opts?.imageMode === 'continue_shot'
+        opts?.imageMode === 'skill_analysis' ||
+        opts?.imageMode === 'normalize_storyboard' ||
+        opts?.imageMode === 'continue_shot'
           ? opts.imageMode
           : opts?.imageMode === 'extract_shot'
             ? 'extract_shot'
             : node.data.text_image_task_mode === 'skill_analysis' ||
+                node.data.text_image_task_mode === 'normalize_storyboard' ||
                 node.data.text_image_task_mode === 'continue_shot'
               ? node.data.text_image_task_mode
               : 'extract_shot';
@@ -286,6 +302,10 @@ export function createTextStoreSlice(
       const instructionForPrompt = nodeText ? instruction : '';
       const imageRefs = connectedImageReferences(nodeId, get().nodes, get().edges);
       const primaryImage = imageRefs.find((reference) => reference.imageDataUrl);
+      const readableImageUrls = imageRefs
+        .map((reference) => reference.imageDataUrl)
+        .filter((url): url is string => Boolean(url))
+        .slice(0, 8);
       const hasImageContext = imageRefs.length > 0;
       const videoRefs = connectedVideoReferences(nodeId, get().nodes, get().edges);
       const primaryVideo = videoRefs.find((reference) => reference.frameDataUrl);
@@ -338,12 +358,16 @@ export function createTextStoreSlice(
             : hasImageContext
             ? imageTaskMode === 'skill_analysis'
               ? `LLM 正在读取图片，并按“${storyboardSkill?.name ?? '分镜 Skill'}”分析当前画面...`
+              : imageTaskMode === 'normalize_storyboard'
+                ? `LLM 正在读取 ${readableImageUrls.length} 张图片，并严格按“${STORYBOARD_TEXT_NORMALIZER_SKILL_NAME}”整理...`
               : imageTaskMode === 'continue_shot'
                 ? 'LLM 正在读取图片首帧，并推算下一镜的动作与镜头发展...'
                 : 'LLM 正在读取图片，只提取当前画面的分镜事实...'
             : mode === 'simple'
               ? 'LLM 正在以简单模式轻量优化文本...\n\n完成后会自动写回正文。'
-              : 'LLM 正在以深度模式按影视剧本规范润色文本...\n\n完成后会自动写回正文。',
+              : mode === 'storyboard'
+                ? 'LLM 正在整理分镜术语、空间、动作与结束状态...\n\n完成后会按统一格式写回正文。'
+                : 'LLM 正在以深度模式按影视剧本规范润色文本...\n\n完成后会自动写回正文。',
         },
         true,
       );
@@ -382,9 +406,14 @@ export function createTextStoreSlice(
             ? await requestLLMWithImage(imageConfig, {
                 model,
                 imageDataUrl: primaryImage.imageDataUrl,
+                ...(imageTaskMode === 'normalize_storyboard'
+                  ? { imageDataUrls: readableImageUrls }
+                  : {}),
                 imageDetail: 'auto',
                 systemPrompt:
-                  imageTaskMode === 'skill_analysis'
+                  imageTaskMode === 'normalize_storyboard'
+                    ? buildStoryboardTextNormalizerSystemPrompt()
+                    : imageTaskMode === 'skill_analysis'
                     ? buildStoryboardSkillImageAnalysisSystemPrompt(
                         storyboardSkill?.name ?? '默认分镜 Skill',
                         storyboardSkill?.system_instruction ?? '',
@@ -393,7 +422,13 @@ export function createTextStoreSlice(
                       ? buildImageAwareSystemPrompt()
                       : buildImageShotExtractionSystemPrompt(),
                 userPrompt:
-                  imageTaskMode === 'skill_analysis'
+                  imageTaskMode === 'normalize_storyboard'
+                    ? buildStoryboardTextNormalizerUserPrompt(
+                        sourceText,
+                        imageRefs,
+                        instructionForPrompt,
+                      )
+                    : imageTaskMode === 'skill_analysis'
                     ? buildStoryboardSkillImageAnalysisUserPrompt(
                         sourceText,
                         imageRefs,
@@ -409,17 +444,26 @@ export function createTextStoreSlice(
                 temperature:
                   imageTaskMode === 'continue_shot'
                     ? 0.28
+                    : imageTaskMode === 'normalize_storyboard'
+                      ? 0.12
                     : imageTaskMode === 'skill_analysis'
                       ? 0.22
                       : 0.12,
                 jsonMode: false,
                 feature:
-                  imageTaskMode === 'skill_analysis'
+                  imageTaskMode === 'normalize_storyboard'
+                    ? 'image-storyboard-normalize'
+                    : imageTaskMode === 'skill_analysis'
                     ? 'image-storyboard-skill-analysis'
                     : imageTaskMode === 'continue_shot'
                       ? 'image-next-shot'
                       : 'image-shot-extraction',
-                maxOutputTokens: imageTaskMode === 'skill_analysis' ? 3600 : 2600,
+                maxOutputTokens:
+                  imageTaskMode === 'normalize_storyboard'
+                    ? 6000
+                    : imageTaskMode === 'skill_analysis'
+                      ? 3600
+                      : 2600,
                 signal: controller.signal,
               })
             : await requestLLM(config, {
@@ -428,16 +472,32 @@ export function createTextStoreSlice(
                   ? buildImageAwareSystemPrompt()
                   : mode === 'simple'
                     ? buildSimpleTextPolishSystemPrompt()
+                    : mode === 'storyboard'
+                      ? buildStoryboardTextNormalizerSystemPrompt()
                     : buildTextPolishSystemPrompt(),
                 userPrompt: hasImageContext
                   ? buildImageAwareUserPrompt(sourceText, imageRefs, instructionForPrompt)
                   : mode === 'simple'
                     ? buildSimpleTextPolishUserPrompt(sourceText, instructionForPrompt)
+                    : mode === 'storyboard'
+                      ? buildStoryboardTextNormalizerUserPrompt(
+                          sourceText,
+                          [],
+                          instructionForPrompt,
+                        )
                     : buildTextPolishUserPrompt(sourceText, instructionForPrompt),
-                temperature: hasImageContext ? 0.28 : mode === 'simple' ? 0.18 : 0.32,
+                temperature:
+                  hasImageContext ? 0.28 : mode === 'simple' ? 0.18 : mode === 'storyboard' ? 0.12 : 0.32,
                 jsonMode: false,
-                feature: hasImageContext ? 'image-text-polish' : mode === 'simple' ? 'text-polish-simple' : 'text-polish',
-                maxOutputTokens: hasImageContext ? 2200 : mode === 'simple' ? 2200 : 4200,
+                feature: hasImageContext
+                  ? 'image-text-polish'
+                  : mode === 'simple'
+                    ? 'text-polish-simple'
+                    : mode === 'storyboard'
+                      ? 'text-storyboard-normalize'
+                      : 'text-polish',
+                maxOutputTokens:
+                  hasImageContext ? 2200 : mode === 'simple' ? 2200 : mode === 'storyboard' ? 6000 : 4200,
                 signal: controller.signal,
               });
 
@@ -495,7 +555,61 @@ export function createTextStoreSlice(
           return;
         }
 
-        const polished = stripTextPolishWrapper(finalResult.content);
+        let polished = stripTextPolishWrapper(finalResult.content);
+        let normalizationWarning: string | undefined;
+        const isStoryboardNormalization =
+          (!hasVideoContext && hasImageContext && imageTaskMode === 'normalize_storyboard')
+          || (!hasVideoContext && !hasImageContext && mode === 'storyboard');
+        if (polished && isStoryboardNormalization) {
+          const validation = validateStoryboardTextNormalizerOutput(polished);
+          if (!validation.ok) {
+            get().patchNodeData(
+              nodeId,
+              { streaming_preview: '正在校验 Skill 输出，并修复不符合规范的格式...' },
+              false,
+            );
+            const repairResult = await requestLLM(hasVisionPayload ? imageConfig : config, {
+              model,
+              systemPrompt: buildStoryboardTextNormalizerSystemPrompt(),
+              userPrompt: buildStoryboardTextNormalizerRepairPrompt(polished, validation.issues),
+              temperature: 0.05,
+              jsonMode: false,
+              feature: 'storyboard-normalize-format-repair',
+              maxOutputTokens: 6000,
+              signal: controller.signal,
+            });
+            if (deps.activeTaskAbortControllers.get(nodeId) !== controller) return;
+            if (!repairResult.ok && repairResult.error.code === 'USER_ABORT') {
+              get().patchNodeData(
+                nodeId,
+                {
+                  status: 'APPROVED',
+                  generation_error: timedOut ? TEXT_POLISH_TIMEOUT_MESSAGE : undefined,
+                  streaming_preview: undefined,
+                  text_polish_started_at: undefined,
+                },
+                true,
+              );
+              get().pushMessage({
+                role: 'system',
+                text: timedOut ? TEXT_POLISH_TIMEOUT_MESSAGE : deps.stopTaskMessage,
+                nodeId,
+              });
+              return;
+            }
+            if (repairResult.ok) {
+              const repaired = stripTextPolishWrapper(repairResult.content);
+              const repairedValidation = validateStoryboardTextNormalizerOutput(repaired);
+              if (repaired && repairedValidation.ok) {
+                polished = repaired;
+              } else {
+                normalizationWarning = `整理结果仍有 ${repairedValidation.issues.length} 项不符合 Skill，请人工复核。`;
+              }
+            } else if (repairResult.error.code !== 'USER_ABORT') {
+              normalizationWarning = `整理结果有 ${validation.issues.length} 项不符合 Skill，自动格式修复失败，请人工复核。`;
+            }
+          }
+        }
         if (!polished) {
           get().patchNodeData(
             nodeId,
@@ -517,13 +631,15 @@ export function createTextStoreSlice(
             status: 'APPROVED',
             input: polished,
             raw_text: polished,
-            generation_error: undefined,
+            generation_error: normalizationWarning,
             streaming_preview: undefined,
             text_polish_started_at: undefined,
             review_result: hasVideoContext
               ? `已结合 ${videoRefs.length} 个视频节点完成构图、元素和运镜分析。`
               : hasImageContext
-                ? `已结合 ${imageRefs.length} 个图片节点完成“${imageTaskLabel(imageTaskMode)}”。`
+                ? normalizationWarning
+                  ? `已结合 ${imageRefs.length} 个图片节点完成“${imageTaskLabel(imageTaskMode)}”；${normalizationWarning}`
+                  : `已结合 ${imageRefs.length} 个图片节点完成“${imageTaskLabel(imageTaskMode)}”。`
                 : undefined,
           },
           true,
