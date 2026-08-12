@@ -95,7 +95,8 @@ test('runtime freezes v10 and composes only performance and timeline modules', (
   assert.match(source, /seedance_2_5_plus_eight_dimensional_performance/);
   assert.match(source, /getSeedance25PerformanceV11Issues/);
   assert.match(source, /【表演】出现时间戳；时间戳只能存在于【时间轴】/);
-  assert.match(source, /只有事件动作，没有八维表演增量/);
+  assert.match(source, /整段只有事件动作，没有可见或可听的八维表演增量/);
+  assert.doesNotMatch(source, /第 \$\{index \+ 1\} 段只有事件动作/);
   assert.match(source, /最终提示词泄漏 AU\/FACS 编号；必须翻译为自然语言表演/);
   assert.match(source, /【表演】泄漏逐角色导演分析/);
   assert.match(source, /【表演】过长；这里只保留整体调性、人物主次与关系/);

@@ -1511,9 +1511,9 @@ function getSeedance25PerformanceV11Issues(seedanceCard: string): string[] {
     if (index > 0 && Math.abs(interval.start - intervals[index - 1].end) > epsilon) {
       issues.push(`【时间轴】第 ${index} 段与第 ${index + 1} 段不连续`);
     }
-    if (!noActionSubject && !SEEDANCE25_PERFORMANCE_SIGNAL_RE.test(interval.body)) {
-      issues.push(`【时间轴】第 ${index + 1} 段只有事件动作，没有八维表演增量`);
-    }
+  }
+  if (!noActionSubject && !SEEDANCE25_PERFORMANCE_SIGNAL_RE.test(timeline)) {
+    issues.push('【时间轴】整段只有事件动作，没有可见或可听的八维表演增量');
   }
   issues.push(...getSeedance25ReadableFaceIssues(seedanceCard, timeline));
   const declaredDuration = extractSeedance25DeclaredDuration(seedanceCard);
