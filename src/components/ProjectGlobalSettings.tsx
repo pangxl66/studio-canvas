@@ -213,10 +213,18 @@ export function ProjectGlobalSettings() {
             保存后不会自动生成或消耗额度。已有结果保持不变，受影响节点会提示重新生成。
           </div>
           <div className="studio-settings-actions project-settings-actions">
-            <button type="button" className="studio-settings-secondary" onClick={() => setOpen(false)}>
+            <button
+              type="button"
+              className="project-settings-action project-settings-action--cancel"
+              onClick={() => setOpen(false)}
+            >
               取消
             </button>
-            <button type="button" className="studio-settings-primary" onClick={save}>
+            <button
+              type="button"
+              className="project-settings-action project-settings-action--save"
+              onClick={save}
+            >
               保存并应用
             </button>
           </div>

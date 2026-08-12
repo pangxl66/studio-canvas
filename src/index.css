@@ -14094,6 +14094,65 @@ body,
 
 .project-settings-actions {
   justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.project-settings-action {
+  min-height: 42px;
+  padding: 0 20px;
+  border-radius: 12px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition:
+    color 160ms ease,
+    border-color 160ms ease,
+    background 160ms ease,
+    box-shadow 160ms ease,
+    transform 120ms ease;
+}
+
+.project-settings-action--cancel {
+  border: 1px solid rgba(119, 157, 202, 0.38);
+  color: rgba(220, 235, 250, 0.86);
+  background: rgba(7, 18, 33, 0.72);
+}
+
+.project-settings-action--cancel:hover {
+  border-color: rgba(111, 203, 220, 0.62);
+  color: #f1fbff;
+  background: rgba(22, 52, 74, 0.72);
+}
+
+.project-settings-action--save {
+  min-width: 128px;
+  border: 1px solid rgba(126, 245, 231, 0.74);
+  color: #04151d;
+  background: linear-gradient(135deg, #50ded1 0%, #69bdf3 100%);
+  box-shadow:
+    0 8px 24px rgba(60, 194, 204, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.32);
+}
+
+.project-settings-action--save:hover {
+  background: linear-gradient(135deg, #6aeadf 0%, #7bc9fa 100%);
+  box-shadow:
+    0 10px 28px rgba(60, 194, 204, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.4);
+  transform: translateY(-1px);
+}
+
+.project-settings-action:active {
+  transform: translateY(1px);
+}
+
+.project-settings-action:focus-visible {
+  outline: 2px solid rgba(105, 221, 225, 0.92);
+  outline-offset: 3px;
 }
 
 .studio-project-menu__item--project-settings small {
@@ -14106,5 +14165,14 @@ body,
   .project-aspect-grid,
   .project-skill-grid {
     grid-template-columns: 1fr;
+  }
+
+  .project-settings-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .project-settings-action {
+    width: 100%;
   }
 }
