@@ -14,7 +14,7 @@ description: Freeze a complete Seedance 2.5 v10 base card, then replace only its
 - 让【表演】只保留精简的整体表演调性、人物主次、关系、动作克制程度和非人主体表演原则。
 - 让【时间轴】成为唯一带时间戳、唯一承载单人表演细节、唯一执行八维变化的模块。
 - 不新增剧情、人物、台词、动作结果、心理事实、道具或空间关系。
-- 模型返回的是 `shotModules` 内的 `performance` 与 `timeline`；不返回完整 seedanceCard，避免模型改写冻结区块。
+- 模型返回的是 `shotModules` 内的 `performance` 与 `timeline`；按 v10 基础卡顺序逐项对应，不要求也不读取 `shot_id`；不返回完整 seedanceCard，避免模型改写冻结区块。
 
 ## 内部导演计划
 

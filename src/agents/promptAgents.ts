@@ -3146,7 +3146,6 @@ type Seedance25PerformanceModuleOverride = {
 
 const SEEDANCE25_PERFORMANCE_MODULE_OUTPUT_SHAPE = `{
   "shotModules": [{
-    "shot_id": "1",
     "performance": "只填写【表演】的新正文，不带标题",
     "timeline": "只填写【时间轴】的新正文，不带标题"
   }]
@@ -3164,35 +3163,30 @@ function assertSeedance25PerformanceModuleOverrides(
     throw new Error('八维表演模块接管缺少 shotModules 数组。');
   }
 
-  const parsed = rows.map((row, index) => {
-    if (!row || typeof row !== 'object') {
-      throw new Error(`八维表演模块第 ${index + 1} 项无效。`);
-    }
-    const record = row as Record<string, unknown>;
-    const shotId = String(record.shot_id ?? '').trim();
-    const performance = String(record.performance ?? '').trim();
-    const timeline = String(record.timeline ?? '').trim();
-    if (!shotId || !performance || !timeline) {
-      throw new Error(`八维表演模块第 ${index + 1} 项缺少 shot_id、performance 或 timeline。`);
-    }
-    return { shot_id: shotId, performance, timeline };
-  });
-
   const basePacks = baseOutput.shotPrompts ?? [];
   if (!basePacks.length) {
     throw new Error('Seedance 2.5 v10 基础 PromptOutput 没有可接管的镜头。');
   }
-  const expectedIds = basePacks.map((pack) => String(pack.shot_id));
-  const actualIds = parsed.map((row) => row.shot_id);
-  if (
-    expectedIds.length !== actualIds.length ||
-    expectedIds.some((shotId, index) => shotId !== actualIds[index])
-  ) {
-    throw new Error(
-      `八维表演模块接管必须按 v10 基础卡顺序完整返回镜头：${expectedIds.join('、')}。`,
-    );
+  if (rows.length !== basePacks.length) {
+    throw new Error(`八维表演模块必须按 v10 基础卡顺序返回 ${basePacks.length} 项，当前为 ${rows.length} 项。`);
   }
-  return parsed;
+
+  return rows.map((row, index) => {
+    if (!row || typeof row !== 'object') {
+      throw new Error(`八维表演模块第 ${index + 1} 项无效。`);
+    }
+    const record = row as Record<string, unknown>;
+    const performance = String(record.performance ?? '').trim();
+    const timeline = String(record.timeline ?? '').trim();
+    if (!performance || !timeline) {
+      throw new Error(`八维表演模块第 ${index + 1} 项缺少 performance 或 timeline。`);
+    }
+    return {
+      shot_id: String(basePacks[index].shot_id),
+      performance,
+      timeline,
+    };
+  });
 }
 
 function buildSeedance25PerformanceModuleUserMessage(
@@ -3205,6 +3199,7 @@ function buildSeedance25PerformanceModuleUserMessage(
     '应用将通过程序化拼接替换这两个正文，v10 的挂载、生成规格、摄影机、机位与构图、起幅、光学效果、声音/对白、最终落幅和限制将按原文冻结保留。',
     '【表演】不带时间戳；不输出目标、潜台词、触发锚点、表演弧线等内部分析标签。',
     '【时间轴】保持 v10 已确定的动作顺序、时间边界和段落覆盖，仅把可执行的表演增量融入对应时段；不得改变剧情事件、摄影、声音或镜尾事实。',
+    '`shotModules` 必须按 v10 基础卡顺序逐项返回；不要输出、推断或校验 shot_id，应用会按数组顺序自动绑定原镜头。',
     '只返回合法 JSON，结构严格为：',
     SEEDANCE25_PERFORMANCE_MODULE_OUTPUT_SHAPE,
     '',

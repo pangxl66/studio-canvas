@@ -65,6 +65,8 @@ test('multi-file package keeps character planning internal and executes acting i
   assert.match(outputContract, /不改变 v10 的挂载、生成规格、摄影机、构图/);
   assert.match(outputContract, /冻结区域指纹/);
   assert.match(outputContract, /"shotModules"/);
+  assert.doesNotMatch(outputContract, /"shot_id"/);
+  assert.match(outputContract, /不要输出、推断或校验 `shot_id`/);
   assert.doesNotMatch(outputContract, /摄影机或空间响应/);
   assert.match(references, /AU1/);
   assert.match(references, /感知 → 认知延迟 → 第一反应/);
@@ -103,6 +105,8 @@ test('runtime freezes v10 and composes only performance and timeline modules', (
   assert.match(source, /runSeedance25PerformanceV11Composition/);
   assert.match(source, /applySeedance25PerformanceModules/);
   assert.match(source, /composeSeedance25PerformanceCard/);
+  assert.match(source, /shot_id: String\(basePacks\[index\]\.shot_id\)/);
+  assert.match(source, /缺少 performance 或 timeline/);
   assert.match(source, /已冻结的 v10 基础 PromptOutput/);
   assert.match(source, /只返回各镜头新的【表演】和【时间轴】正文/);
   assert.match(source, /assertSeedance25PerformanceV11Card/);
