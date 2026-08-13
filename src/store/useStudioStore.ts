@@ -58,6 +58,7 @@ import {
   resolveDepartmentExecutionInput,
 } from '@/services/graphInput';
 import { flushTextNodeDrafts } from '@/utils/textDraftCommit';
+import { reloadAfterStaleChunk } from '@/utils/staleChunkRecovery';
 import {
   SHOT_LIST_LINK_HANDLE_ID,
   SHOT_LIST_PARENT_HANDLE_ID,
@@ -407,6 +408,9 @@ async function prepareStoryboardImageReferencesForExecution(args: {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       args.patchNodeData(imageNode.id, { generation_error: message }, true);
+      if (reloadAfterStaleChunk(error)) {
+        throw new Error(`场景参考图“${label}”所需资源已更新，正在刷新当前页面并恢复工作区。`);
+      }
       throw new Error(`场景参考图“${label}”分析失败：${message}`);
     }
   }
