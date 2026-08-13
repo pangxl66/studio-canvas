@@ -2056,6 +2056,21 @@ async function handleCreditStatus(req, res) {
     sendJson(res, auth.error.status, { error: { message: auth.error.message } });
     return;
   }
+  if (isLocalUnlimitedQuotaRequest(req, auth)) {
+    sendJson(res, 200, {
+      displayName: auth.isLanDirect ? '局域网直连' : '本地版',
+      email: auth.user?.email || null,
+      isAdmin: isAdminUser(auth.user),
+      monthlyQuota: 0,
+      plan: 'local-unlimited',
+      remainingQuota: 0,
+      resetAt: null,
+      unlimited: true,
+      updatedAt: null,
+      userId: auth.userId,
+    });
+    return;
+  }
   if (auth.isTestInvite) {
     const quota = readTestInviteQuota(auth.user?.email || auth.userId);
     sendJson(res, 200, {
@@ -3089,6 +3104,8 @@ async function handleLlmChat(req, res) {
   const inChars = inputChars(body);
   const model = normalizeModel(body.model, feature, provider);
   const isTestInvite = Boolean(auth.isTestInvite);
+  const unlimitedLocalQuota = isLocalUnlimitedQuotaRequest(req, auth);
+  const chargedCost = unlimitedLocalQuota ? 0 : cost;
   const testInviteEmail = normalizeEmail(auth.user?.email) || 'tester@studio-canvas.local';
   const recordUsage = async (event) => {
     if (isTestInvite) {
@@ -3098,6 +3115,7 @@ async function handleLlmChat(req, res) {
     await writeUsage(auth.serviceClient, event);
   };
   const refundReservedQuota = async () => {
+    if (unlimitedLocalQuota) return;
     if (isTestInvite) {
       refundTestInviteQuota(testInviteEmail, cost);
       return;
@@ -3125,7 +3143,9 @@ async function handleLlmChat(req, res) {
     }
   }
 
-  const reservation = isTestInvite
+  const reservation = unlimitedLocalQuota
+    ? { ok: true, remaining: Number.POSITIVE_INFINITY }
+    : isTestInvite
     ? reserveTestInviteQuota(testInviteEmail, cost)
     : await reserveQuota(auth.serviceClient, auth.userId, cost);
   if (!reservation.ok) {
@@ -3256,7 +3276,7 @@ async function handleLlmChat(req, res) {
           input_chars: inChars,
           output_chars: outChars,
           estimated_tokens: estimateTokens(inChars, outChars),
-          quota_cost: cost,
+          quota_cost: chargedCost,
           status: 'success',
           error_message: null,
         });
@@ -3278,7 +3298,7 @@ async function handleLlmChat(req, res) {
       input_chars: inChars,
       output_chars: isOk ? outChars : 0,
       estimated_tokens: estimateTokens(inChars, isOk ? outChars : 0),
-      quota_cost: isOk ? cost : 0,
+      quota_cost: isOk ? chargedCost : 0,
       status: isOk ? 'success' : 'failed',
       error_message: failureMessage,
     });
@@ -3503,6 +3523,8 @@ async function handleImageGenerate(req, res) {
   const cost = IMAGE_GENERATION_QUOTA_COST;
   const inChars = prompt.length;
   const isTestInvite = Boolean(auth.isTestInvite);
+  const unlimitedLocalQuota = isLocalUnlimitedQuotaRequest(req, auth);
+  const chargedCost = unlimitedLocalQuota ? 0 : cost;
   const testInviteEmail = normalizeEmail(auth.user?.email) || 'tester@studio-canvas.local';
   const recordUsage = async (event) => {
     if (isTestInvite) {
@@ -3512,6 +3534,7 @@ async function handleImageGenerate(req, res) {
     await writeUsage(auth.serviceClient, event);
   };
   const refundReservedQuota = async () => {
+    if (unlimitedLocalQuota) return;
     if (isTestInvite) {
       refundTestInviteQuota(testInviteEmail, cost);
       return;
@@ -3528,7 +3551,9 @@ async function handleImageGenerate(req, res) {
     }
   }
 
-  const reservation = isTestInvite
+  const reservation = unlimitedLocalQuota
+    ? { ok: true, remaining: Number.POSITIVE_INFINITY }
+    : isTestInvite
     ? reserveTestInviteQuota(testInviteEmail, cost)
     : await reserveQuota(auth.serviceClient, auth.userId, cost);
   if (!reservation.ok) {
@@ -3673,7 +3698,7 @@ async function handleImageGenerate(req, res) {
       input_chars: inChars,
       output_chars: 0,
       estimated_tokens: estimateTokens(inChars, 0),
-      quota_cost: cost,
+      quota_cost: chargedCost,
       status: 'success',
       error_message: null,
     });
@@ -3844,6 +3869,17 @@ function isLoopbackRequest(req) {
     || remoteAddress === '::1'
     || remoteAddress === '::ffff:127.0.0.1'
   );
+}
+
+function isLoopbackHostname(value) {
+  const hostname = String(value || '').trim().replace(/^\[|\]$/g, '').toLowerCase();
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+}
+
+/** Local quota bypass cannot be activated by a public deployment hostname. */
+function isLocalUnlimitedQuotaRequest(req, auth) {
+  if (auth?.isLanDirect) return isLanDirectRequest(req);
+  return isLoopbackRequest(req) && isLoopbackHostname(requestHostname(req));
 }
 
 async function handleLocalProjects(req, res, url) {
@@ -4149,6 +4185,7 @@ module.exports = {
   __test: {
     describeSupabaseFailure,
     isLanDirectRequest,
+    isLocalUnlimitedQuotaRequest,
     isPrivateNetworkAddress,
     imageAspectMatchesSize,
     isModelAccessUnavailable,

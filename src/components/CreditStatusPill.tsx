@@ -13,6 +13,7 @@ function quotaText(status: CreditStatus | null): string {
   if (!status) {
     return '...';
   }
+  if (status.unlimited) return '无限';
   return String(status.remainingQuota);
 }
 
@@ -95,18 +96,23 @@ export function CreditStatusPill() {
 
   return (
     <>
-      <div className="credit-status-pill nodrag nopan" title={error || '当前账号剩余额度'}>
-        <button
-          className="credit-status-pill__recharge"
-          type="button"
-          onClick={(event) => {
-            event.stopPropagation();
-            setCopyMessage('');
-            setIsRechargePanelOpen(true);
-          }}
-        >
-          充值
-        </button>
+      <div
+        className="credit-status-pill nodrag nopan"
+        title={error || (status?.unlimited ? '本地版不限制站内额度' : '当前账号剩余额度')}
+      >
+        {!status?.unlimited ? (
+          <button
+            className="credit-status-pill__recharge"
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              setCopyMessage('');
+              setIsRechargePanelOpen(true);
+            }}
+          >
+            充值
+          </button>
+        ) : null}
         <span className="credit-status-pill__label">额度</span>
         <strong>{isLoading && !status ? '...' : quotaText(status)}</strong>
         {adminToolsEnabled ? (

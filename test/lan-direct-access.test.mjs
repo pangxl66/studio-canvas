@@ -52,6 +52,49 @@ test('LAN direct access can be disabled without changing online authentication',
   }
 });
 
+test('unlimited quota is restricted to loopback or verified LAN direct access', () => {
+  const previousLanDirect = process.env.LAN_DIRECT_ACCESS;
+  const previousViteLanDirect = process.env.VITE_LAN_DIRECT_ACCESS;
+  process.env.LAN_DIRECT_ACCESS = 'true';
+  process.env.VITE_LAN_DIRECT_ACCESS = 'true';
+
+  try {
+    assert.equal(
+      __test.isLocalUnlimitedQuotaRequest(
+        request('192.168.1.88', '192.168.1.34:4173'),
+        { isLanDirect: true },
+      ),
+      true,
+    );
+    assert.equal(
+      __test.isLocalUnlimitedQuotaRequest(
+        request('127.0.0.1', '127.0.0.1:4173'),
+        {},
+      ),
+      true,
+    );
+    assert.equal(
+      __test.isLocalUnlimitedQuotaRequest(
+        request('127.0.0.1', 'studio.example.com'),
+        {},
+      ),
+      false,
+    );
+    assert.equal(
+      __test.isLocalUnlimitedQuotaRequest(
+        request('8.8.8.8', 'studio.example.com'),
+        { isLanDirect: true },
+      ),
+      false,
+    );
+  } finally {
+    if (previousLanDirect === undefined) delete process.env.LAN_DIRECT_ACCESS;
+    else process.env.LAN_DIRECT_ACCESS = previousLanDirect;
+    if (previousViteLanDirect === undefined) delete process.env.VITE_LAN_DIRECT_ACCESS;
+    else process.env.VITE_LAN_DIRECT_ACCESS = previousViteLanDirect;
+  }
+});
+
 test('browser and server both require the explicit LAN direct access contract', () => {
   const authClient = fs.readFileSync(path.join(root, 'src/services/authClient.ts'), 'utf8');
   const authGate = fs.readFileSync(path.join(root, 'src/components/AuthGate.tsx'), 'utf8');

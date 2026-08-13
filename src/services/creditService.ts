@@ -17,6 +17,7 @@ export type CreditStatus = {
   resetAt: string | null;
   updatedAt: string | null;
   userId: string;
+  unlimited?: boolean;
 };
 
 const MOCK_CREDIT_KEY = 'studio_canvas_saas_mock_credit_v1';
@@ -50,12 +51,22 @@ function writeMockCredit(status: CreditStatus): void {
   localStorage.setItem(MOCK_CREDIT_KEY, JSON.stringify(status));
 }
 
+function isLocalUnlimitedCreditEnabled(): boolean {
+  if (typeof window === 'undefined') return false;
+  const hostname = window.location.hostname.trim().replace(/^\[|\]$/g, '').toLowerCase();
+  return isLanDirectAccessEnabled()
+    || hostname === 'localhost'
+    || hostname === '127.0.0.1'
+    || hostname === '::1';
+}
+
 export function requestCreditRefresh(): void {
   window.dispatchEvent(new Event(STUDIO_CREDIT_REFRESH_EVENT));
 }
 
 export function spendMockCredit(cost = 1): void {
   if (!isSaasMockEnabled()) return;
+  if (isLocalUnlimitedCreditEnabled()) return;
   const current = readMockCredit();
   writeMockCredit({
     ...current,
