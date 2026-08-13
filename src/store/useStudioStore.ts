@@ -52,10 +52,12 @@ import {
   connectedImageNodesForDepartment,
   DEPT_OUTPUT_HANDLE_ID,
   departmentAssetAsInputText,
+  hasDepartmentInputConnections,
   mergedTextInputForDepartment,
   mergedUpstreamForPromptReviewNode,
   resolveDepartmentExecutionInput,
 } from '@/services/graphInput';
+import { flushTextNodeDrafts } from '@/utils/textDraftCommit';
 import {
   SHOT_LIST_LINK_HANDLE_ID,
   SHOT_LIST_PARENT_HANDLE_ID,
@@ -1270,8 +1272,13 @@ function resyncConsumersAfterEdgeMutation(get: () => StudioState) {
     if (n.type === 'department') {
       if (shouldPreferManualInput(n.data)) continue;
       const merged = mergedTextInputForDepartment(n.id, nodes, edges);
-      if (merged !== null) {
-        get().patchNodeData(n.id, { input: merged, inputSource: 'graph' }, false);
+      const hasGraphInput = hasDepartmentInputConnections(n.id, edges);
+      if (merged !== null || n.data.inputSource === 'graph' || hasGraphInput) {
+        get().patchNodeData(
+          n.id,
+          { input: merged?.trim() ?? '', inputSource: hasGraphInput ? 'graph' : undefined },
+          false,
+        );
       }
     }
   }
@@ -1303,9 +1310,7 @@ function refreshDownstreamAfterDepartmentOutputChange(
     if (tn?.type === 'department') {
       if (!options?.ignoreManualInput && shouldPreferManualInput(tn.data)) continue;
       const merged = mergedTextInputForDepartment(e.target, nodes, edges);
-      if (merged !== null) {
-        get().patchNodeData(e.target, { input: merged, inputSource: 'graph' }, false);
-      }
+      get().patchNodeData(e.target, { input: merged?.trim() ?? '', inputSource: 'graph' }, false);
     }
   }
 }
@@ -1630,6 +1635,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   }),
 
   onNodesChange: (changes) => {
+    const removedAnyNode = changes.some((change) => change.type === 'remove');
     const gesture = trackNodeGestureUndo(changes);
     if (gesture.liveGestureFrame) {
       set((state) => ({
@@ -1717,6 +1723,10 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         shotListSelectedWiresByNodeId: nextShotListSelectedWiresByNodeId,
       };
     });
+    if (removedAnyNode) {
+      get().reconcileShotListGraphBindings();
+      resyncConsumersAfterEdgeMutation(get);
+    }
   },
 
   onEdgesChange: (changes) => {
@@ -1727,9 +1737,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     }));
     if (captureUndo) {
       get().reconcileShotListGraphBindings();
-    } else {
-      resyncConsumersAfterEdgeMutation(get);
     }
+    resyncConsumersAfterEdgeMutation(get);
   },
 
   removeEdges: (edgeIds) => {
@@ -1738,6 +1747,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     const drop = new Set(edgeIds);
     set((s) => ({ edges: s.edges.filter((e) => !drop.has(e.id)) }));
     get().reconcileShotListGraphBindings();
+    resyncConsumersAfterEdgeMutation(get);
     get().pushMessage({
       role: 'system',
       text: `已删除 ${edgeIds.length} 条连线。`,
@@ -2456,6 +2466,14 @@ export const useStudioStore = create<StudioState>((set, get) => ({
 
     const updated = get().nodes.find((n) => n.id === id);
     if (updated?.type === 'textNode') {
+      resyncConsumersAfterEdgeMutation(get);
+    }
+    if (
+      updated?.type === 'imageNode' &&
+      ('imageDataUrl' in patchEff ||
+        'imageAnalysisSummary' in patchEff ||
+        'imageColorAnalysisSummary' in patchEff)
+    ) {
       resyncConsumersAfterEdgeMutation(get);
     }
     // 娴犲懎缍?output 閸欐ê瀵查弮璺哄煕閺?Output 鏉╃偟鍤庢稉瀣畱閸氬牆鑻熸潏鎾冲弳閿涙稓鍑?input 閺囧瓨鏌婇懟銉ょ瘍閸掗攱鏌婃导姘遍獓閼?patchNodeTask閳壊eact 閹?Maximum update depth
@@ -4042,6 +4060,9 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   },
 
   executeNodeTask: async (nodeId, opts) => {
+    // A user can click regenerate before the text node's debounced editor commit fires.
+    // Flush every mounted text editor synchronously before reading graph state.
+    flushTextNodeDrafts();
     const fromReviewed = opts?.optimizeFromReviewed === true;
     const force = opts?.force === true;
     const node = get().nodes.find((n) => n.id === nodeId);
@@ -4072,8 +4093,12 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     // 1. 娴犺濮熼弬鍥ㄦ拱閿涙碍婀?Input 鏉╃偟鍤庨弮璺侯潗缂佸牆鎮庨獮鍓侇伂閸欙絼鏅堕張鈧弬鐗堟瀮閺堫剨绱欓崥?TEXT_NODE.raw_text閿涘绱濋崘宥呭晸閸忋儴濡悙?input 娓氭稑鐫嶇粈?
     const { nodes: n0, edges: e0 } = get();
     const merged0 = mergedTextInputForDepartment(nodeId, n0, e0);
-    if (merged0 !== null && merged0.trim() !== '') {
-      get().patchNodeData(nodeId, { input: merged0.trim(), inputSource: 'graph' }, false);
+    if (hasDepartmentInputConnections(nodeId, e0) && !shouldPreferManualInput(node.data)) {
+      get().patchNodeData(
+        nodeId,
+        { input: merged0?.trim() ?? '', inputSource: 'graph' },
+        false,
+      );
     }
     const deptRow = get().nodes.find((n) => n.id === nodeId);
     const inputText = resolveDepartmentExecutionInput(
@@ -5307,10 +5332,11 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   syncDepartmentInputFromGraph: (deptId) => {
     const { nodes, edges } = get();
     const merged = mergedTextInputForDepartment(deptId, nodes, edges);
-    get().patchNodeData(deptId, { inputSource: 'graph' }, false);
-    if (merged !== null) {
-      get().patchNodeData(deptId, { input: merged, inputSource: 'graph' }, false);
-    }
+    get().patchNodeData(
+      deptId,
+      { input: merged?.trim() ?? '', inputSource: 'graph' },
+      false,
+    );
   },
 
   removeNodesByIds: (ids) => {

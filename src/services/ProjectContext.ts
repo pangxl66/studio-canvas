@@ -26,6 +26,10 @@ export function appendProjectContextForConsumer(
   systemPrompt: string,
   consumer: 'writing' | 'storyboard' | 'prompt',
 ): string {
-  if (consumer === 'writing') return systemPrompt;
-  return systemPrompt + getProjectContextSystemAppend();
+  void consumer;
+  // ProjectContext used to append summaries accumulated from earlier writing executions.
+  // Those summaries are not an explicit project setting and cannot be invalidated when a
+  // connected text/image is edited or deleted, so they can resurrect removed story facts.
+  // Current graph input plus explicit project settings are now the authoritative context.
+  return systemPrompt;
 }

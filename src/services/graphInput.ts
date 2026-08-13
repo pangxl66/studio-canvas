@@ -14,6 +14,13 @@ import {
   collectTextNodeContextForNode,
   serializeTextNodeContext,
 } from '@/utils/textNodeContext';
+import {
+  hasDepartmentInputConnections,
+  hasUsableImageReference,
+  resolveFreshDepartmentInput,
+} from '@/utils/departmentInputFreshness';
+
+export { hasDepartmentInputConnections } from '@/utils/departmentInputFreshness';
 
 export const DEPT_OUTPUT_HANDLE_ID = 'out' as const;
 
@@ -214,10 +221,12 @@ export function connectedImageNodesForDepartment(
 
 function imageNodeAsStoryboardReferenceText(node: StudioRFNode, index: number): string | null {
   if (node.type !== 'imageNode' || node.data.type !== 'image_node') return null;
+  // A cached summary is only valid while its source image still exists. Without this guard,
+  // clearing an image can keep feeding the previous visual analysis into regeneration.
+  if (!hasUsableImageReference(node.data)) return null;
   const label = node.data.label?.trim() || `场景参考图 ${index + 1}`;
   const fileName = node.data.imageFileName?.trim();
   const summary = node.data.imageAnalysisSummary?.trim();
-  if (!summary && !node.data.imageDataUrl) return null;
   return [
     `【视觉场景参考图 ${index + 1}】${label}${fileName ? `（${fileName}）` : ''}`,
     summary
@@ -234,10 +243,10 @@ export function imageNodeAsPromptColorReferenceText(
   index: number,
 ): string | null {
   if (node.type !== 'imageNode' || node.data.type !== 'image_node') return null;
+  if (!hasUsableImageReference(node.data)) return null;
   const label = node.data.label?.trim() || `色彩表 ${index + 1}`;
   const fileName = node.data.imageFileName?.trim();
   const summary = node.data.imageColorAnalysisSummary?.trim();
-  if (!summary && !node.data.imageDataUrl) return null;
   return [
     `【色彩表参考图 ${index + 1}】${label}${fileName ? `（${fileName}）` : ''}`,
     summary
@@ -456,6 +465,16 @@ export function resolveDepartmentExecutionInput(
   fallbackInput: string,
 ): string {
   const merged = mergedTextInputForDepartment(deptId, nodes, edges);
-  if (merged !== null && merged.trim() !== '') return merged.trim();
-  return (fallbackInput ?? '').trim();
+  const departmentNode = nodes.find((node) => node.id === deptId);
+  const preferManualInput =
+    departmentNode?.type === 'department' && departmentNode.data.inputSource === 'manual';
+  // Once a graph input is connected it is the source of truth, including the empty state.
+  // Falling back here resurrects the department's previously persisted graph snapshot after
+  // an upstream text/image is cleared or removed.
+  return resolveFreshDepartmentInput(
+    merged,
+    fallbackInput ?? '',
+    hasDepartmentInputConnections(deptId, edges),
+    preferManualInput,
+  );
 }

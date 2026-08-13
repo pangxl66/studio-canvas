@@ -13,6 +13,7 @@ import {
   type PointerEvent,
 } from 'react';
 import { useStudioStore } from '@/store/useStudioStore';
+import { FLUSH_TEXT_NODE_DRAFTS_EVENT } from '@/utils/textDraftCommit';
 import { useStudioGraphContentNodes } from '@/hooks/useStudioGraphContent';
 import {
   DEFAULT_STORYBOARD_SKILL_ID,
@@ -169,6 +170,12 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
     },
     [clearDraftCommitTimer, id, patchNodeData],
   );
+
+  useEffect(() => {
+    const flush = () => commitDraft();
+    window.addEventListener(FLUSH_TEXT_NODE_DRAFTS_EVENT, flush);
+    return () => window.removeEventListener(FLUSH_TEXT_NODE_DRAFTS_EVENT, flush);
+  }, [commitDraft]);
 
   const scheduleDraftCommit = useCallback(
     (value: string) => {
