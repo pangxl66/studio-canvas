@@ -52,6 +52,10 @@ import {
 } from '@/utils/studioCanvasTimeline';
 import { getSeedance25ReadableFaceIssues } from '@/utils/seedance25PerformanceValidation';
 import { composeSeedance25PerformanceCard } from '@/utils/seedance25PerformanceComposition';
+import {
+  ensureSeedance25CameraModel,
+  extractSeedance25CameraModel,
+} from '@/utils/seedance25Camera';
 export {
   PROMPT_DEPT_AGENT_SYSTEM,
   PROMPT_DEPT_OUTPUT_SHAPE,
@@ -1406,6 +1410,11 @@ function assertSeedance25MultimodalCard(
       `Prompt 模型返回：镜头 ${shotId} 未遵守 Seedance 2.5 ${versionLabel} 最终结构，必须从“【Seedance 2.5｜”开始并包含挂载、摄影机/镜头、机位与构图、起幅、时间轴、声音/对白、落幅及文字与字幕限制。`,
     );
   }
+  if (!extractSeedance25CameraModel(card)) {
+    throw new Error(
+      `Prompt 模型返回：镜头 ${shotId} 的 Seedance 2.5【摄影机 / 镜头】缺少具体摄影机型号。`,
+    );
+  }
   MOUNT_TOKEN_RE.lastIndex = 0;
   const withoutValidMountTokens = card.replace(MOUNT_TOKEN_RE, '');
   MOUNT_TOKEN_RE.lastIndex = 0;
@@ -1552,6 +1561,20 @@ function normalizePromptOutput(
   sourceStoryboard: StoryboardOutput | null,
   styleMode: PromptStyleMode = 'studioCanvas',
 ): PromptOutput {
+  const getSceneCameraKey = (pack: PromptShotPack, index: number): string => {
+    const sourceShot = findSourceShot(sourceStoryboard, pack, index);
+    return String(sourceShot?.sceneRef ?? pack.dimensions?.场景 ?? '').trim() || '__default_scene__';
+  };
+  const sceneCameraModels = new Map<string, string>();
+  if (isSeedance25MultimodalStyle(styleMode)) {
+    for (const [index, pack] of (output.shotPrompts ?? []).entries()) {
+      const cameraModel = extractSeedance25CameraModel(String(pack.seedanceCard ?? ''));
+      const sceneKey = getSceneCameraKey(pack, index);
+      if (cameraModel && !sceneCameraModels.has(sceneKey)) {
+        sceneCameraModels.set(sceneKey, cameraModel);
+      }
+    }
+  }
   const shotPrompts = (output.shotPrompts ?? []).map((pack, index) => {
     const sourceShot = findSourceShot(sourceStoryboard, pack, index);
     const sourceShots = sourceShot?.mergedMembers?.length
@@ -1610,7 +1633,7 @@ function normalizePromptOutput(
             : ' ',
       });
     };
-    const normalizedSeedanceCard =
+    let normalizedSeedanceCard =
       typeof pack.seedanceCard === 'string'
         ? isSeedance25MultimodalStyle(styleMode)
           ? pack.seedanceCard.replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim()
@@ -1622,6 +1645,17 @@ function normalizePromptOutput(
             ? pack.seedanceCard.replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim()
             : tightenSeedanceCard(pack.seedanceCard)
         : '';
+    if (isSeedance25MultimodalStyle(styleMode) && normalizedSeedanceCard) {
+      const sceneKey = getSceneCameraKey(pack, index);
+      const completed = ensureSeedance25CameraModel(
+        normalizedSeedanceCard,
+        sceneCameraModels.get(sceneKey),
+      );
+      normalizedSeedanceCard = completed.card;
+      if (!sceneCameraModels.has(sceneKey)) {
+        sceneCameraModels.set(sceneKey, completed.cameraModel);
+      }
+    }
     return {
       ...pack,
       shot_id: sourceShot ? String(sourceShot.id) : pack.shot_id,
