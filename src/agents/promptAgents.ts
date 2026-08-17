@@ -15,6 +15,7 @@ import {
   PROMPT_LOCAL_COMPRESSION_RULE,
   PROMPT_LEADER_SPEC,
   PROMPT_MOUNT_TOKEN_RULE,
+  PROMPT_SCENE_REFERENCE_RULE,
   PROMPT_TIMING_SYSTEM_RULE,
 } from '@/agents/promptDeptSpec';
 import { tryParseStoryboardOutput } from '@/agents/storyboardAgents';
@@ -24,6 +25,7 @@ import {
   SEEDANCE25_MULTIMODAL_PROMPT_V10_SKILL_ID,
 } from '@/services/skillLoader';
 import { runPromptGenerationPipeline } from '@/agents/promptPipeline';
+import { buildStoryboardContinuityContext } from '@/utils/storyboardContinuity';
 import type {
   ApprovedAsset,
   PromptOutput,
@@ -51,7 +53,10 @@ import {
   repairStudioCanvasV25Timeline,
 } from '@/utils/studioCanvasTimeline';
 import { getSeedance25ReadableFaceIssues } from '@/utils/seedance25PerformanceValidation';
-import { composeSeedance25PerformanceCard } from '@/utils/seedance25PerformanceComposition';
+import {
+  composeSeedance25PerformanceCard,
+  isSeedance25PerformanceEligibleCard,
+} from '@/utils/seedance25PerformanceComposition';
 import {
   ensureSeedance25CameraModel,
   extractSeedance25CameraModel,
@@ -1246,6 +1251,12 @@ function tryParseStoryboardFromInputText(raw: string): StoryboardOutput | null {
 
 function buildPromptModeHints(sourceStoryboard: StoryboardOutput | null): string {
   if (!sourceStoryboard?.shots?.length) return '';
+  const continuityRules = [
+    '【连续性硬约束】生成结果必须直接继承源分镜的场景空间底图与逐镜连续性账本。',
+    '每条提示词的开场站位、世界位置、画面左右、动作轴、机位侧、朝向、视线、持有道具必须来自 startState；镜尾必须落到 endState。不得重新猜测或交换左右关系。',
+    '若 continuity.intentionalBreak 不为 true，禁止无过渡越轴、瞬移、道具换手或角色画面位置跳变。',
+    buildStoryboardContinuityContext(sourceStoryboard),
+  ].join('\n');
   if (sourceStoryboard.shots.length === 1) {
     const first = sourceStoryboard.shots[0];
     const mergedCount = first.mergedMembers?.length ?? 0;
@@ -1254,16 +1265,19 @@ function buildPromptModeHints(sourceStoryboard: StoryboardOutput | null): string
         '【输出模式】当前输入是多镜头组合模式。',
         '你必须只输出 1 条 shotPrompts。',
         `这 1 条 shotPrompt 对应 1 个组合镜头，内部要明确写出镜头1到镜头${mergedCount}的连续接力，不得拆成多条独立 shotPrompts。`,
+        continuityRules,
       ].join('\n');
     }
     return [
       '【输出模式】当前输入是单镜头模式。',
       '你必须只输出 1 条 shotPrompts，不得擅自再拆成多镜头组合。',
+      continuityRules,
     ].join('\n');
   }
   return [
     '【输出模式】当前输入包含多条源镜头。',
     '你必须逐镜输出，shotPrompts 数量必须与源镜头数量严格一致，不得把多条源镜头压成一条。',
+    continuityRules,
   ].join('\n');
 }
 
@@ -2458,6 +2472,7 @@ function buildStudioCanvasV25RuntimeRules(sourceStoryboard: StoryboardOutput | n
     '“提示词”是可独立发送给视频引擎的 Engine Prompt，按主体初态→动作变化→摄影机→环境光线→材质物理→落幅→专项负向编译，常规不超过900字。',
     'Engine Prompt 超长时按安全顺序压缩：先删重复项目继承、品牌与解释，再压缩次要环境和修辞；必须保留主体身份、动作因果、镜头路径、起落幅结果、关键光向、专项负向和有效钉子。',
     '首行与摄影机动态参数的总时长必须一致；时间段从0开始、连续无重叠无空洞，最后结束时间等于首行总时长；单卡不设15秒硬上限。',
+    PROMPT_SCENE_REFERENCE_RULE,
     PROMPT_COLOR_TABLE_RULE,
     PROMPT_CARD_LENGTH_BUDGET_RULE,
     buildPromptModeHints(sourceStoryboard),
@@ -2560,6 +2575,7 @@ function buildStudioCanvasV26RuntimeRules(sourceStoryboard: StoryboardOutput | n
     '“提示词”是可独立发送给视频引擎的 Engine Prompt，按主体初态→动作变化→摄影机→环境光线→材质物理→落幅→专项负向编译，常规不超过900字。',
     'Engine Prompt 超长时按安全顺序压缩：先删重复项目继承、品牌与解释，再压缩次要环境和修辞；必须保留主体身份、动作因果、镜头路径、起落幅结果、关键光向、专项负向和有效钉子。',
     '首行与摄影机动态参数的总时长必须一致；时间段从0开始、连续无重叠无空洞，最后结束时间等于首行总时长；单卡不设15秒硬上限。',
+    PROMPT_SCENE_REFERENCE_RULE,
     PROMPT_COLOR_TABLE_RULE,
     PROMPT_CARD_LENGTH_BUDGET_RULE,
     buildPromptModeHints(sourceStoryboard),
@@ -3248,25 +3264,43 @@ function buildSeedance25PerformanceModuleUserMessage(
 async function applySeedance25PerformanceModules(params: {
   brief: string;
   baseOutput: PromptOutput;
+  eligiblePackIndexes: number[];
   executionSystemPrompt?: string;
   onDelta?: (delta: string, accumulated: string) => void;
   signal?: AbortSignal;
 }): Promise<PromptOutput> {
+  const basePacks = params.baseOutput.shotPrompts ?? [];
+  const eligiblePackIndexes = Array.from(
+    new Set(
+      params.eligiblePackIndexes.filter(
+        (index) => Number.isInteger(index) && index >= 0 && index < basePacks.length,
+      ),
+    ),
+  );
+  if (!eligiblePackIndexes.length) return params.baseOutput;
+  const moduleBaseOutput: PromptOutput = {
+    ...params.baseOutput,
+    shotPrompts: eligiblePackIndexes.map((index) => basePacks[index]),
+  };
   const parsed = await invokeLlmJsonObjectStream({
     systemPrompt: [
       params.executionSystemPrompt?.trim() || PROMPT_DEPT_AGENT_SYSTEM,
       '【运行时模块接管契约｜最高优先级】',
       '你接收的 v10 基础 PromptOutput 已冻结。只生成【表演】与【时间轴】的替换正文，不输出完整 seedanceCard，不重新设计其他模块。',
     ].join('\n\n'),
-    userPrompt: buildSeedance25PerformanceModuleUserMessage(params.brief, params.baseOutput),
+    userPrompt: buildSeedance25PerformanceModuleUserMessage(params.brief, moduleBaseOutput),
     temperature: 0.2,
     onDelta: params.onDelta,
     signal: params.signal,
   });
-  const overrides = assertSeedance25PerformanceModuleOverrides(parsed, params.baseOutput);
+  const overrides = assertSeedance25PerformanceModuleOverrides(parsed, moduleBaseOutput);
+  const overrideByPackIndex = new Map(
+    eligiblePackIndexes.map((packIndex, moduleIndex) => [packIndex, overrides[moduleIndex]]),
+  );
 
-  const shotPrompts = (params.baseOutput.shotPrompts ?? []).map((pack, index) => {
-    const override = overrides[index];
+  const shotPrompts = basePacks.map((pack, index) => {
+    const override = overrideByPackIndex.get(index);
+    if (!override) return pack;
     const seedanceCard = composeSeedance25PerformanceCard(
       String(pack.seedanceCard ?? ''),
       override.performance,
@@ -3387,10 +3421,30 @@ async function runSeedance25PerformanceV11Composition(
     },
   );
 
-  onDelta?.('', '正在仅接管【表演】与【时间轴】，其他 v10 模块保持不变…');
+  const eligiblePackIndexes = (baseOutput.shotPrompts ?? []).reduce<number[]>(
+    (indexes, pack, index) => {
+      if (isSeedance25PerformanceEligibleCard(String(pack.seedanceCard ?? ''))) {
+        indexes.push(index);
+      }
+      return indexes;
+    },
+    [],
+  );
+  if (!eligiblePackIndexes.length) {
+    onDelta?.('', '当前镜头没有角色或行动主体，已保留 Seedance 2.5 v10，不启用八维表演。');
+    return baseOutput;
+  }
+  onDelta?.('', '正在仅接管角色镜头的【表演】与【时间轴】，其他 v10 模块保持不变…');
+  if (eligiblePackIndexes.length < (baseOutput.shotPrompts?.length ?? 0)) {
+    onDelta?.(
+      '',
+      `仅对 ${eligiblePackIndexes.length} 个角色镜头启用八维表演；无角色镜头保留 Seedance 2.5 v10。`,
+    );
+  }
   return applySeedance25PerformanceModules({
     brief,
     baseOutput,
+    eligiblePackIndexes,
     executionSystemPrompt,
     onDelta,
     signal,

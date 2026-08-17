@@ -31,6 +31,7 @@ test('storyboard generation phases explain fallback, repair and finalization', (
 test('storyboard requests are auditable and scene parsing does not truncate after 24 scenes', () => {
   assert.match(storyboardAgentsSource, /feature: 'storyboard-generate'/);
   assert.doesNotMatch(storyboardAgentsSource, /slice\(0, 24\)/);
-  assert.match(storyboardAgentsSource, /shot\.id === index \+ 1 \? shot/);
+  assert.match(storyboardAgentsSource, /const idMap = new Map/);
+  assert.match(storyboardAgentsSource, /inheritsFromShotId/);
   assert.match(storyboardAgentsSource, /countStoryboardSourceScenes/);
 });

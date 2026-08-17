@@ -34,6 +34,10 @@ import {
   parseShotListItemOutputHandleId,
   requestShotListConnectionPicker,
 } from '@/utils/shotListWire';
+import {
+  auditStoryboardShotContinuity,
+  summarizeStoryboardShotContinuity,
+} from '@/utils/storyboardContinuity';
 
 type EditableField =
   | 'sceneRef'
@@ -101,6 +105,7 @@ function ShotCanvasRowImpl({
   selectedGroupCount,
   hovered,
   promptLinkCount,
+  previousShot,
   virtualized,
   onHoverPort,
   onSelectGesture,
@@ -109,6 +114,7 @@ function ShotCanvasRowImpl({
   onLiveField,
   onFlushPersist,
   onManualConnectionStart,
+  onOpenContinuity,
   stopCanvas,
 }: {
   sh: StoryboardShot;
@@ -117,6 +123,7 @@ function ShotCanvasRowImpl({
   selectedGroupCount: number;
   hovered: boolean;
   promptLinkCount: number;
+  previousShot?: StoryboardShot;
   virtualized: boolean;
   onHoverPort: (hovering: boolean) => void;
   onSelectGesture: (
@@ -131,6 +138,7 @@ function ShotCanvasRowImpl({
     event: ReactMouseEvent<HTMLDivElement>,
     wireId: string,
   ) => void;
+  onOpenContinuity: () => void;
   stopCanvas: (e: ReactPointerEvent | ReactMouseEvent) => void;
 }) {
   const [editingField, setEditingField] = useState<EditableField | null>(null);
@@ -205,6 +213,7 @@ function ShotCanvasRowImpl({
     text.trim() ? text : emptyLabel;
   const shotNoLabel = sh.shotNo?.trim() || `#${sh.id}`;
   const outputLabel = promptLinkCount > 0 ? `已接入 ${promptLinkCount}` : 'Prompt';
+  const continuityAudit = auditStoryboardShotContinuity(sh, previousShot);
 
   const editorBoxStyle = editingFieldSize == null
     ? undefined
@@ -522,6 +531,22 @@ function ShotCanvasRowImpl({
           </button>
         )}
       </td>
+      <td className="shot-list-canvas__td shot-list-canvas__td--continuity">
+        <button
+          type="button"
+          className={`shot-list-canvas__continuity-badge shot-list-canvas__continuity-badge--${continuityAudit.severity} nodrag nopan nowheel`}
+          title={continuityAudit.issues.join('\n') || summarizeStoryboardShotContinuity(sh)}
+          onPointerDown={stopCanvas}
+          onMouseDown={stopCanvas}
+          onClick={onOpenContinuity}
+        >
+          {continuityAudit.severity === 'ok'
+            ? '连续'
+            : continuityAudit.severity === 'warning'
+              ? `${continuityAudit.issues.length}项警告`
+              : '待确认'}
+        </button>
+      </td>
       <td className="shot-list-canvas__td shot-list-canvas__td--op">
         <button
           type="button"
@@ -594,6 +619,188 @@ const ShotCanvasRow = memo(
     previous.virtualized === next.virtualized,
 );
 
+function ContinuityEditorDialog({
+  shot,
+  previousShot,
+  onClose,
+  onSave,
+}: {
+  shot: StoryboardShot;
+  previousShot?: StoryboardShot;
+  onClose: () => void;
+  onSave: (continuity: NonNullable<StoryboardShot['continuity']>) => void;
+}) {
+  const [transition, setTransition] = useState(shot.continuity?.transition ?? 'continuous');
+  const [intentionalBreak, setIntentionalBreak] = useState(shot.continuity?.intentionalBreak ?? false);
+  const [breakReason, setBreakReason] = useState(shot.continuity?.breakReason ?? '');
+  const [startJson, setStartJson] = useState(() => JSON.stringify(shot.continuity?.startState ?? { characters: [] }, null, 2));
+  const [endJson, setEndJson] = useState(() => JSON.stringify(shot.continuity?.endState ?? { characters: [] }, null, 2));
+  const [error, setError] = useState('');
+
+  const inheritPrevious = () => {
+    const previousEnd = previousShot?.continuity?.endState;
+    if (!previousEnd) {
+      setError('上一镜没有可继承的结束状态。');
+      return;
+    }
+    setStartJson(JSON.stringify(previousEnd, null, 2));
+    setTransition('continuous');
+    setIntentionalBreak(false);
+    setBreakReason('');
+    setError('');
+  };
+
+  const save = () => {
+    try {
+      const startState = JSON.parse(startJson) as NonNullable<StoryboardShot['continuity']>['startState'];
+      const endState = JSON.parse(endJson) as NonNullable<StoryboardShot['continuity']>['endState'];
+      if (!Array.isArray(startState?.characters) || !Array.isArray(endState?.characters)) {
+        throw new Error('起始状态和结束状态都必须包含 characters 数组。');
+      }
+      if (intentionalBreak && !breakReason.trim()) {
+        throw new Error('标记有意跳变时必须填写原因。');
+      }
+      onSave({
+        inheritsFromShotId:
+          previousShot && previousShot.sceneRef === shot.sceneRef ? previousShot.id : undefined,
+        startState,
+        endState,
+        transition,
+        intentionalBreak,
+        breakReason: intentionalBreak ? breakReason.trim() : undefined,
+        inferred: false,
+      });
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : '连续性状态格式不正确。');
+    }
+  };
+
+  return createPortal(
+    <div className="shot-continuity-dialog__backdrop nodrag nopan nowheel" role="presentation" onMouseDown={onClose}>
+      <section
+        className="shot-continuity-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`编辑镜头 ${shot.shotNo || shot.id} 连续性`}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="shot-continuity-dialog__header">
+          <div>
+            <span className="shot-continuity-dialog__eyebrow">CONTINUITY LEDGER</span>
+            <h3>镜头 {shot.shotNo || shot.id} · 起止状态</h3>
+          </div>
+          <button type="button" className="shot-continuity-dialog__close" onClick={onClose} aria-label="关闭">×</button>
+        </header>
+        <p className="shot-continuity-dialog__hint">
+          世界位置写物理锚点，screenPosition 只写画左/画中/画右。起始状态应承接上一镜结束状态。
+        </p>
+        <div className="shot-continuity-dialog__toolbar">
+          <label>
+            衔接方式
+            <select value={transition} onChange={(event) => setTransition(event.target.value)}>
+              <option value="continuous">连续</option>
+              <option value="match_on_action">动作匹配</option>
+              <option value="establishing">场景建立</option>
+              <option value="neutral_reset">中性镜头重置轴线</option>
+              <option value="intentional_axis_cross">有意越轴</option>
+              <option value="time_jump">时间跳跃</option>
+            </select>
+          </label>
+          <button type="button" onClick={inheritPrevious} disabled={!previousShot?.continuity?.endState}>
+            继承上一镜结束状态
+          </button>
+          <label className="shot-continuity-dialog__check">
+            <input type="checkbox" checked={intentionalBreak} onChange={(event) => setIntentionalBreak(event.target.checked)} />
+            有意跳变
+          </label>
+        </div>
+        {intentionalBreak ? (
+          <input
+            className="shot-continuity-dialog__reason"
+            value={breakReason}
+            onChange={(event) => setBreakReason(event.target.value)}
+            placeholder="说明为什么允许越轴、换位或时间跳跃"
+          />
+        ) : null}
+        <div className="shot-continuity-dialog__states">
+          <label>
+            <strong>起始状态</strong>
+            <textarea value={startJson} onChange={(event) => setStartJson(event.target.value)} spellCheck={false} />
+          </label>
+          <label>
+            <strong>结束状态</strong>
+            <textarea value={endJson} onChange={(event) => setEndJson(event.target.value)} spellCheck={false} />
+          </label>
+        </div>
+        {error ? <p className="shot-continuity-dialog__error">{error}</p> : null}
+        <footer className="shot-continuity-dialog__footer">
+          <button type="button" onClick={onClose}>取消</button>
+          <button type="button" className="shot-continuity-dialog__save" onClick={save}>保存连续性</button>
+        </footer>
+      </section>
+    </div>,
+    document.body,
+  );
+}
+
+function SpatialMapEditorDialog({
+  output,
+  onClose,
+  onSave,
+}: {
+  output: StoryboardOutput;
+  onClose: () => void;
+  onSave: (maps: NonNullable<StoryboardOutput['sceneSpatialMaps']>) => void;
+}) {
+  const [draft, setDraft] = useState(() => JSON.stringify(output.sceneSpatialMaps ?? [], null, 2));
+  const [error, setError] = useState('');
+  const save = () => {
+    try {
+      const maps = JSON.parse(draft) as NonNullable<StoryboardOutput['sceneSpatialMaps']>;
+      if (!Array.isArray(maps) || maps.some((map) => !map?.sceneRef || !Array.isArray(map.anchors))) {
+        throw new Error('空间底图必须是数组，每项必须包含 sceneRef 和 anchors 数组。');
+      }
+      onSave(maps.map((map) => ({ ...map, inferred: false })));
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : '空间底图格式不正确。');
+    }
+  };
+  return createPortal(
+    <div className="shot-continuity-dialog__backdrop nodrag nopan nowheel" role="presentation" onMouseDown={onClose}>
+      <section
+        className="shot-continuity-dialog shot-continuity-dialog--spatial"
+        role="dialog"
+        aria-modal="true"
+        aria-label="编辑场景空间底图"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="shot-continuity-dialog__header">
+          <div>
+            <span className="shot-continuity-dialog__eyebrow">SCENE SPATIAL MAP</span>
+            <h3>场景空间底图</h3>
+          </div>
+          <button type="button" className="shot-continuity-dialog__close" onClick={onClose} aria-label="关闭">×</button>
+        </header>
+        <p className="shot-continuity-dialog__hint">
+          每个 sceneRef 只保留一张底图。anchors 写固定物理位置，actionAxis 写主要移动/对视轴，defaultCameraSide 写默认守轴侧。
+        </p>
+        <textarea
+          className="shot-continuity-dialog__spatial-json"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          spellCheck={false}
+        />
+        {error ? <p className="shot-continuity-dialog__error">{error}</p> : null}
+        <footer className="shot-continuity-dialog__footer">
+          <button type="button" onClick={onClose}>取消</button>
+          <button type="button" className="shot-continuity-dialog__save" onClick={save}>保存空间底图</button>
+        </footer>
+      </section>
+    </div>,
+    document.body,
+  );
+}
+
 export function ShotListEmbeddedEditor({
   id,
   data,
@@ -621,6 +828,8 @@ export function ShotListEmbeddedEditor({
   const [hoveredWireId, setHoveredWireId] = useState<string | null>(null);
   const [batchSceneRef, setBatchSceneRef] = useState('');
   const [batchSound, setBatchSound] = useState('');
+  const [continuityEditorRow, setContinuityEditorRow] = useState<number | null>(null);
+  const [spatialMapEditorOpen, setSpatialMapEditorOpen] = useState(false);
   const [manualConnectionLine, setManualConnectionLine] =
     useState<ShotListManualConnectionLine>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -665,7 +874,7 @@ export function ShotListEmbeddedEditor({
     [isolatedRowSet, isolationActive, shots],
   );
   const [virtualScrollTop, setVirtualScrollTop] = useState(0);
-  const scrollViewportHeight = Math.max(220, (viewportHeight ?? 560) - 210);
+  const scrollViewportHeight = Math.max(220, (viewportHeight ?? 560) - 256);
   const virtualWindow = useMemo(() => {
     const enabled = visibleRows.length > SHOT_LIST_VIRTUALIZE_AFTER_ROWS;
     if (!enabled) {
@@ -1125,6 +1334,34 @@ export function ShotListEmbeddedEditor({
     patchShotListNodeOutput(id, { ...base, narrativeBeats: beats, shots: reindexStoryboardShotIds(nextShots) }, true);
   }, [id, patchShotListNodeOutput, flushPersist]);
 
+  const saveContinuity = useCallback(
+    (rowIdx: number, continuity: NonNullable<StoryboardShot['continuity']>) => {
+      flushPersist();
+      const row = useStudioStore.getState().nodes.find((node) => node.id === id)?.data;
+      if (row?.type !== 'shot_list_node' || row.output == null) return;
+      const out = tryParseStoryboardOutput(row.output);
+      if (!out?.shots[rowIdx]) return;
+      const next = out.shots.slice();
+      next[rowIdx] = { ...next[rowIdx], continuity };
+      patchShotListNodeOutput(id, { ...out, shots: next }, true);
+      setContinuityEditorRow(null);
+    },
+    [flushPersist, id, patchShotListNodeOutput],
+  );
+
+  const saveSpatialMaps = useCallback(
+    (sceneSpatialMaps: NonNullable<StoryboardOutput['sceneSpatialMaps']>) => {
+      flushPersist();
+      const row = useStudioStore.getState().nodes.find((node) => node.id === id)?.data;
+      if (row?.type !== 'shot_list_node' || row.output == null) return;
+      const out = tryParseStoryboardOutput(row.output);
+      if (!out) return;
+      patchShotListNodeOutput(id, { ...out, sceneSpatialMaps }, true);
+      setSpatialMapEditorOpen(false);
+    },
+    [flushPersist, id, patchShotListNodeOutput],
+  );
+
   const stopCanvas = useCallback((e: ReactPointerEvent | ReactMouseEvent) => {
     e.stopPropagation();
   }, []);
@@ -1193,6 +1430,19 @@ export function ShotListEmbeddedEditor({
       className="shot-list-canvas__root nodrag nopan nowheel"
       onContextMenu={openShotListContextMenu}
     >
+      <button
+        type="button"
+        className="shot-list-canvas__continuity-summary nodrag nopan nowheel"
+        onPointerDown={stopCanvas}
+        onMouseDown={stopCanvas}
+        onClick={() => setSpatialMapEditorOpen(true)}
+      >
+        <span>场景空间底图 {output.sceneSpatialMaps?.length ?? 0}</span>
+        <span>
+          待确认 {output.sceneSpatialMaps?.filter((map) => map.inferred).length ?? 0}
+        </span>
+        <span>编辑锚点 / 动作轴 / 初始站位 →</span>
+      </button>
       {hasSelection ? (
         <div className="shot-list-canvas__toolbar">
           <span className="shot-list-canvas__toolbar-hint">已选 {selected.size} 行</span>
@@ -1343,6 +1593,7 @@ export function ShotListEmbeddedEditor({
             <col className="shot-list-canvas__col shot-list-canvas__col--dialogue" />
             <col className="shot-list-canvas__col shot-list-canvas__col--sound" />
             <col className="shot-list-canvas__col shot-list-canvas__col--note" />
+            <col className="shot-list-canvas__col shot-list-canvas__col--continuity" />
             <col className="shot-list-canvas__col shot-list-canvas__col--op" />
             <col className="shot-list-canvas__col shot-list-canvas__col--port" />
           </colgroup>
@@ -1378,6 +1629,9 @@ export function ShotListEmbeddedEditor({
               <th className="shot-list-canvas__th shot-list-canvas__th--note" scope="col">
                 备注
               </th>
+              <th className="shot-list-canvas__th shot-list-canvas__th--continuity" scope="col">
+                连续性
+              </th>
               <th className="shot-list-canvas__th shot-list-canvas__th--op" scope="col">
                 操作
               </th>
@@ -1389,7 +1643,7 @@ export function ShotListEmbeddedEditor({
           <tbody>
             {virtualWindow.topSpacer > 0 ? (
               <tr className="shot-list-canvas__virtual-spacer" aria-hidden>
-                <td colSpan={12} style={{ height: virtualWindow.topSpacer }} />
+                <td colSpan={13} style={{ height: virtualWindow.topSpacer }} />
               </tr>
             ) : null}
             {virtualWindow.rows.map(({ shot: sh, rowIdx }) => (
@@ -1401,6 +1655,7 @@ export function ShotListEmbeddedEditor({
                 selectedGroupCount={selectedWireIds.length}
                 hovered={hoveredWireId === (sh.wireId ?? String(sh.id))}
                 promptLinkCount={promptLinkCounts.get(sh.wireId ?? String(sh.id)) ?? 0}
+                previousShot={rowIdx > 0 ? shots[rowIdx - 1] : undefined}
                 virtualized={virtualWindow.enabled}
                 onHoverPort={(hovering) => setHoveredWireId(hovering ? (sh.wireId ?? String(sh.id)) : null)}
                 onSelectGesture={startSelectionGesture}
@@ -1409,17 +1664,33 @@ export function ShotListEmbeddedEditor({
                 onLiveField={(field, value) => onLiveField(rowIdx, field, value)}
                 onFlushPersist={flushPersist}
                 onManualConnectionStart={startManualConnection}
+                onOpenContinuity={() => setContinuityEditorRow(rowIdx)}
                 stopCanvas={stopCanvas}
               />
             ))}
             {virtualWindow.bottomSpacer > 0 ? (
               <tr className="shot-list-canvas__virtual-spacer" aria-hidden>
-                <td colSpan={12} style={{ height: virtualWindow.bottomSpacer }} />
+                <td colSpan={13} style={{ height: virtualWindow.bottomSpacer }} />
               </tr>
             ) : null}
           </tbody>
         </table>
       </div>
+      {continuityEditorRow != null && shots[continuityEditorRow] ? (
+        <ContinuityEditorDialog
+          shot={shots[continuityEditorRow]}
+          previousShot={continuityEditorRow > 0 ? shots[continuityEditorRow - 1] : undefined}
+          onClose={() => setContinuityEditorRow(null)}
+          onSave={(continuity) => saveContinuity(continuityEditorRow, continuity)}
+        />
+      ) : null}
+      {spatialMapEditorOpen ? (
+        <SpatialMapEditorDialog
+          output={output}
+          onClose={() => setSpatialMapEditorOpen(false)}
+          onSave={saveSpatialMaps}
+        />
+      ) : null}
       {contextMenu
         ? createPortal(
             <div

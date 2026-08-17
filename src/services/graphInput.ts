@@ -15,6 +15,12 @@ import {
   serializeTextNodeContext,
 } from '@/utils/textNodeContext';
 import {
+  buildImageTextAlignmentInstruction,
+  inferImageReferenceKind,
+  resolveImageReferenceName,
+  type NamedTextReference,
+} from '@/utils/imageReferenceNaming';
+import {
   hasDepartmentInputConnections,
   hasUsableImageReference,
   resolveFreshDepartmentInput,
@@ -219,16 +225,56 @@ export function connectedImageNodesForDepartment(
     });
 }
 
-function imageNodeAsStoryboardReferenceText(node: StudioRFNode, index: number): string | null {
+function imageNodeAsStoryboardReferenceText(
+  node: StudioRFNode,
+  index: number,
+  textReferences: NamedTextReference[] = [],
+): string | null {
   if (node.type !== 'imageNode' || node.data.type !== 'image_node') return null;
   // A cached summary is only valid while its source image still exists. Without this guard,
   // clearing an image can keep feeding the previous visual analysis into regeneration.
   if (!hasUsableImageReference(node.data)) return null;
-  const label = node.data.label?.trim() || `场景参考图 ${index + 1}`;
+  const label = resolveImageReferenceName(node.data, `场景参考图 ${index + 1}`);
   const fileName = node.data.imageFileName?.trim();
   const summary = node.data.imageAnalysisSummary?.trim();
+  const referenceKind = inferImageReferenceKind(node.data);
+  const alignment = buildImageTextAlignmentInstruction(node.data, textReferences);
+  if (referenceKind === 'blocking') {
+    return [
+      `【场景角色站位图 ${index + 1}】${label}${fileName ? `（原文件：${fileName}）` : ''}`,
+      alignment,
+      summary
+        ? `站位与空间分析：${summary}`
+        : '站位与空间分析：待视觉模型读取。必须识别角色相对位置、前中后景、朝向与视线、摄影轴线、出入口、运动方向、动线和可持续到后续镜头的落幅状态。',
+      '执行优先级：文本节点决定剧情事实、人物身份与明确动作；站位图决定不冲突部分的空间关系、屏幕方向和连续性。若二者冲突，必须保留文本并在镜头 note 中标记“站位图冲突”。',
+      '隔离规则：站位图不得承担角色外观、服装、场景美术和灯光色彩职责；这些信息只能由各自同名角色图、场景图或色表提供。',
+    ].join('\n');
+  }
+  if (referenceKind === 'character' || referenceKind === 'prop' || referenceKind === 'palette') {
+    const kindLabel =
+      referenceKind === 'character'
+        ? '角色参考图'
+        : referenceKind === 'prop'
+          ? '道具参考图'
+          : '灯光色表';
+    const analysisLabel =
+      referenceKind === 'character'
+        ? '角色外观分析'
+        : referenceKind === 'prop'
+          ? '道具外观分析'
+          : '灯光色彩分析';
+    return [
+      `【${kindLabel} ${index + 1}】${label}${fileName ? `（原文件：${fileName}）` : ''}`,
+      alignment,
+      summary
+        ? `${analysisLabel}：${summary}`
+        : `${analysisLabel}：待视觉模型读取。只提取该素材职责范围内可见且与文本不冲突的信息。`,
+      '职责隔离：禁止把本图职责之外的人物、场景、道具、构图事件或剧情事实带入其他主体。',
+    ].join('\n');
+  }
   return [
     `【视觉场景参考图 ${index + 1}】${label}${fileName ? `（${fileName}）` : ''}`,
+    alignment,
     summary
       ? `图片场景分析：${summary}`
       : '图片场景分析：待视觉模型读取。执行分镜时必须先识别这张图，再把图中可见的时间地点、空间结构、光影色彩、场景质感、人物/道具/建筑关系，以及具有物理来源的环境动态作为硬约束。',
@@ -238,17 +284,43 @@ function imageNodeAsStoryboardReferenceText(node: StudioRFNode, index: number): 
   ].join('\n');
 }
 
+export function isPromptColorReferenceImage(node: StudioRFNode): boolean {
+  if (node.type !== 'imageNode' || node.data.type !== 'image_node') return false;
+  if (inferImageReferenceKind(node.data) === 'palette') return true;
+  if (node.data.imageNodeMode === 'palette') return true;
+  if (node.data.imageColorAnalysisSummary?.trim()) return true;
+  const metadata = [node.data.label, node.data.imageFileName].filter(Boolean).join(' ');
+  return /(?:灯光)?色表|调色板|color\s*(?:chart|palette)|palette/i.test(metadata);
+}
+
+function imageNodeAsPromptSceneReferenceText(
+  node: StudioRFNode,
+  index: number,
+  textReferences: NamedTextReference[] = [],
+): string | null {
+  const storyboardReference = imageNodeAsStoryboardReferenceText(node, index, textReferences);
+  if (!storyboardReference) return null;
+  return storyboardReference
+    .replace(`【视觉场景参考图 ${index + 1}】`, `【Prompt 视觉场景参考图 ${index + 1}】`)
+    .replace('执行分镜时必须先识别这张图', '生成提示词前必须先识别这张图')
+    .replace('分镜硬约束：后续镜头', '提示词视觉硬约束：当前镜头')
+    .replace('每镜按剧情需要', '当前镜头按剧情需要');
+}
+
 export function imageNodeAsPromptColorReferenceText(
   node: StudioRFNode,
   index: number,
+  textReferences: NamedTextReference[] = [],
 ): string | null {
   if (node.type !== 'imageNode' || node.data.type !== 'image_node') return null;
   if (!hasUsableImageReference(node.data)) return null;
-  const label = node.data.label?.trim() || `色彩表 ${index + 1}`;
+  if (!isPromptColorReferenceImage(node)) return null;
+  const label = resolveImageReferenceName(node.data, `色彩表 ${index + 1}`);
   const fileName = node.data.imageFileName?.trim();
   const summary = node.data.imageColorAnalysisSummary?.trim();
   return [
     `【色彩表参考图 ${index + 1}】${label}${fileName ? `（${fileName}）` : ''}`,
+    buildImageTextAlignmentInstruction(node.data, textReferences),
     summary
       ? `色彩与灯光分析：${summary}`
       : '色彩与灯光分析：待视觉模型读取。生成提示词前必须先识别主色底、辅助色、点睛色、冷暖关系、明暗层次、对比度、高光、暗部和光线软硬。',
@@ -288,9 +360,8 @@ export function mergedTextInputForDepartment(
     consumerKind === 'storyboard' || consumerKind === 'prompt'
       ? connectedImageNodesForDepartment(deptId, nodes, edges)
       : [];
-  const textContext = serializeTextNodeContext(
-    collectTextNodeContextForDepartment(deptId, nodes, edges),
-  );
+  const textContextBlocks = collectTextNodeContextForDepartment(deptId, nodes, edges);
+  const textContext = serializeTextNodeContext(textContextBlocks);
   if (textContext) {
     parts.push(
       [
@@ -309,9 +380,11 @@ export function mergedTextInputForDepartment(
       const index = Math.max(0, imageRefs.findIndex((item) => item.id === src.id));
       const block =
         consumerKind === 'storyboard'
-          ? imageNodeAsStoryboardReferenceText(src, index)
+          ? imageNodeAsStoryboardReferenceText(src, index, textContextBlocks)
           : consumerKind === 'prompt'
-            ? imageNodeAsPromptColorReferenceText(src, index)
+            ? isPromptColorReferenceImage(src)
+              ? imageNodeAsPromptColorReferenceText(src, index, textContextBlocks)
+              : imageNodeAsPromptSceneReferenceText(src, index, textContextBlocks)
             : null;
       if (block != null && block.length > 0) parts.push(block);
     } else if (src.type === 'storyboardFile') {

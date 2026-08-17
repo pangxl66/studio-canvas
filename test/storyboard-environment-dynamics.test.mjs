@@ -10,7 +10,7 @@ const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), 'u
 test('scene image analysis extracts grounded environmental motion and lighting triggers', () => {
   const analysis = read('src/services/imageReferenceAnalysis.ts');
 
-  assert.match(analysis, /IMAGE_REFERENCE_ANALYSIS_VERSION = 2/);
+  assert.match(analysis, /IMAGE_REFERENCE_ANALYSIS_VERSION = 3/);
   assert.match(analysis, /持续动态：/);
   assert.match(analysis, /情节触发：/);
   assert.match(analysis, /静态锁定：/);

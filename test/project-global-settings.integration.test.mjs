@@ -105,7 +105,7 @@ test('Seedance 2.5 + 八维表演 composes v10 and loads all reference files', (
   assert.ok(visibleIds.includes(v10Id));
   assert.ok(visibleIds.includes(v11Id));
   assert.equal(v10.version, '10.0.0');
-  assert.equal(v11.version, '11.5.0');
+  assert.equal(v11.version, '11.5.1');
   assert.match(v10.system_instruction, /Seedance 2\.5 多模态影视提示词 Skill/);
   assert.doesNotMatch(v10.system_instruction, /Seedance 2\.5 \+ 八维表演/);
   assert.match(v11.system_instruction, /Seedance 2\.5 多模态影视提示词 Skill/);

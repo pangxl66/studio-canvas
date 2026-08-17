@@ -21,6 +21,7 @@ import {
   type StoryboardConnectedReference,
 } from '@/services/storyboardReferenceImages';
 import { parseShotListItemOutputHandleId } from '@/utils/shotListWire';
+import { summarizeStoryboardShotContinuity } from '@/utils/storyboardContinuity';
 import {
   STORYBOARD_GRID_MAX_PANELS,
   storyboardGridCanvasSize,
@@ -232,6 +233,7 @@ function shotLine(shot: StoryboardShot): string {
         ? `道具=${noteField(shot.note, '道具')}`
         : '',
     shot.note ? `备注=${shot.note.replace(/\s+/gu, ' ').trim()}` : '',
+    `连续性=${summarizeStoryboardShotContinuity(shot)}`,
   ].filter(Boolean);
   return parts.join('；');
 }
@@ -599,6 +601,58 @@ export function createStoryboardLayoutReference(
   return {
     dataUrl: canvas.toDataURL('image/png'),
     name: `${aspectRatio} ${panelCount} 格分镜布局模板`,
+    kind: 'layout',
+  };
+}
+
+/**
+ * Crops the previous storyboard page's last panel into a compact bridge reference.
+ * This gives page N+1 an actual visual end-state instead of relying on text memory alone.
+ */
+export async function createStoryboardPageBridgeReference(
+  imageDataUrl: string,
+  panelCount: number,
+  aspectRatio: ProjectAspectRatio,
+): Promise<StoryboardGridReferenceImage> {
+  const image = await loadGeneratedImage(imageDataUrl);
+  const width = image.naturalWidth || image.width;
+  const height = image.naturalHeight || image.height;
+  const rows = layoutRows(panelCount, aspectRatio);
+  const lastRowIndex = rows.length - 1;
+  const lastRowColumns = rows[lastRowIndex];
+  const maxColumns = Math.max(...rows);
+  const panelWidth = width / maxColumns;
+  const panelHeight = panelWidth * (
+    aspectRatio === '9:16' ? 16 / 9 : aspectRatio === '21:9' ? 9 / 21 : 9 / 16
+  );
+  const gridHeight = panelHeight * rows.length;
+  const startY = Math.max(0, (height - gridHeight) / 2);
+  const rowWidth = lastRowColumns * panelWidth;
+  const startX = Math.max(0, (width - rowWidth) / 2);
+  const sourceX = Math.max(0, startX + (lastRowColumns - 1) * panelWidth);
+  const sourceY = Math.max(0, startY + lastRowIndex * panelHeight);
+  const sourceWidth = Math.min(panelWidth, width - sourceX);
+  const sourceHeight = Math.min(panelHeight, height - sourceY);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(sourceWidth));
+  canvas.height = Math.max(1, Math.round(sourceHeight));
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('浏览器无法创建跨页连续性参考图。');
+  context.drawImage(
+    image,
+    sourceX,
+    sourceY,
+    sourceWidth,
+    sourceHeight,
+    0,
+    0,
+    canvas.width,
+    canvas.height,
+  );
+  image.src = '';
+  return {
+    dataUrl: canvas.toDataURL('image/jpeg', 0.9),
+    name: '上一页最后一格连续性桥接参考',
     kind: 'layout',
   };
 }

@@ -1,6 +1,16 @@
 const PERFORMANCE_HEADING = '【表演】';
 const TIMELINE_HEADING = '【时间轴】';
 
+export function isSeedance25PerformanceEligibleCard(card: string): boolean {
+  const headingStart = card.indexOf(PERFORMANCE_HEADING);
+  if (headingStart < 0) return false;
+  const bodyStart = headingStart + PERFORMANCE_HEADING.length;
+  const nextHeading = card.indexOf('\n【', bodyStart);
+  const performance = card.slice(bodyStart, nextHeading < 0 ? card.length : nextHeading).trim();
+  if (!performance) return false;
+  return !/(?:无行动主体|纯空镜|无人空镜|无角色出现|不设计人物表演)/.test(performance);
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

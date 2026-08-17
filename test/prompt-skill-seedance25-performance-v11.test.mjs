@@ -8,6 +8,7 @@ import {
 } from '../src/utils/seedance25PerformanceValidation.ts';
 import {
   composeSeedance25PerformanceCard,
+  isSeedance25PerformanceEligibleCard,
   seedance25FrozenModuleFingerprint,
 } from '../src/utils/seedance25PerformanceComposition.ts';
 
@@ -25,7 +26,7 @@ test('2.5 + 八维表演 is separate and leaves v10 metadata untouched', () => {
   assert.equal(v10.version, '10.0.0');
   assert.equal(v10.name, 'Seedance 2.5 多模态影视提示词 · v10');
   assert.equal(skill.name, 'Seedance 2.5 + 八维表演');
-  assert.equal(skill.version, '11.5.0');
+  assert.equal(skill.version, '11.5.1');
   assert.equal(skill.slot, 'style');
   assert.equal(skill.reference_files.length, 6);
   assert.match(skill.system_instruction, /v10 冻结基础卡 \+ 局部模块接管协议/);
@@ -35,6 +36,16 @@ test('2.5 + 八维表演 is separate and leaves v10 metadata untouched', () => {
   assert.match(skill.system_instruction, /保留 v10 的时间边界、动作顺序与镜尾事实/);
   assert.match(skill.system_instruction, /至少写出两个不同面部区域的具体可见变化/);
   assert.match(skill.system_instruction, /seedance_2_5_plus_eight_dimensional_performance/);
+});
+
+test('empty and no-character shots stay on v10 while acting shots enter the performance module', () => {
+  const emptyShot = `【Seedance 2.5｜多模态参考生成】\n\n【时间轴】\n[0.0s–3.0s] 烟雾沿地面缓慢漂移。`;
+  const explicitNoSubject = `【Seedance 2.5｜多模态参考生成】\n\n【表演】\n无行动主体，不设计人物表演。\n\n【时间轴】\n[0.0s–3.0s] 灯光稳定。`;
+  const actingShot = `【Seedance 2.5｜多模态参考生成】\n\n【表演】\n整体表演保持克制，苏菲主导当前反应。\n\n【时间轴】\n[0.0s–3.0s] 苏菲缓慢抬眼。`;
+
+  assert.equal(isSeedance25PerformanceEligibleCard(emptyShot), false);
+  assert.equal(isSeedance25PerformanceEligibleCard(explicitNoSubject), false);
+  assert.equal(isSeedance25PerformanceEligibleCard(actingShot), true);
 });
 
 test('multi-file package keeps character planning internal and executes acting in the sole timeline', () => {

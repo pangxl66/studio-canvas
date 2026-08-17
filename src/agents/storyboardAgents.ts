@@ -4,6 +4,7 @@ import {
   STORYBOARD_DEPT_OUTPUT_SHAPE,
 } from '@/agents/storyboardDeptSpec';
 import {
+  invokeLlmJsonObject,
   invokeLlmJsonObjectStream,
   type LlmJsonStreamPhase,
 } from '@/services/llmJsonClient';
@@ -14,6 +15,12 @@ import {
   extractProjectConstraintsFromTaggedText,
 } from '@/utils/textNodeContext';
 import { countStoryboardInputScenes } from '@/utils/storyboardSceneScope';
+import {
+  ensureStoryboardContinuity,
+  ensureStoryboardSceneSpatialMaps,
+  normalizeStoryboardSceneSpatialMaps,
+  normalizeStoryboardShotContinuity,
+} from '@/utils/storyboardContinuity';
 
 export {
   STORYBOARD_DEPT_AGENT_SYSTEM,
@@ -32,10 +39,38 @@ export function cloneStoryboardOutput(o: StoryboardOutput): StoryboardOutput {
   return JSON.parse(JSON.stringify(o)) as StoryboardOutput;
 }
 
+export function assertStoryboardContinuityComplete(output: StoryboardOutput): StoryboardOutput {
+  const incomplete = output.shots.filter((shot) => shot.continuity?.inferred === true);
+  if (incomplete.length > 0) {
+    throw new Error(
+      `分镜模型返回：镜头 ${incomplete.map((shot) => shot.id).join('、')} 缺少完整 continuity.startState / endState。`,
+    );
+  }
+  const spatialMaps = output.sceneSpatialMaps ?? [];
+  const inferredMaps = spatialMaps.filter((map) => map.inferred === true);
+  if (inferredMaps.length > 0) {
+    throw new Error(
+      `分镜模型返回：场景 ${inferredMaps.map((map) => map.sceneRef).join('、')} 缺少 sceneSpatialMaps。`,
+    );
+  }
+  return output;
+}
+
 export function reindexStoryboardShotIds(shots: StoryboardShot[]): StoryboardShot[] {
-  return shots.map((shot, index) =>
-    shot.id === index + 1 ? shot : { ...shot, id: index + 1 },
-  );
+  const idMap = new Map(shots.map((shot, index) => [shot.id, index + 1]));
+  return shots.map((shot, index) => {
+    const id = index + 1;
+    const inherited = shot.continuity?.inheritsFromShotId;
+    const inheritsFromShotId = inherited == null ? undefined : idMap.get(inherited);
+    if (shot.id === id && inherited === inheritsFromShotId) return shot;
+    return {
+      ...shot,
+      id,
+      continuity: shot.continuity
+        ? { ...shot.continuity, inheritsFromShotId }
+        : undefined,
+    };
+  });
 }
 export function splitScriptIntoSceneBlocks(raw: string): string[] {
   const t = raw.trim();
@@ -86,6 +121,7 @@ function extractShotsPayload(parsed: unknown): {
   shotsRaw: unknown[];
   narrativeBeatsRaw: unknown;
   projectConstraintsRaw: unknown;
+  sceneSpatialMapsRaw: unknown;
 } | null {
   if (Array.isArray(parsed)) {
     if (parsed.length === 0) {
@@ -93,6 +129,7 @@ function extractShotsPayload(parsed: unknown): {
         shotsRaw: [],
         narrativeBeatsRaw: undefined,
         projectConstraintsRaw: undefined,
+        sceneSpatialMapsRaw: undefined,
       };
     }
     const allObjects = parsed.every((x) => x != null && typeof x === 'object' && !Array.isArray(x));
@@ -101,16 +138,121 @@ function extractShotsPayload(parsed: unknown): {
       shotsRaw: parsed,
       narrativeBeatsRaw: undefined,
       projectConstraintsRaw: undefined,
+      sceneSpatialMapsRaw: undefined,
     };
   }
   if (!parsed || typeof parsed !== 'object') return null;
-  const o = parsed as Record<string, unknown>;
-  if (!Array.isArray(o.shots)) return null;
-  return {
-    shotsRaw: o.shots,
-    narrativeBeatsRaw: o.narrativeBeats,
-    projectConstraintsRaw: o.projectConstraints ?? o.project_constraints,
-  };
+  const root = parsed as Record<string, unknown>;
+  const queue: Record<string, unknown>[] = [root];
+  const visited = new Set<Record<string, unknown>>();
+  let emptyPayload: ReturnType<typeof extractShotsPayload> = null;
+
+  // Some gateways preserve JSON mode but wrap the requested object in data/output/result.
+  // Accept those harmless wrappers and common shot-list aliases before deciding shots is empty.
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (visited.has(current)) continue;
+    visited.add(current);
+
+    const shots =
+      current.shots ??
+      current.shotList ??
+      current.shot_list ??
+      current.storyboardShots ??
+      current.storyboard_shots;
+    if (Array.isArray(shots)) {
+      const payload = {
+        shotsRaw: shots,
+        narrativeBeatsRaw:
+          current.narrativeBeats ?? current.narrative_beats ?? root.narrativeBeats ?? root.narrative_beats,
+        projectConstraintsRaw:
+          current.projectConstraints ??
+          current.project_constraints ??
+          root.projectConstraints ??
+          root.project_constraints,
+        sceneSpatialMapsRaw:
+          current.sceneSpatialMaps ??
+          current.scene_spatial_maps ??
+          current.spatialMaps ??
+          current.spatial_maps ??
+          root.sceneSpatialMaps ??
+          root.scene_spatial_maps ??
+          root.spatialMaps ??
+          root.spatial_maps,
+      };
+      if (shots.length > 0) return payload;
+      emptyPayload ??= payload;
+    }
+
+    for (const key of ['data', 'output', 'result', 'storyboard', 'storyboardOutput']) {
+      const value = current[key];
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        queue.push(value as Record<string, unknown>);
+      }
+    }
+  }
+
+  return emptyPayload;
+}
+
+function storyboardRepairPrompt(
+  originalUserPrompt: string,
+  invalidPayload: unknown,
+  validationError: unknown,
+): string {
+  const invalidJson = (() => {
+    try {
+      return JSON.stringify(invalidPayload, null, 2).slice(0, 12_000);
+    } catch {
+      return String(invalidPayload).slice(0, 12_000);
+    }
+  })();
+  const reason = validationError instanceof Error ? validationError.message : String(validationError);
+  return [
+    '上一次输出虽然是合法 JSON，但不满足分镜输出结构。请重新完成原始任务并修复结构，禁止返回空镜头表。',
+    `校验失败原因：${reason}`,
+    '',
+    '硬性要求：',
+    '1. 根对象必须包含非空 shots 数组；不得只返回说明、摘要、场次或空数组。',
+    '2. shots 每项至少包含 id、type、movement、description、content、sceneRef、durationSec。',
+    '3. 每个镜头必须包含 continuity.startState 与 continuity.endState；根对象包含 sceneSpatialMaps。',
+    '4. narrativeBeats 必须是数组。只输出一个 JSON 对象，不要 Markdown 或解释。',
+    '',
+    '【原始任务】',
+    originalUserPrompt,
+    '',
+    '【上一次无效输出】',
+    invalidJson || '(empty)',
+  ].join('\n');
+}
+
+async function validateStoryboardPayloadWithRepair(params: {
+  parsed: unknown;
+  systemPrompt: string;
+  userPrompt: string;
+  signal?: AbortSignal;
+  onPhase?: (phase: LlmJsonStreamPhase) => void;
+}): Promise<StoryboardOutput> {
+  try {
+    return assertStoryboardContinuityComplete(assertStoryboardOutput(params.parsed));
+  } catch (firstError) {
+    if (params.signal?.aborted) throw firstError;
+    params.onPhase?.('repairing');
+    const repaired = await invokeLlmJsonObject({
+      systemPrompt: params.systemPrompt,
+      userPrompt: storyboardRepairPrompt(params.userPrompt, params.parsed, firstError),
+      temperature: 0.15,
+      feature: 'storyboard-repair',
+      signal: params.signal,
+    });
+    params.onPhase?.('validating');
+    try {
+      return assertStoryboardContinuityComplete(assertStoryboardOutput(repaired));
+    } catch (repairError) {
+      const reason = repairError instanceof Error ? repairError.message : String(repairError);
+      throw new Error(`分镜模型自动修复后仍未返回有效镜头：${reason}`);
+    }
+  }
 }
 
 function coerceShotId(r: Record<string, unknown>, idx: number): number {
@@ -177,7 +319,7 @@ function normalizeStoryboardApiShot(row: unknown, idx: number): StoryboardShot {
   const noteRaw = String(r.note ?? r.备注 ?? '').trim();
   const note = noteRaw || undefined;
   const mergedMembers = normalizeMergedMembers(r.mergedMembers ?? r.merged_members);
-  return {
+  const shot: StoryboardShot = {
     id,
     shotNo,
     wireId,
@@ -194,6 +336,11 @@ function normalizeStoryboardApiShot(row: unknown, idx: number): StoryboardShot {
     note,
     mergedMembers,
   };
+  const continuity = normalizeStoryboardShotContinuity(
+    r.continuity ?? r.continuityLedger ?? r.continuity_ledger ?? r.连续性,
+    shot,
+  );
+  return continuity ? { ...shot, continuity } : shot;
 }
 
 function parseStoryboardPayload(
@@ -204,7 +351,9 @@ function parseStoryboardPayload(
   if (!extracted) {
     throw new Error('分镜模型返回：必须是镜头 JSON 数组，或形如 { "shots": [ ... ] } 的对象。');
   }
-  const shots = extracted.shotsRaw.map((row, i) => normalizeStoryboardApiShot(row, i));
+  const shots = ensureStoryboardContinuity(
+    extracted.shotsRaw.map((row, i) => normalizeStoryboardApiShot(row, i)),
+  );
   if (!opts.allowEmptyShots && shots.length === 0) {
     throw new Error('分镜模型返回：必须包含非空 shots。');
   }
@@ -228,10 +377,15 @@ function parseStoryboardPayload(
         ),
       )
     : undefined;
+  const sceneSpatialMaps = ensureStoryboardSceneSpatialMaps(
+    shots,
+    normalizeStoryboardSceneSpatialMaps(extracted.sceneSpatialMapsRaw),
+  );
   return {
     narrativeBeats,
     shots,
     ...(projectConstraints?.length ? { projectConstraints } : {}),
+    ...(sceneSpatialMaps?.length ? { sceneSpatialMaps } : {}),
   };
 }
 
@@ -304,16 +458,25 @@ export async function runStoryboardDesigner(
   onPhase?: (phase: LlmJsonStreamPhase) => void,
 ): Promise<StoryboardOutput> {
   const sys = `${(executionSystemPrompt ?? STORYBOARD_DEPT_AGENT_SYSTEM).trim()}\n\n【输出 JSON 形状参考】\n${STORYBOARD_DEPT_OUTPUT_SHAPE}`;
+  const userPrompt = buildStoryboardUserPromptFromWriting(script);
   const parsed = await invokeLlmJsonObjectStream({
     systemPrompt: sys,
-    userPrompt: buildStoryboardUserPromptFromWriting(script),
+    userPrompt,
     temperature: 0.35,
     feature: 'storyboard-generate',
     onDelta,
     onPhase,
     signal,
   });
-  return applyProjectConstraintsToStoryboardOutput(assertStoryboardOutput(parsed));
+  return applyProjectConstraintsToStoryboardOutput(
+    await validateStoryboardPayloadWithRepair({
+      parsed,
+      systemPrompt: sys,
+      userPrompt,
+      signal,
+      onPhase,
+    }),
+  );
 }
 
 function tryParseWritingOutput(raw: string): WritingOutput | null {
@@ -347,15 +510,22 @@ export async function runStoryboardDesignerFromScriptText(
   }
   const inputConstraints = extractProjectConstraintsFromTaggedText(t);
   const sys = `${executionSystemPrompt.trim()}\n\n【输出 JSON 形状参考】\n${STORYBOARD_DEPT_OUTPUT_SHAPE}`;
+  const userPrompt = buildStoryboardUserPromptFromRawText(t, inputConstraints);
   const parsed = await invokeLlmJsonObjectStream({
     systemPrompt: sys,
-    userPrompt: buildStoryboardUserPromptFromRawText(t, inputConstraints),
+    userPrompt,
     temperature: 0.35,
     feature: 'storyboard-generate',
     onDelta,
     onPhase,
     signal,
   });
-  const output = assertStoryboardOutput(parsed);
+  const output = await validateStoryboardPayloadWithRepair({
+    parsed,
+    systemPrompt: sys,
+    userPrompt,
+    signal,
+    onPhase,
+  });
   return applyProjectConstraintsToStoryboardOutput(output, inputConstraints);
 }

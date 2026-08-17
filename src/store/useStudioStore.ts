@@ -53,12 +53,18 @@ import {
   DEPT_OUTPUT_HANDLE_ID,
   departmentAssetAsInputText,
   hasDepartmentInputConnections,
+  isPromptColorReferenceImage,
   mergedTextInputForDepartment,
   mergedUpstreamForPromptReviewNode,
   resolveDepartmentExecutionInput,
 } from '@/services/graphInput';
 import { flushTextNodeDrafts } from '@/utils/textDraftCommit';
 import { reloadAfterStaleChunk } from '@/utils/staleChunkRecovery';
+import {
+  inferImageReferenceKind,
+  resolveImageReferenceName,
+  type ImageReferenceKind,
+} from '@/utils/imageReferenceNaming';
 import {
   SHOT_LIST_LINK_HANDLE_ID,
   SHOT_LIST_PARENT_HANDLE_ID,
@@ -352,14 +358,24 @@ async function prepareStoryboardImageReferencesForExecution(args: {
   nodes: StudioRFNode[];
   edges: Edge[];
   signal: AbortSignal;
+  consumerKind?: 'storyboard' | 'prompt';
   patchNodeData: (id: string, patch: Partial<StudioNodeData>, bumpVersion?: boolean) => void;
   pushMessage: (m: Omit<ChatMessage, 'id' | 'ts'> & { id?: string }) => string;
 }): Promise<number> {
-  const sceneAnalysisVersion = 2;
-  const imageNodes = connectedImageNodesForDepartment(args.deptId, args.nodes, args.edges);
+  const sceneAnalysisVersion = 3;
+  const consumerKind = args.consumerKind ?? 'storyboard';
+  const imageNodes = connectedImageNodesForDepartment(args.deptId, args.nodes, args.edges).filter(
+    (imageNode) => consumerKind !== 'prompt' || !isPromptColorReferenceImage(imageNode),
+  );
   let analyzedCount = 0;
   let analyzeImageReferenceFn:
-    | ((params: { imageDataUrl: string; signal?: AbortSignal }) => Promise<string>)
+    | ((params: {
+        imageDataUrl: string;
+        referenceName?: string;
+        referenceKind?: ImageReferenceKind;
+        referenceTarget?: string;
+        signal?: AbortSignal;
+      }) => Promise<string>)
     | null = null;
 
   for (let index = 0; index < imageNodes.length; index += 1) {
@@ -367,11 +383,11 @@ async function prepareStoryboardImageReferencesForExecution(args: {
     const summary = imageNode.data.imageAnalysisSummary?.trim();
     if (summary && (imageNode.data.imageAnalysisVersion ?? 0) >= sceneAnalysisVersion) continue;
     const imageDataUrl = imageNode.data.imageDataUrl;
-    const label = imageNode.data.imageFileName?.trim() || imageNode.data.label?.trim() || `场景参考图 ${index + 1}`;
+    const label = resolveImageReferenceName(imageNode.data, `场景参考图 ${index + 1}`);
     if (!imageDataUrl) {
       args.pushMessage({
         role: 'system',
-        text: `分镜节点已连接图片参考“${label}”，但该图片还没有载入文件，已跳过视觉分析。`,
+        text: `${consumerKind === 'prompt' ? 'Prompt' : '分镜'} 节点已连接场景参考图“${label}”，但该图片还没有载入文件，已跳过视觉分析。`,
         nodeId: args.deptId,
       });
       continue;
@@ -388,7 +404,13 @@ async function prepareStoryboardImageReferencesForExecution(args: {
 
     try {
       analyzeImageReferenceFn ??= (await import('@/services/imageReferenceAnalysis')).analyzeImageReference;
-      const analyzed = await analyzeImageReferenceFn({ imageDataUrl, signal: args.signal });
+      const analyzed = await analyzeImageReferenceFn({
+        imageDataUrl,
+        referenceName: label,
+        referenceKind: inferImageReferenceKind(imageNode.data),
+        referenceTarget: imageNode.data.imageReferenceTarget,
+        signal: args.signal,
+      });
       args.patchNodeData(
         imageNode.id,
         {
@@ -401,7 +423,10 @@ async function prepareStoryboardImageReferencesForExecution(args: {
       );
       args.pushMessage({
         role: 'system',
-        text: `已完成场景参考图分析：${label}。分镜会继承场景结构，并按情节调度有依据的环境动态与灯光变化。`,
+        text:
+          consumerKind === 'prompt'
+            ? `已完成场景参考图分析：${label}。Prompt 会继承图片中的空间、角色/道具、光影、材质与物理动态。`
+            : `已完成场景参考图分析：${label}。分镜会继承场景结构，并按情节调度有依据的环境动态与灯光变化。`,
         nodeId: args.deptId,
       });
       analyzedCount += 1;
@@ -426,7 +451,9 @@ async function preparePromptColorReferencesForExecution(args: {
   patchNodeData: (id: string, patch: Partial<StudioNodeData>, bumpVersion?: boolean) => void;
   pushMessage: (m: Omit<ChatMessage, 'id' | 'ts'> & { id?: string }) => string;
 }): Promise<number> {
-  const imageNodes = connectedImageNodesForDepartment(args.deptId, args.nodes, args.edges);
+  const imageNodes = connectedImageNodesForDepartment(args.deptId, args.nodes, args.edges).filter(
+    isPromptColorReferenceImage,
+  );
   let analyzedCount = 0;
   let analyzePromptColorReferenceFn:
     | ((params: { imageDataUrl: string; signal?: AbortSignal }) => Promise<string>)
@@ -437,10 +464,7 @@ async function preparePromptColorReferencesForExecution(args: {
     const summary = imageNode.data.imageColorAnalysisSummary?.trim();
     if (summary) continue;
     const imageDataUrl = imageNode.data.imageDataUrl;
-    const label =
-      imageNode.data.imageFileName?.trim() ||
-      imageNode.data.label?.trim() ||
-      `色彩表 ${index + 1}`;
+    const label = resolveImageReferenceName(imageNode.data, `色彩表 ${index + 1}`);
     if (!imageDataUrl) {
       args.pushMessage({
         role: 'system',
@@ -599,6 +623,8 @@ function makeImageNodeData(
     imageFileName?: string;
   },
 ): StudioNodeData {
+  const initialReferenceName =
+    opts?.label?.trim() || opts?.imageFileName?.replace(/\.[^.]+$/u, '').trim() || undefined;
   return {
     id,
     type: 'image_node',
@@ -612,6 +638,9 @@ function makeImageNodeData(
     imageDataUrl: opts?.imageDataUrl,
     imageMimeType: opts?.imageMimeType,
     imageFileName: opts?.imageFileName,
+    imageReferenceName: initialReferenceName,
+    imageReferenceKind: 'auto',
+    imageReferenceScope: 'current_input',
     imageNodeMode: 'asset',
     imageEditAspectRatio: 'source',
     imageGenerationSelectedModel: 'gemini-3.1-flash-image',
@@ -1211,6 +1240,7 @@ function storyboardOutputFingerprint(parsed: ReturnType<typeof tryParseStoryboar
     return JSON.stringify({
       shots: parsed.shots,
       beats: parsed.narrativeBeats ?? [],
+      spatialMaps: parsed.sceneSpatialMaps ?? [],
     });
   } catch {
     return `err:${String(parsed.shots?.length ?? 0)}`;
@@ -4223,6 +4253,16 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         }
       }
       if (kind === 'prompt') {
+        const analyzedSceneReferences = await prepareStoryboardImageReferencesForExecution({
+          deptId: nodeId,
+          nodes: get().nodes,
+          edges: get().edges,
+          signal: controller.signal,
+          consumerKind: 'prompt',
+          patchNodeData: get().patchNodeData,
+          pushMessage: get().pushMessage,
+        });
+        ensureNotStopped();
         const analyzedColorTables = await preparePromptColorReferencesForExecution({
           deptId: nodeId,
           nodes: get().nodes,
@@ -4232,19 +4272,24 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           pushMessage: get().pushMessage,
         });
         ensureNotStopped();
-        if (analyzedColorTables > 0) {
-          const mergedWithColorAnalysis = mergedTextInputForDepartment(
+        if (analyzedSceneReferences > 0 || analyzedColorTables > 0) {
+          const mergedWithImageAnalysis = mergedTextInputForDepartment(
             nodeId,
             get().nodes,
             get().edges,
           );
-          if (mergedWithColorAnalysis !== null && mergedWithColorAnalysis.trim() !== '') {
+          if (mergedWithImageAnalysis !== null && mergedWithImageAnalysis.trim() !== '') {
             get().patchNodeData(
               nodeId,
               {
-                input: mergedWithColorAnalysis.trim(),
+                input: mergedWithImageAnalysis.trim(),
                 inputSource: 'graph',
-                streaming_preview: '色彩表已读取，正在按参考色彩与光影关系生成分镜提示词...',
+                streaming_preview:
+                  analyzedSceneReferences > 0 && analyzedColorTables > 0
+                    ? '场景参考图与色彩表已读取，正在生成分镜提示词...'
+                    : analyzedSceneReferences > 0
+                      ? '场景参考图已读取，正在按图片空间、角色/道具与物理动态生成分镜提示词...'
+                      : '色彩表已读取，正在按参考色彩与光影关系生成分镜提示词...',
                 generation_phase: 'employee',
               },
               false,

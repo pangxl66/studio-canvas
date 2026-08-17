@@ -22,6 +22,22 @@ test('image nodes can feed Prompt nodes as color tables', () => {
   assert.match(inputWire, /target\.data\.type === 'prompt'/);
 });
 
+test('ordinary images feed Prompt through storyboard-grade scene recognition', () => {
+  const graphInput = read('src/services/graphInput.ts');
+  const store = read('src/store/useStudioStore.ts');
+  const deptSpec = read('src/agents/promptDeptSpec.ts');
+
+  assert.match(graphInput, /isPromptColorReferenceImage/);
+  assert.match(graphInput, /imageNodeAsPromptSceneReferenceText/);
+  assert.match(graphInput, /【Prompt 视觉场景参考图/);
+  assert.match(store, /consumerKind: 'prompt'/);
+  assert.match(store, /analyzedSceneReferences/);
+  assert.match(store, /analyzeImageReference/);
+  assert.match(deptSpec, /PROMPT_SCENE_REFERENCE_RULE/);
+  assert.match(deptSpec, /空间结构与方向、角色\/道具\/建筑关系/);
+  assert.match(deptSpec, /持续动态、情节触发和静态锁定/);
+});
+
 test('Prompt execution analyzes and caches color references separately from scene analysis', () => {
   const store = read('src/store/useStudioStore.ts');
   const types = read('src/types/studio.ts');

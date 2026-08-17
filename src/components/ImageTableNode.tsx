@@ -8,6 +8,8 @@ import {
   useState,
   type ChangeEvent,
   type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type SyntheticEvent,
 } from 'react';
 import {
@@ -45,6 +47,15 @@ import { useStudioGraphContentNodes } from '@/hooks/useStudioGraphContent';
 import type { StoryboardGridImagePage, StudioNodeData } from '@/types/studio';
 import { imageNodeLayout } from '@/utils/imageNodeLayout';
 import {
+  cleanImageReferenceName,
+  IMAGE_REFERENCE_KIND_LABEL,
+  IMAGE_REFERENCE_SCOPE_LABEL,
+  resolveImageReferenceName,
+  stripImageFileExtension,
+  type ImageReferenceKind,
+  type ImageReferenceScope,
+} from '@/utils/imageReferenceNaming';
+import {
   IMAGE_NODE_INPUT_HANDLE_ID,
   IMAGE_NODE_OUTPUT_HANDLE_ID,
 } from '@/utils/mediaNodeHandles';
@@ -68,6 +79,8 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [modelMenuPlacement, setModelMenuPlacement] = useState<'up' | 'down'>('down');
   const [composerExpanded, setComposerExpanded] = useState(false);
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [nameDraft, setNameDraft] = useState(() => resolveImageReferenceName(data, '图片节点'));
   const source = useMemo(() => resolveStoryboardGridSource(id, nodes, edges), [edges, id, nodes]);
   const editSourceContext = useMemo(() => resolveImageEditSource(id, nodes), [id, nodes]);
   const editSource = editSourceContext.source;
@@ -116,7 +129,12 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
     if (selected) return;
     setModelMenuOpen(false);
     setComposerExpanded(false);
+    setIsRenaming(false);
   }, [selected]);
+
+  useEffect(() => {
+    if (!isRenaming) setNameDraft(resolveImageReferenceName(data, '图片节点'));
+  }, [data.imageFileName, data.imageReferenceName, data.label, isRenaming]);
 
   const pickImage = useCallback(() => {
     inputRef.current?.click();
@@ -141,6 +159,61 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
     });
   }, []);
 
+  const commitReferenceName = useCallback(
+    (value = nameDraft) => {
+      const normalized = cleanImageReferenceName(
+        value,
+        resolveImageReferenceName(data, '图片节点'),
+      );
+      setNameDraft(normalized);
+      setIsRenaming(false);
+      if (normalized !== data.imageReferenceName || normalized !== data.label) {
+        patchNodeData(id, { imageReferenceName: normalized, label: normalized }, true);
+      }
+    },
+    [data, id, nameDraft, patchNodeData],
+  );
+
+  const onReferenceNameKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLInputElement>) => {
+      event.stopPropagation();
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        commitReferenceName(event.currentTarget.value);
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        setNameDraft(resolveImageReferenceName(data, '图片节点'));
+        setIsRenaming(false);
+      }
+    },
+    [commitReferenceName, data],
+  );
+
+  const startReferenceRename = useCallback(
+    (event: ReactMouseEvent<HTMLElement>) => {
+      event.stopPropagation();
+      setNameDraft(resolveImageReferenceName(data, '图片节点'));
+      setIsRenaming(true);
+    },
+    [data],
+  );
+
+  const onReferenceKindChange = useCallback(
+    (kind: ImageReferenceKind) => {
+      patchNodeData(
+        id,
+        {
+          imageReferenceKind: kind,
+          imageAnalysisSummary: undefined,
+          imageAnalysisVersion: undefined,
+          imageColorAnalysisSummary: kind === 'palette' ? data.imageColorAnalysisSummary : undefined,
+        },
+        true,
+      );
+    },
+    [data.imageColorAnalysisSummary, id, patchNodeData],
+  );
+
   const onImagePicked = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
       const file = event.target.files?.[0];
@@ -156,12 +229,19 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
         reader.onerror = () => reject(reader.error ?? new Error('图片读取失败'));
         reader.readAsDataURL(file);
       });
+      const uploadedBaseName = stripImageFileExtension(file.name) || '图片节点';
+      const currentLabel = data.label?.trim() ?? '';
+      const semanticName =
+        data.imageReferenceName?.trim() ||
+        (!/^图片节点(?:\s*·.*)?$/u.test(currentLabel) ? currentLabel : '') ||
+        uploadedBaseName;
       patchNodeData(
         id,
         {
           imageDataUrl: dataUrl,
           imageMimeType: file.type,
           imageFileName: file.name,
+          imageReferenceName: semanticName,
           imageWidth: undefined,
           imageHeight: undefined,
           generation_error: undefined,
@@ -193,7 +273,7 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
           imagePaletteSourceSignature: undefined,
           imagePaletteCompletedAt: undefined,
           output: null,
-          label: data.label?.trim() || file.name.replace(/\.[^.]+$/u, '') || '图片节点',
+          label: semanticName,
         },
         true,
       );
@@ -204,7 +284,7 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
         nodeId: id,
       });
     },
-    [data.label, id, patchNodeData, pushMessage],
+    [data.imageReferenceName, data.label, id, patchNodeData, pushMessage],
   );
 
   const generateGrid = useCallback(async () => {
@@ -813,7 +893,7 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
     ? ({ height: `${layout.mediaHeight}px`, aspectRatio: 'auto' } satisfies CSSProperties)
     : undefined;
 
-  const title = data.imageFileName?.trim() || data.label?.trim() || '截图';
+  const title = resolveImageReferenceName(data, '截图');
   const dimensionLabel = activePage
     ? `${activePage.pageIndex}/${activePage.totalPages}`
     : displayedImageSize
@@ -889,9 +969,26 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
         title="Input：连接分镜表、分镜部门或单个镜头，可生成分镜宫格。"
       />
       <header className="image-table-node__head">
-        <span className="image-table-node__title">
+        <span
+          className="image-table-node__title nodrag nopan"
+          onDoubleClick={startReferenceRename}
+          title="双击修改图片素材名称；同名文本节点会自动与其对标"
+        >
           <span className="image-table-node__title-icon" aria-hidden />
-          <span className="image-table-node__title-text">{title}</span>
+          {isRenaming ? (
+            <input
+              className="image-table-node__title-input nodrag nopan"
+              value={nameDraft}
+              onChange={(event) => setNameDraft(event.target.value)}
+              onBlur={(event) => commitReferenceName(event.currentTarget.value)}
+              onKeyDown={onReferenceNameKeyDown}
+              autoFocus
+              maxLength={80}
+              aria-label="图片素材名称"
+            />
+          ) : (
+            <span className="image-table-node__title-text">{title}</span>
+          )}
           {isEditMode && selected ? (
             <span className="image-table-node__mode">
               {data.imageNodeMode === 'palette' ? '色表' : '编辑'}
@@ -978,6 +1075,56 @@ function ImageTableNodeInner({ id, data, selected }: NodeProps<ImageRF>) {
           >
             <span className="image-table-node__composer-reference-index">1</span>
             {editSource.dataUrl ? <img src={editSource.dataUrl} alt={editSource.label} /> : <span>无图</span>}
+          </div>
+          <div className="image-table-node__reference-settings">
+            <label>
+              <span>素材类型</span>
+              <select
+                aria-label="图片素材类型"
+                value={data.imageReferenceKind ?? 'auto'}
+                onChange={(event) => onReferenceKindChange(event.target.value as ImageReferenceKind)}
+              >
+                {Object.entries(IMAGE_REFERENCE_KIND_LABEL).map(([value, label]) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="image-table-node__reference-target">
+              <span>对应名称</span>
+              <input
+                value={data.imageReferenceTarget ?? ''}
+                placeholder={`默认按“${title}”匹配同名文本节点`}
+                maxLength={80}
+                onChange={(event) =>
+                  patchNodeData(id, { imageReferenceTarget: event.target.value }, false)
+                }
+                onBlur={(event) =>
+                  patchNodeData(
+                    id,
+                    { imageReferenceTarget: event.currentTarget.value.trim() || undefined },
+                    true,
+                  )
+                }
+              />
+            </label>
+            <label>
+              <span>作用范围</span>
+              <select
+                aria-label="图片参考作用范围"
+                value={data.imageReferenceScope ?? 'current_input'}
+                onChange={(event) =>
+                  patchNodeData(
+                    id,
+                    { imageReferenceScope: event.target.value as ImageReferenceScope },
+                    true,
+                  )
+                }
+              >
+                {Object.entries(IMAGE_REFERENCE_SCOPE_LABEL).map(([value, label]) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
+              </select>
+            </label>
           </div>
           <textarea
             className="image-table-node__instruction image-table-node__composer-instruction nodrag nowheel"

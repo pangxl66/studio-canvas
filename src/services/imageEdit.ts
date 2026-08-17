@@ -1,5 +1,6 @@
 import type { StudioRFNode } from '@/types/reactFlow';
 import type { StoryboardGridImageSize } from '@/services/storyboardGridImage';
+import { resolveImageReferenceName } from '../utils/imageReferenceNaming.ts';
 
 export type ImageEditAspectRatio = 'source' | '16:9' | '9:16' | '1:1';
 
@@ -42,7 +43,7 @@ export function resolveImageEditSource(
   return {
     source: {
       nodeId: sourceNode.id,
-      label: sourceNode.data.imageFileName?.trim() || sourceNode.data.label?.trim() || '当前图片',
+      label: resolveImageReferenceName(sourceNode.data, '当前图片'),
       dataUrl,
       mimeType: sourceNode.data.imageMimeType?.trim() || undefined,
       width: sourceNode.data.imageWidth,

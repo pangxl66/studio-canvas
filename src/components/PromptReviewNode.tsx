@@ -284,7 +284,7 @@ function PromptReviewNodeInner({ id, data, selected }: NodeProps<PromptReviewRF>
           <div className="prompt-review-node__title">{data.label || '提示词审核节点'}</div>
         </div>
         <span className={`prompt-review-node__status prompt-review-node__status--${data.status}`}>
-          {busy ? '调整中' : '原始输出'}
+          {busy ? '对话调整中' : '当前内容'}
         </span>
       </header>
 
@@ -311,8 +311,13 @@ function PromptReviewNodeInner({ id, data, selected }: NodeProps<PromptReviewRF>
             停止 Esc
           </button>
         ) : (
-          <button type="button" className="prompt-review-node__primary" onClick={onRunLlm} disabled={!text.trim()}>
-            LLM 调整
+          <button
+            type="button"
+            className="prompt-review-node__primary"
+            onClick={onRunLlm}
+            disabled={!text.trim() || !instruction.trim()}
+          >
+            GPT 对话调整
           </button>
         )}
       </div>
@@ -321,7 +326,7 @@ function PromptReviewNodeInner({ id, data, selected }: NodeProps<PromptReviewRF>
         className="prompt-review-node__instruction nodrag nopan nowheel"
         value={instruction}
         onChange={onInstructionChange}
-        placeholder="可选：写调整要求，例如：强化灯光层次，减少重复，保留时长只在摄影机动态参数中出现。"
+        placeholder="输入本轮指令，例如：只把灯光改为冷白顶光，其余内容完全不变。"
         rows={3}
         spellCheck={false}
         disabled={busy}

@@ -171,6 +171,65 @@ export interface StoryboardShot {
   note?: string;
   /** 同场连续镜头合并后保留的原始成员列表 */
   mergedMembers?: StoryboardShot[];
+  /** 连续性账本：记录本镜头如何承接上一镜，以及镜头结束时留下的状态。 */
+  continuity?: StoryboardShotContinuity;
+}
+
+/** 单个主体在某一帧的可拍摄连续性状态。世界位置与银幕位置必须分开记录。 */
+export interface StoryboardCharacterContinuityState {
+  name: string;
+  /** 场景物理分区或锚点，例如“舱门内侧”“操作台左侧”。 */
+  worldPosition?: string;
+  /** 画面中的位置，例如“画左”“画中”“画右”“画外右”。 */
+  screenPosition?: string;
+  /** 前景 / 中景 / 后景等纵深层级。 */
+  depth?: string;
+  facing?: string;
+  gazeTarget?: string;
+  movementDirection?: string;
+  posture?: string;
+  heldProps?: string[];
+}
+
+/** 一条镜头边界上的场面状态，可作为下一镜的确定输入。 */
+export interface StoryboardFrameState {
+  characters: StoryboardCharacterContinuityState[];
+  cameraSide?: string;
+  actionAxis?: string;
+  actionPhase?: string;
+  propState?: string[];
+  environmentState?: string[];
+}
+
+export interface StoryboardShotContinuity {
+  /** 同场景时通常指向上一镜 id；首镜或切场可省略。 */
+  inheritsFromShotId?: number;
+  startState: StoryboardFrameState;
+  endState: StoryboardFrameState;
+  transition?:
+    | 'continuous'
+    | 'match_on_action'
+    | 'establishing'
+    | 'neutral_reset'
+    | 'intentional_axis_cross'
+    | 'time_jump'
+    | string;
+  intentionalBreak?: boolean;
+  breakReason?: string;
+  /** 兼容旧工程或模型漏填时由本地补齐；UI 会提示用户确认。 */
+  inferred?: boolean;
+}
+
+/** 每个场景唯一的空间底图；所有镜头状态都应引用这些锚点与动作轴。 */
+export interface StoryboardSceneSpatialMap {
+  sceneRef: string;
+  sceneLabel?: string;
+  anchors: string[];
+  actionAxis?: string;
+  defaultCameraSide?: string;
+  initialState?: StoryboardFrameState;
+  notes?: string[];
+  inferred?: boolean;
 }
 
 export interface StoryboardOutput {
@@ -180,6 +239,8 @@ export interface StoryboardOutput {
   narrativeBeats: string[];
   /** 从串联文本节点继承的项目级硬约束，供后续 Prompt 节点继续读取。 */
   projectConstraints?: string[];
+  /** 场景空间底图与初始站位；按 sceneRef 唯一。 */
+  sceneSpatialMaps?: StoryboardSceneSpatialMap[];
 }
 
 export type TextNodeSemanticRole =
@@ -452,6 +513,14 @@ export type StudioNodeData = {
   imageAssetMimeType?: string;
   imageMimeType?: string;
   imageFileName?: string;
+  /** 用户可编辑的语义素材名；用于与同名文本节点对标，不修改原始文件名。 */
+  imageReferenceName?: string;
+  /** 图片在分镜 / Prompt 中的职责，站位图与角色、场景、道具、色表分开处理。 */
+  imageReferenceKind?: 'auto' | 'character' | 'scene' | 'prop' | 'blocking' | 'palette';
+  /** 显式对应的文本节点 / 场景 / 角色 / 道具名称；为空时从素材名称推断。 */
+  imageReferenceTarget?: string;
+  /** 图片约束作用范围。 */
+  imageReferenceScope?: 'current_input' | 'shot' | 'scene' | 'continuity';
   /** 图片节点当前预览图的原始像素尺寸，用于按导入比例渲染节点。 */
   imageWidth?: number;
   imageHeight?: number;

@@ -5,6 +5,7 @@ import {
   addStoryboardPanelCaptions,
   buildStoryboardGridPrompt,
   createStoryboardLayoutReference,
+  createStoryboardPageBridgeReference,
   generateStoryboardGridImage,
   measureStoryboardGridImage,
   paginateStoryboardGridSources,
@@ -655,17 +656,34 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
       let nativeSizeFallbackCount = 0;
       for (let pageIndex = 0; pageIndex < sourcePages.length; pageIndex += 1) {
         const pageSources = sourcePages[pageIndex];
+        const hasPreviousPageBridge = pageIndex > 0 && generatedPages[pageIndex - 1]?.imageDataUrl;
+        const pageBusinessReferenceLimit = hasPreviousPageBridge
+          ? Math.max(0, STORYBOARD_REFERENCE_MAX_IMAGES - 2)
+          : storyboardBusinessReferenceLimit;
         const pageReferences = selectStoryboardReferencesForShots(
           storyboardReferenceContext.references,
           pageSources.map((source) => source.shot),
-          storyboardBusinessReferenceLimit,
+          pageBusinessReferenceLimit,
         );
         const preparedReferences = await prepareStoryboardReferenceImages(
           pageReferences,
-          storyboardBusinessReferenceLimit,
+          pageBusinessReferenceLimit,
           abortController.signal,
         );
-        const referenceInstruction = buildStoryboardReferenceInstruction(pageReferences, 2);
+        const previousPageBridge = hasPreviousPageBridge
+          ? await createStoryboardPageBridgeReference(
+              generatedPages[pageIndex - 1].imageDataUrl,
+              generatedPages[pageIndex - 1].panelCount,
+              selectedStoryboardAspectRatio,
+            )
+          : null;
+        const bridgeReferenceIndex = previousPageBridge ? preparedReferences.length + 2 : null;
+        const referenceInstruction = [
+          buildStoryboardReferenceInstruction(pageReferences, 2),
+          bridgeReferenceIndex
+            ? `参考图 ${bridgeReferenceIndex} 是上一页最后一格的连续性桥接参考：本页第一格必须继承其中人物站位、画面左右、朝向、服装、道具持有状态、场景方位与主光方向；只有分镜 continuity 明确记录变化时才允许改变。`
+            : '',
+        ].filter(Boolean).join('\n');
         const panelReferenceInstructions = pageSources.map((source) =>
           buildStoryboardPanelReferenceInstruction(source.shot, pageReferences, 2),
         );
@@ -695,6 +713,7 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
           selectedStoryboardAspectRatio,
         );
         const requestReferences = [layoutReference, ...preparedReferences];
+        if (previousPageBridge) requestReferences.push(previousPageBridge);
         patchNodeData(id, { imageGenerationPhase: 'requesting_model' }, false);
         let rawResult;
         let usedFallbackSize = false;
@@ -749,10 +768,10 @@ function AiFilmmakingNodeInner({ id, data, selected }: NodeProps<FilmRF>) {
           size: result.size,
           width: result.width,
           height: result.height,
-          referenceImageCount: preparedReferences.length,
+          referenceImageCount: preparedReferences.length + (previousPageBridge ? 1 : 0),
           referenceLabels: pageReferences.map((reference) =>
             `${reference.kind === 'character' ? '角色' : reference.kind === 'scene' ? '场景' : '道具'}:${reference.entityName || reference.name}`,
-          ),
+          ).concat(previousPageBridge ? ['连续性:上一页最后一格'] : []),
           frameGenerationMode: 'merged',
           nativeFrameFallbackCount: usedFallbackSize ? 1 : 0,
           panelCount: pageSources.length,

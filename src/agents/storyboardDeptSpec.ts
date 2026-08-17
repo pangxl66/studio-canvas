@@ -30,6 +30,7 @@ ${XUKE_STORYBOARD_METHOD_SUMMARY.map((line, idx) => `${idx + 1}. ${line}`).join(
 4. 分析空间结构：主空间类型、前中后层次、上中下高低差、出入口、盲区、遮挡物、危险源、可利用物。
 5. 分析人物功能：冲入者、阻拦者、诱导者、观察者、暗中现身者、逆转者、围困者、逃逸者等。
 6. 先提炼 3 到 5 个英雄画面，再让镜头围绕这些节点展开。
+7. 建立连续性账本：先为每个 sceneRef 建立唯一的空间底图，再逐镜记录“上一镜结束状态 → 本镜起始状态 → 本镜结束状态”。不得只凭镜头文字重新猜测人物站位。
 
 【镜头设计要求】
 1. 每个镜头只完成一个剧情任务，镜头顺序必须服务势能推进：蓄势 -> 转势 -> 爆发 -> 收束。
@@ -48,6 +49,17 @@ ${XUKE_STORYBOARD_METHOD_SUMMARY.map((line, idx) => `${idx + 1}. ${line}`).join(
 9. 烟、雾、蒸汽、尘埃、雨雪、水面、布料、机械、火花与反射必须遵守来源、气流、重力、惯性、遮挡、碰撞和衰减。没有来源就不生成；真空环境禁止空气烟雾扩散。
 10. 固定灯具默认稳定。只有故障、报警、断电、冲击、设备启动、旋转灯、火焰或移动遮挡等明确触发，才允许闪烁、扫动、熄灭或亮起；note 必须写明“触发原因 → 变化过程 → 落幅状态”。禁止无依据随机闪灯。
 11. 环境动态必须分级：一个与剧情或镜头任务直接相关的主反应、少量次级背景运动，其余静态继承。禁止为了“电影感”让烟、灯、机械、火花和布料同时抢动。
+12. 连续镜头必须分别记录世界位置与银幕位置。worldPosition 写物理锚点（例如“舱门内侧”），screenPosition 写画左/画中/画右；二者不得混用。人物跨越动作轴、左右关系互换、道具换手或位置跳变，必须由动作过程解释，或明确标记 intentionalBreak 与原因。
+13. 输入中的“素材语义 / 命名对标”必须执行：同名文本节点决定身份、剧情、动作与关系，同名图片仅承担其声明的角色、场景、道具、站位或色表职责。禁止把一张角色图的外观串用给其他角色，也禁止把道具图、站位图中的非职责信息带入镜头。
+14. “场景角色站位图”是连续性和调度依据：提取相对位置、前中后景、朝向、视线、动作轴、屏幕方向、出入口和移动路线，并写入 sceneSpatialMaps 与 continuity。文本与站位图冲突时以文本为准，在 note 标记“站位图冲突”，不得静默改写剧情。
+
+【连续性账本协议】
+- 根节点必须输出 sceneSpatialMaps。每个 sceneRef 只对应一张空间底图，至少包含 anchors、actionAxis、defaultCameraSide 和 initialState。
+- 每个 shot 必须输出 continuity.startState 与 continuity.endState。除场景首镜外，inheritsFromShotId 必须指向同场上一镜，startState 必须精确承接上一镜 endState。
+- startState/endState.characters 中每个可见主体至少填写 name、worldPosition、screenPosition、depth、facing、gazeTarget、movementDirection、posture、heldProps；不可见主体可以省略，但不得凭空换位。
+- cameraSide 和 actionAxis 用于守住 180 度轴线；若有意越轴，transition 使用 intentional_axis_cross，并填写 intentionalBreak=true 与 breakReason。
+- transition 可使用 continuous、match_on_action、establishing、neutral_reset、intentional_axis_cross、time_jump。动作匹配剪辑必须把同一动作的前后阶段分别写入两镜边界。
+- endState 是下游 Prompt 与影视分镜图的唯一衔接依据；description 负责本镜画面，不得用模糊措辞覆盖结构化状态。
 
 【镜头对象协议】
 员工输出主体必须是“镜头对象”数组。每个镜头对象必须包含以下固定键名：
@@ -64,6 +76,11 @@ ${XUKE_STORYBOARD_METHOD_SUMMARY.map((line, idx) => `${idx + 1}. ${line}`).join(
 - note: string，写明镜头意图、势能节点、英雄画面属性、环境参与方式或执行备注
 - mergedMembers: StoryboardShot[]，仅在确实需要输出同场连续镜头组合时使用
 
+必填连续性键：
+- continuity: { inheritsFromShotId?, startState, endState, transition, intentionalBreak?, breakReason? }
+- startState/endState: { characters, cameraSide, actionAxis, actionPhase, propState, environmentState }
+- characters 元素: { name, worldPosition, screenPosition, depth, facing, gazeTarget, movementDirection, posture, heldProps }
+
 【同场合并约定】
 - 常规情况优先输出细分镜头，不要过度合并。
 - 只有当同一 sceneRef 下的连续镜头明确构成 15 秒内的同场连续表演段落时，才允许 mergedMembers。
@@ -79,7 +96,7 @@ ${XUKE_STORYBOARD_METHOD_SUMMARY.map((line, idx) => `${idx + 1}. ${line}`).join(
 【输出约束】
 - 只输出合法 JSON；禁止 markdown 代码围栏；禁止任何解释性前后文。
 - 因 OpenAI json_object 等模式要求根节点为对象，请优先输出：
-  { "shots": [ { "id", "type", "movement", "description", "content", ... }, ... ], "narrativeBeats": [...], "projectConstraints": [...] }
+  { "shots": [ { "id", "type", "movement", "description", "content", "continuity", ... }, ... ], "sceneSpatialMaps": [...], "narrativeBeats": [...], "projectConstraints": [...] }
 - 若原文细节不足，可做合理推定，但要把推定内容落在 note 或 narrativeBeats 中，而不是偷换成空泛描述。`;
 
 export const STORYBOARD_DEPT_OUTPUT_SHAPE = `{
@@ -92,6 +109,32 @@ export const STORYBOARD_DEPT_OUTPUT_SHAPE = `{
     "爆发：……",
     "收束：……"
   ],
+  "sceneSpatialMaps": [
+    {
+      "sceneRef": "ep_01-S1",
+      "sceneLabel": "山寺回廊",
+      "anchors": ["回廊入口", "栏杆内侧", "下层楼梯", "帘幕后方"],
+      "actionAxis": "回廊入口 → 下层楼梯",
+      "defaultCameraSide": "动作轴南侧",
+      "initialState": {
+        "cameraSide": "动作轴南侧",
+        "actionAxis": "回廊入口 → 下层楼梯",
+        "characters": [
+          {
+            "name": "主角",
+            "worldPosition": "栏杆内侧",
+            "screenPosition": "画中偏左",
+            "depth": "中景",
+            "facing": "下层楼梯",
+            "gazeTarget": "追兵",
+            "movementDirection": "向栏杆后撤",
+            "posture": "重心后移",
+            "heldProps": []
+          }
+        ]
+      }
+    }
+  ],
   "shots": [
     {
       "id": 1,
@@ -103,6 +146,45 @@ export const STORYBOARD_DEPT_OUTPUT_SHAPE = `{
       "action": "主角贴着栏杆后撤，追兵沿楼梯压下。",
       "durationSec": 4,
       "note": "蓄势段；主机制为围猎；环境参与为楼梯、栏杆、帘幕；这是建立高低压迫的英雄画面。 ",
+      "continuity": {
+        "transition": "establishing",
+        "startState": {
+          "cameraSide": "动作轴南侧",
+          "actionAxis": "回廊入口 → 下层楼梯",
+          "actionPhase": "追兵尚未完全现身",
+          "characters": [
+            {
+              "name": "主角",
+              "worldPosition": "栏杆内侧",
+              "screenPosition": "画中偏左",
+              "depth": "中景",
+              "facing": "下层楼梯",
+              "gazeTarget": "追兵",
+              "movementDirection": "向栏杆后撤",
+              "posture": "重心后移",
+              "heldProps": []
+            }
+          ]
+        },
+        "endState": {
+          "cameraSide": "动作轴南侧",
+          "actionAxis": "回廊入口 → 下层楼梯",
+          "actionPhase": "追兵沿楼梯压近，主角退至栏杆",
+          "characters": [
+            {
+              "name": "主角",
+              "worldPosition": "栏杆边缘",
+              "screenPosition": "画左",
+              "depth": "中景",
+              "facing": "下层楼梯",
+              "gazeTarget": "追兵",
+              "movementDirection": "停止后撤",
+              "posture": "背贴栏杆",
+              "heldProps": []
+            }
+          ]
+        }
+      },
       "mergedMembers": []
     }
   ]

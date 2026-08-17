@@ -1,18 +1,4 @@
 import { getResolvedLlmGatewayConfig } from '@/config/llmSettings';
-import {
-  PROMPT_ADAPTIVE_RULE,
-  PROMPT_CARD_HEADER_RULE,
-  PROMPT_CARD_SECTION_HEADINGS,
-  PROMPT_COPY_CHAR_LIMIT_RULE,
-  PROMPT_FIELD_TYPE_RULE,
-  PROMPT_FORBIDDEN_RULE,
-  PROMPT_LITE_RULE,
-  PROMPT_LOCAL_COMPRESSION_RULE,
-  PROMPT_MOUNT_TOKEN_RULE,
-  PROMPT_NOISE_FILTER_RULE,
-  PROMPT_STRUCTURE_RULE,
-  PROMPT_TIMING_SYSTEM_RULE,
-} from '@/agents/promptDeptSpec';
 import { mergedUpstreamForPromptReviewNode } from '@/services/graphInput';
 import type { PromptReviewHistoryEntry, StudioNodeData } from '@/types/studio';
 import type { StudioState } from '../useStudioStore';
@@ -105,105 +91,24 @@ function appendPromptReviewHistory(
 
 function buildPromptReviewSystemPrompt(): string {
   return [
-    '你是提示词审核节点的 LLM 优化器。',
-    '你的任务不是自由润色，而是按 Prompt 节点同一套 seedanceCard 规范修订输入正文。',
-    '只输出修订后的完整提示词正文；不要输出 JSON、Markdown 代码块、审核报告、说明文字或“无需修改”。',
-    '必须保留原有镜头数量、分镜编号、卡片顺序和字段结构；不得擅自合并、拆分或删除镜头。',
-    '可以修正文案密度、字段归类、镜头调度、灯光、构图、连续性、时长规划和禁用参数，但不得改坏原镜头语义。',
-    '',
-    '【共享 Prompt 节点规范】',
-    PROMPT_CARD_HEADER_RULE,
-    PROMPT_MOUNT_TOKEN_RULE,
-    PROMPT_COPY_CHAR_LIMIT_RULE,
-    PROMPT_FORBIDDEN_RULE,
-    PROMPT_ADAPTIVE_RULE,
-    PROMPT_STRUCTURE_RULE,
-    PROMPT_FIELD_TYPE_RULE,
-    PROMPT_NOISE_FILTER_RULE,
-    PROMPT_LITE_RULE,
-    PROMPT_LOCAL_COMPRESSION_RULE,
-    PROMPT_TIMING_SYSTEM_RULE,
-    `固定字段顺序必须完整保留：${PROMPT_CARD_SECTION_HEADINGS.join('、')}。`,
-    '构图锚点必须包含前景、中景、后景和焦点落点。',
-    '灯光布置与基调必须写清光源、明暗关系、层次分配和灯光任务。',
-    '连续性约束必须使用“必须 / 不能 / 先 / 再 / 最后 / 始终保持”这类硬约束语气。',
-    '摄影机动态参数必须包含主镜参数、关键节点参数、动态策略；如果涉及多段镜头，只在本模块写总时长和每段时长分配。',
-    '镜头参数必须说明焦段、景深和焦点职责。',
-    '插针 / 甩拍 / 慢镜头必须明确“有/无”以及使用瞬间。',
-    '表演建议必须写成可执行的最小变化链；无人物镜头不得硬写眼神或表情。',
-    '钉子4行必须严格四行，每行一句最高指令。',
+    '你是直接编辑当前内容的 GPT 助手。',
+    '只依据本轮用户消息中提供的“调整指令”和“当前内容”完成工作。',
+    '不得加载、推断或套用任何外部 Skill、项目默认规范、提示词模板、审核规则、旧版本要求或隐藏格式约束。',
+    '用户的调整指令是本轮唯一修改依据；没有被要求修改的内容尽量原样保留。',
+    '只输出调整后的完整正文，不要输出解释、审核报告、修改清单、JSON 或 Markdown 代码块。',
   ].join('\n');
 }
 
 function buildPromptReviewUserPrompt(task: string, sourceText: string): string {
   return [
-    `调整要求：${task}`,
+    '【调整指令】',
+    task,
     '',
-    '请按上述 Prompt 节点规范修订下面正文。重点检查：字段是否完整、挂载是否为 |@=实体| token、灯光是否可执行、构图是否有前中后景、时长是否按内容估算且只在摄影机动态参数里分配、是否明确禁止背景音乐/字幕/UI。',
-    '',
-    '待调整提示词正文：',
-    sourceText,
-  ].join('\n');
-}
-
-function buildPromptReviewRepairUserPrompt(
-  task: string,
-  sourceText: string,
-  draftText: string,
-  failureReason: string,
-): string {
-  return [
-    `上一轮调整结果仍不符合 Prompt 节点规范：${failureReason}`,
-    '',
-    `原始调整要求：${task}`,
-    '',
-    '请基于原文和上一轮结果，重新输出一版合格的完整提示词正文。',
-    '必须补齐缺失字段，修正挂载 token、禁用参数、灯光、构图、连续性和时长规则；不要输出解释。',
-    '',
-    '原始提示词正文：',
+    '【当前内容】',
     sourceText,
     '',
-    '上一轮不合格结果：',
-    draftText,
+    '严格按本轮调整指令处理当前内容，不要引用或补入本消息之外的规范。只返回调整后的完整正文。',
   ].join('\n');
-}
-
-function looksLikePromptCard(text: string): boolean {
-  const headingHits = PROMPT_CARD_SECTION_HEADINGS.filter((heading) => text.includes(heading)).length;
-  return /【分镜/.test(text) || headingHits >= 6;
-}
-
-function validatePromptReviewText(text: string, sourceText: string): string | null {
-  if (!looksLikePromptCard(sourceText) && !looksLikePromptCard(text)) return null;
-
-  if (!/^【分镜[^】]*\d+(?:\.\d+)?\s*秒[^】]*】/m.test(text)) {
-    return '缺少带真实秒数的结构化分镜标题。';
-  }
-
-  const missing = PROMPT_CARD_SECTION_HEADINGS.filter((heading) => !text.includes(heading));
-  if (missing.length > 0) {
-    return `缺少固定字段：${missing.join('、')}。`;
-  }
-
-  const mountLine =
-    text.match(/(?:^|\n)挂载\s*\n([^\n]+)/)?.[1] ??
-    text.match(/(?:^|\n)挂载[:：]\s*([^\n]+)/)?.[1] ??
-    '';
-  if (mountLine && !/\|@=/.test(mountLine)) {
-    return '挂载字段没有使用 |@=实体| token 格式。';
-  }
-
-  if (!/(禁止背景音乐|禁背景音乐|background music|bgm)/i.test(text)) {
-    return '缺少禁止背景音乐 / BGM 参数。';
-  }
-  if (!/(禁止字幕|禁字幕|subtitle|subtitles|text overlay)/i.test(text)) {
-    return '缺少禁止字幕 / text overlay 参数。';
-  }
-  if (!/(禁止\s*UI|禁\s*UI|ui|hud|interface overlay)/i.test(text)) {
-    return '缺少禁止 UI / HUD 参数。';
-  }
-
-  return null;
 }
 
 export function createPromptReviewStoreSlice(
@@ -315,9 +220,11 @@ export function createPromptReviewStoreSlice(
         });
         return;
       }
-      const task =
-        instruction?.trim() ||
-        '请审核并优化这份视频生成提示词，必须遵循 Prompt 节点的完整字段规范，只修正不清晰、不连贯或不符合视频生成执行性的表达。';
+      const task = instruction?.trim() ?? '';
+      if (!task) {
+        get().pushMessage({ role: 'system', text: '请先输入本轮要让 GPT 完成的调整指令。', nodeId });
+        return;
+      }
       deps.activeTaskAbortControllers.get(nodeId)?.abort();
       const controller = new AbortController();
       deps.activeTaskAbortControllers.set(nodeId, controller);
@@ -327,11 +234,11 @@ export function createPromptReviewStoreSlice(
         {
           status: 'IN_PROGRESS',
           generation_error: undefined,
-          streaming_preview: 'LLM 正在审核并调整提示词...',
+          streaming_preview: 'GPT 正在按照本轮指令直接调整当前内容...',
         },
         true,
       );
-      get().pushMessage({ role: 'broadcast', text: '提示词审核节点正在调用 LLM 调整内容。', nodeId });
+      get().pushMessage({ role: 'broadcast', text: '提示词审核节点正在进行自由对话调整。', nodeId });
       try {
         const { requestLLM, requestLLMStream } = await import('@/services/ModelGateway');
         const systemPrompt = buildPromptReviewSystemPrompt();
@@ -339,9 +246,9 @@ export function createPromptReviewStoreSlice(
         const requestParams = {
           systemPrompt,
           userPrompt,
-          temperature: 0.25,
+          temperature: 0.3,
           jsonMode: false,
-          maxOutputTokens: 3500,
+          maxOutputTokens: 8000,
           signal: controller.signal,
         };
         const result = await requestLLMStream(config, {
@@ -402,7 +309,7 @@ export function createPromptReviewStoreSlice(
           get().pushMessage({ role: 'system', text: deps.stopTaskMessage, nodeId });
           return;
         }
-        let revised = stripPromptReviewLlmWrapper(finalResult.content);
+        const revised = stripPromptReviewLlmWrapper(finalResult.content);
         if (!revised) {
           get().patchNodeData(
             nodeId,
@@ -414,63 +321,6 @@ export function createPromptReviewStoreSlice(
             true,
           );
           get().pushMessage({ role: 'system', text: '模型没有返回可写入的提示词正文。', nodeId });
-          return;
-        }
-
-        let specFailure = validatePromptReviewText(revised, sourceText);
-        if (specFailure && !controller.signal.aborted) {
-          let repairRequestFailure: string | null = null;
-          get().patchNodeData(
-            nodeId,
-            {
-              streaming_preview: `LLM 初稿未完全符合提示词规范，正在自动修复：${specFailure}`,
-            },
-            false,
-          );
-          const repairResult = await requestLLM(config, {
-            ...requestParams,
-            userPrompt: buildPromptReviewRepairUserPrompt(task, sourceText, revised, specFailure),
-            temperature: 0.15,
-          });
-          if (repairResult.ok) {
-            const repaired = stripPromptReviewLlmWrapper(repairResult.content);
-            if (repaired) revised = repaired;
-          } else if (repairResult.error.code === 'USER_ABORT') {
-            get().patchNodeData(
-              nodeId,
-              {
-                status: 'APPROVED',
-                generation_error: undefined,
-                streaming_preview: undefined,
-              },
-              true,
-            );
-            get().pushMessage({ role: 'system', text: deps.stopTaskMessage, nodeId });
-            return;
-          } else {
-            repairRequestFailure = repairResult.error.message;
-          }
-          const repairedSpecFailure = validatePromptReviewText(revised, sourceText);
-          specFailure = repairRequestFailure
-            ? `${repairedSpecFailure ?? specFailure} 自动修复失败：${repairRequestFailure}`
-            : repairedSpecFailure;
-        }
-
-        if (specFailure) {
-          get().patchNodeData(
-            nodeId,
-            {
-              status: 'APPROVED',
-              generation_error: `LLM 调整结果未通过提示词规范：${specFailure}`,
-              streaming_preview: undefined,
-            },
-            true,
-          );
-          get().pushMessage({
-            role: 'system',
-            text: `LLM 调整结果未通过提示词规范，已保留原稿：${specFailure}`,
-            nodeId,
-          });
           return;
         }
 
@@ -491,7 +341,7 @@ export function createPromptReviewStoreSlice(
           },
           true,
         );
-        get().pushMessage({ role: 'broadcast', text: '提示词审核节点已完成 LLM 调整。', nodeId });
+        get().pushMessage({ role: 'broadcast', text: 'GPT 已按照本轮指令完成当前内容调整。', nodeId });
       } finally {
         if (deps.activeTaskAbortControllers.get(nodeId) === controller) {
           deps.activeTaskAbortControllers.delete(nodeId);

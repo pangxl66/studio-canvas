@@ -25,6 +25,7 @@ let buildMagnetConnection;
 let isStudioConnectionAllowed;
 let connectionMenuPicksForPicker;
 let makeShotListItemOutputHandleId;
+let mergedTextInputForDepartment;
 
 function sampleOutput(prefix = '初始', count = 2) {
   return {
@@ -110,6 +111,9 @@ before(async () => {
   ({ makeShotListItemOutputHandleId } = await vite.ssrLoadModule(
     '/src/utils/shotListWire.ts',
   ));
+  ({ mergedTextInputForDepartment } = await vite.ssrLoadModule(
+    '/src/services/graphInput.ts',
+  ));
 });
 
 beforeEach(() => {
@@ -138,6 +142,68 @@ test('real store reuses one storyboard table instead of creating duplicate child
   );
   assert.equal(childNodes.length, 1);
   assert.equal(relationEdges.length, 1);
+});
+
+test('Prompt graph input routes ordinary images to scene recognition and palettes to color analysis', () => {
+  const promptNode = {
+    id: 'prompt-1',
+    type: 'department',
+    position: { x: 0, y: 0 },
+    data: { id: 'prompt-1', type: 'prompt', status: 'NOT_STARTED', input: '', output: null },
+  };
+  const sceneImage = {
+    id: 'scene-image',
+    type: 'imageNode',
+    position: { x: 0, y: 0 },
+    data: {
+      id: 'scene-image',
+      type: 'image_node',
+      status: 'APPROVED',
+      imageNodeMode: 'asset',
+      imageDataUrl: 'data:image/png;base64,AA==',
+      imageFileName: '地下船坞.png',
+      imageAnalysisSummary: '地下船坞，舱门位于画面右侧，地面有低位蒸汽。',
+    },
+  };
+  const paletteImage = {
+    id: 'palette-image',
+    type: 'imageNode',
+    position: { x: 0, y: 0 },
+    data: {
+      id: 'palette-image',
+      type: 'image_node',
+      status: 'APPROVED',
+      imageNodeMode: 'palette',
+      imageDataUrl: 'data:image/png;base64,AA==',
+      imageFileName: '地下船坞色表.png',
+      imageColorAnalysisSummary: '冷蓝主色，琥珀色点光。',
+    },
+  };
+  const makeEdge = (source) => ({
+    id: `${source}-prompt`,
+    source,
+    sourceHandle: 'out',
+    target: 'prompt-1',
+    targetHandle: 'in',
+  });
+
+  const sceneInput = mergedTextInputForDepartment(
+    'prompt-1',
+    [promptNode, sceneImage],
+    [makeEdge('scene-image')],
+  );
+  assert.match(sceneInput, /【Prompt 视觉场景参考图 1】/);
+  assert.match(sceneInput, /舱门位于画面右侧/);
+  assert.doesNotMatch(sceneInput, /【色彩表参考图/);
+
+  const paletteInput = mergedTextInputForDepartment(
+    'prompt-1',
+    [promptNode, paletteImage],
+    [makeEdge('palette-image')],
+  );
+  assert.match(paletteInput, /【色彩表参考图 1】/);
+  assert.match(paletteInput, /冷蓝主色/);
+  assert.doesNotMatch(paletteInput, /【Prompt 视觉场景参考图/);
 });
 
 test('real store restores the structural storyboard-to-table edge after it is removed', () => {

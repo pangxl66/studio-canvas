@@ -1,6 +1,10 @@
 import { getResolvedVisionLlmGatewayConfig } from '@/config/llmSettings';
+import {
+  IMAGE_REFERENCE_KIND_LABEL,
+  type ImageReferenceKind,
+} from '@/utils/imageReferenceNaming';
 
-export const IMAGE_REFERENCE_ANALYSIS_VERSION = 2;
+export const IMAGE_REFERENCE_ANALYSIS_VERSION = 3;
 
 function stripWrapper(raw: string): string {
   let text = raw.replace(/^\uFEFF/, '').trim();
@@ -25,8 +29,26 @@ function buildImageReferenceSystemPrompt(): string {
   ].join('\n');
 }
 
-function buildImageReferenceUserPrompt(): string {
+function buildImageReferenceUserPrompt(params: {
+  referenceName?: string;
+  referenceKind?: ImageReferenceKind;
+  referenceTarget?: string;
+}): string {
+  const kind = params.referenceKind ?? 'auto';
+  const metadata = [
+    params.referenceName?.trim() ? `用户将该素材命名为“${params.referenceName.trim()}”。` : '',
+    `素材用途为“${IMAGE_REFERENCE_KIND_LABEL[kind]}”。`,
+    params.referenceTarget?.trim() ? `用户指定其对应“${params.referenceTarget.trim()}”。` : '',
+  ].filter(Boolean);
+  const blockingRules = kind === 'blocking'
+    ? [
+        '这是场景角色站位图。优先识别角色相对位置、前中后景、左右关系、朝向与视线、摄影轴线、屏幕运动方向、出入口、移动路线和可延续到下一镜的落幅状态。',
+        '如果画面是示意图、俯视图或带文字标注的布局图，只把它当作调度和连续性依据；不得把简化造型、标注文字、示意颜色误当成角色外观、真实场景美术或灯光设计。',
+      ]
+    : [];
   return [
+    ...metadata,
+    ...blockingRules,
     '请分析这张图片，生成一段 220-360 字的影视场景说明。',
     '说明要能被文本润色节点直接引用，用来把用户输入的动作/情绪扩写成更贴合图片的描述。',
     '正文中必须包含三个紧凑标签：“持续动态：”“情节触发：”“静态锁定：”。',
@@ -38,6 +60,9 @@ function buildImageReferenceUserPrompt(): string {
 
 export async function analyzeImageReference(params: {
   imageDataUrl: string;
+  referenceName?: string;
+  referenceKind?: ImageReferenceKind;
+  referenceTarget?: string;
   signal?: AbortSignal;
 }): Promise<string> {
   const gateway = getResolvedVisionLlmGatewayConfig();
@@ -52,7 +77,7 @@ export async function analyzeImageReference(params: {
     imageDataUrl: params.imageDataUrl,
     imageDetail: 'auto',
     systemPrompt: buildImageReferenceSystemPrompt(),
-    userPrompt: buildImageReferenceUserPrompt(),
+    userPrompt: buildImageReferenceUserPrompt(params),
     temperature: 0.16,
     jsonMode: false,
     feature: 'image-text-polish',

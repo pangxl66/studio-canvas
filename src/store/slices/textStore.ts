@@ -25,6 +25,7 @@ import {
 import type { StudioRFNode } from '@/types/reactFlow';
 import type { TextImageTaskMode } from '@/types/studio';
 import type { StudioState } from '../useStudioStore';
+import { resolveImageReferenceName } from '@/utils/imageReferenceNaming';
 
 type StudioSet = (
   partial:
@@ -81,7 +82,7 @@ function connectedImageReferences(textId: string, nodes: StudioRFNode[], edges: 
     .filter((node) => node.type === 'imageNode' && node.data.type === 'image_node')
     .map((node) => ({
       nodeId: node.id,
-      label: node.data.label?.trim() || '图片节点',
+      label: resolveImageReferenceName(node.data, '图片节点'),
       fileName: node.data.imageFileName?.trim() || '',
       imageDataUrl: node.data.imageDataUrl,
       summary: node.data.imageAnalysisSummary?.trim() || undefined,

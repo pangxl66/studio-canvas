@@ -30,6 +30,7 @@ import {
   TEXT_NODE_OUTPUT_HANDLE_ID,
 } from '@/utils/textNodeHandles';
 import { recoverInterruptedTextPolish } from '@/services/textPolishLifecycle';
+import { resolveImageReferenceName } from '@/utils/imageReferenceNaming';
 import {
   STORYBOARD_TEXT_NORMALIZER_SKILL_NAME,
   STORYBOARD_TEXT_NORMALIZER_SKILL_VERSION,
@@ -81,7 +82,7 @@ function TextNodeInner({ id, data, selected }: NodeProps<TextRF>) {
       .map((node) => ({
         id: node.id,
         kind: 'image' as const,
-        label: node.data.imageFileName?.trim() || node.data.label?.trim() || '图片参考',
+        label: resolveImageReferenceName(node.data, '图片参考'),
         src: node.data.imageDataUrl,
       }));
   }, [edges, id, nodes]);

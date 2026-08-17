@@ -420,6 +420,14 @@ export function mergeStoryboardShotSlice(shots: StoryboardShot[]): StoryboardSho
     action: action || undefined,
     durationSec: estimateMergedShotDurationSec(slice),
     note: note || undefined,
+    continuity: first.continuity && slice[slice.length - 1]?.continuity
+      ? {
+          ...first.continuity,
+          endState: slice[slice.length - 1].continuity!.endState,
+          transition: first.continuity.transition ?? 'continuous',
+          inferred: slice.some((shot) => shot.continuity?.inferred === true),
+        }
+      : first.continuity,
     mergedMembers: members,
   };
 }
